@@ -18,12 +18,20 @@ layout this harness assumes.
 
 ## What's covered
 
+8 feature files, each with exactly one scenario:
+
 - **`features/bootstrap.feature`** — a single work unit flowing through
   every bounded context: facility-layout's physical map, inventory-storage
   stock, workforce-management's committed shift plan (Kafka →
   wes-work-planning's labor-plan-view), wes-work-planning's release (Kafka →
   fulfillment-execution's task creation), and fulfillment-execution's task
   completion (Kafka → wes-work-planning's completion read model).
+- **`features/facility_layout_propagation.feature`** — proves
+  facility-layout's warehouse-map events (zone hazmat/temperature
+  attributes, newly-registered and decommissioned slots) reach
+  inventory-storage's local placement-rules read model purely over Kafka,
+  picked up live without a restart — the only proof these two contexts
+  actually agree over the wire.
 - **`features/flow_balance_exception.feature`** (T5) — proves
   `warehouse-ops-agent`, the agentic read-side decision-support layer, end
   -to-end against the real MCP servers of all five contexts: three
@@ -33,6 +41,11 @@ layout this harness assumes.
   the expected `FlowBalanceException` (E1) — a ranked recommendation with a
   full evidence trail — and surface the same exception in its daily brief
   (E3).
+- **`features/labor_performance.feature`** — proves labor-performance's
+  PURE Kafka consumption of fulfillment-execution's `TaskCompleted` event
+  (no REST endpoint any caller writes to): an associate checked into a
+  station completes a task against an active engineered standard, and
+  labor-performance eventually reports a scorecard reflecting it.
 - **`features/order_management_choreographed_release.feature`** — proves
   order-management's choreographed-release redesign end-to-end: placing an
   order (`POST /orders`) with `allowPartialShipment=false` and lines that
@@ -48,6 +61,26 @@ layout this harness assumes.
   `DELETE /orders/{id}`, `GET /healthz`) — there is no `/allocate` or
   `/release` endpoint anymore; release happens implicitly, choreographed
   over Kafka.
+- **`features/process_path_management.feature`** — exercises
+  process-path-management's full REST lifecycle (define, get, list,
+  revise, deactivate) directly plus its Kafka publisher
+  (`ProcessPathCreated`/`Updated`/`Deactivated`) — the only proof this
+  context's write side and event contract both work against a real,
+  independently running process and a real broker.
+- **`features/promise_repromise_loop.feature`** — the closing proof of
+  the "promise derived from fulfillment capability" initiative (ADR 0014,
+  all sections): a missed CPT flows through three bounded contexts and
+  three Kafka topics — order-management's original promise, fulfillment-
+  execution's CPT-miss sweep publishing `TaskCPTMissed`, and
+  order-management's `RepromiseConsumer` (ADR 0018) re-running its promise
+  policy and publishing `OrderRepromised` — with zero manual intervention.
+- **`features/soak_backlog_ramp.feature`** (`@soak`, excluded from the
+  default run) — ramps injected backlog into both the PICK and PACK
+  process paths over a sustained, configurable duration while a pool of
+  picker/packer stations continuously claims and completes the resulting
+  tasks, proving the estate stays up and keeps processing under sustained
+  load rather than a single deterministic unit of work; see "Sustained
+  backlog-ramp soak" below for details.
 
 ## Running locally
 
