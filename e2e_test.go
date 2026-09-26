@@ -99,6 +99,13 @@ type world struct {
 	claimedTaskID string
 	orderID       string
 
+	// capturedPromiseDate holds order-management's promiseDate string
+	// (RFC3339, exactly as GET /orders/{id} returns it) captured right
+	// after allocation by captureOrderPromiseDate, so a later step
+	// (orderPromiseDateEventuallyChanges) can prove the missed-CPT
+	// re-promise loop (ADR 0014 §5 / ADR 0018) genuinely moved it.
+	capturedPromiseDate string
+
 	// disposableSlot is the run-scoped LocationCode that
 	// facility_layout_propagation.feature registers and then
 	// decommissions. Resolved lazily from the "<disposable>" token (see
@@ -552,6 +559,37 @@ func (w *world) releaseWorkFor(pathID string) error {
 	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/paths/%s/release", wesBaseURL, pathID), nil))
 }
 
+// releaseWorkEventuallyReleasesOrderLine is releaseWorkFor targeted at the
+// order line currently held on w, looping (like claimNextTaskForOrder
+// does on fulfillment-execution's claim-next) until the release actually
+// hands out THIS scenario's own work unit rather than an older leftover
+// still pending in the SAME shared "pick" pool (order-management's v1
+// lines always default to shared.DefaultPathId — see
+// wesEventuallyEnqueuesWorkUnitForOrderLine's doc comment — so this
+// scenario's work unit sits in the exact same pool
+// order_management_choreographed_release.feature's own scenario enqueues
+// into but never releases, per this file's documented shared-queue
+// discipline). Releasing an unwanted leftover is harmless — it just
+// becomes released early, same as leaving a claimed task's lease to
+// expire on its own elsewhere in this file — so this keeps calling
+// release, earliest-CPT-first, until it reaches this scenario's own entry.
+func (w *world) releaseWorkEventuallyReleasesOrderLine(pathID string, lineNo int) error {
+	wantWorkUnitID, err := w.deriveOrderLineWorkUnitID(lineNo)
+	if err != nil {
+		return err
+	}
+	return eventually(func() error {
+		if err := w.releaseWorkFor(pathID); err != nil {
+			return err
+		}
+		got := w.last.json()
+		if got["id"] != wantWorkUnitID {
+			return fmt.Errorf("released another scenario's work unit %v, still waiting for %q", got["id"], wantWorkUnitID)
+		}
+		return nil
+	})
+}
+
 func (w *world) releasedWorkUnitIs(id string) error {
 	id = w.rs(id)
 	got := w.last.json()
@@ -794,6 +832,99 @@ func (w *world) claimedTaskLeaseForcedExpired() error {
 	}
 	if n, _ := tag.RowsAffected(); n == 0 {
 		return fmt.Errorf("no CLAIMED task with id %q found to force-expire", w.claimedTaskID)
+	}
+	return nil
+}
+
+// deriveOrderLineWorkUnitID returns the deterministic work-unit id order-
+// management's own frozen "{orderId}-line-{lineNo}" formula produces for
+// the order currently held on w.orderID (the SAME derivation
+// wesEventuallyEnqueuesWorkUnitForOrderLine already uses). WES's
+// EnqueueWorkUnit and fulfillment-execution's own WorkReleased consumer
+// (see that repo's internal/adapters/inbound/kafka/consumer.go
+// deriveTaskType/orderRef mapping) never rewrite this string — it flows
+// through as fulfillment-execution's task OrderRef verbatim — so this one
+// helper is enough to know which task belongs to this scenario's order
+// line without the feature file ever needing to know order-management's
+// real, dynamically-generated order id.
+func (w *world) deriveOrderLineWorkUnitID(lineNo int) (string, error) {
+	if w.orderID == "" {
+		return "", fmt.Errorf("no order has been placed yet this scenario")
+	}
+	return fmt.Sprintf("%s-line-%d", w.orderID, lineNo), nil
+}
+
+// fulfillmentEventuallyCreatesTaskForOrderLine is
+// fulfillmentEventuallyCreatesTaskFor targeted at the order currently held
+// on w, deriving the deterministic orderRef itself (see
+// deriveOrderLineWorkUnitID) rather than requiring the feature file to
+// spell out order-management's real order id.
+func (w *world) fulfillmentEventuallyCreatesTaskForOrderLine(lineNo int) error {
+	orderRef, err := w.deriveOrderLineWorkUnitID(lineNo)
+	if err != nil {
+		return err
+	}
+	return w.fulfillmentEventuallyCreatesTaskFor(orderRef)
+}
+
+// theTaskForOrderLineHasCPTForcedIntoThePast directly back-dates the
+// still-open task's cpt column (NOT lease_expiry) in fulfillment-
+// execution's own Postgres, looked up fresh by order_ref rather than by
+// w.claimedTaskID — this task never needs to be claimed for this
+// scenario's proof, only overdue. Mirrors claimedTaskLeaseForcedExpired's
+// exact style/error discipline (same db.Open pattern, same
+// fulfillmentDBURL/fulfillmentDBPassword constants, same
+// error-on-zero-rows-affected check), applied to a different column so
+// fulfillment-execution's Clock-driven sweep (POST /tasks/sweep-cpt-
+// misses, ADR-0025) sees the task as missed without waiting out
+// LeadTimePolicy's real (many-hour) lead time. "still open" is Pending or
+// Claimed (status != 'COMPLETED'), matching FE's own FindOpenPastCPT
+// definition exactly (see internal/adapters/outbound/postgres/task_repo.go).
+func (w *world) theTaskForOrderLineHasCPTForcedIntoThePast(lineNo int) error {
+	orderRef, err := w.deriveOrderLineWorkUnitID(lineNo)
+	if err != nil {
+		return err
+	}
+	db, err := dbOpen(fulfillmentDBURL, fulfillmentDBPassword)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	tag, err := db.ExecContext(context.Background(),
+		`UPDATE tasks SET cpt = $1 WHERE order_ref = $2 AND status != 'COMPLETED'`, past, orderRef)
+	if err != nil {
+		return err
+	}
+	if n, _ := tag.RowsAffected(); n == 0 {
+		return fmt.Errorf("no open (Pending/Claimed) task with order_ref %q found to back-date", orderRef)
+	}
+	return nil
+}
+
+// triggerFulfillmentCPTMissedSweep calls POST /tasks/sweep-cpt-misses (no
+// request body — see PostSweepCPTMisses), fulfillment-execution's
+// Clock-driven sweep (ADR-0025) that detects every still-open task whose
+// CPT is now in the past and publishes TaskCPTMissed for each via its own
+// transactional outbox (the outbox relay runs automatically in-process —
+// no separate trigger needed for the Kafka hop itself).
+func (w *world) triggerFulfillmentCPTMissedSweep() error {
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fulfillmentBaseURL+"/tasks/sweep-cpt-misses", nil))
+}
+
+// fulfillmentReportsAtLeastOneCPTMiss asserts the sweep's own response
+// ({"reported": N}) counted at least this scenario's task. It is
+// deliberately >= 1, not an exact count: "reported" is a shared,
+// process-wide counter another concurrent scenario's own overdue task
+// could also contribute to on the same sweep pass (this file's own
+// "never assert on an aggregate queue depth as a proxy" lesson, applied
+// analogously) — the strict per-task proof is the LATER promise-date
+// assertion, which can only move because of THIS scenario's own task.
+func (w *world) fulfillmentReportsAtLeastOneCPTMiss() error {
+	got := w.last.json()
+	reported, ok := toFloat(got["reported"])
+	if !ok || reported < 1 {
+		return fmt.Errorf("sweep reported = %v, want >= 1 (body: %s)", got["reported"], w.last.body)
 	}
 	return nil
 }
@@ -1044,6 +1175,74 @@ func (w *world) wesEventuallyEnqueuesWorkUnitForOrderLine(lineNo int, pathID str
 		depth, _ := toFloat(got["backlogDepth"])
 		if depth < 1 {
 			return fmt.Errorf("backlogDepth = %v, want >= 1 (work unit %q not yet enqueued; body=%s)", got["backlogDepth"], wantWorkUnitID, w.last.body)
+		}
+		return nil
+	})
+}
+
+// currentOrderPromiseDate GETs /orders/{id} for w.orderID and returns its
+// promiseDate string exactly as the wire carries it (RFC3339, omitempty —
+// see internal/adapters/inbound/http/dto.go's orderResponse and
+// server.go's timeFormat/toOrderResponse), erroring loudly if the field is
+// missing entirely: an order that was allocated via LeadTimePolicy always
+// has a promise date (LeadTimePolicy.PromiseDate never returns ok=false
+// for an allocated line), so an absent field here is a real setup bug
+// worth failing on, not a silent no-op.
+func (w *world) currentOrderPromiseDate() (string, error) {
+	if w.orderID == "" {
+		return "", fmt.Errorf("no order has been placed yet this scenario")
+	}
+	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/orders/%s", orderBaseURL, w.orderID), nil); err != nil {
+		return "", err
+	}
+	if w.last.status != http.StatusOK {
+		return "", fmt.Errorf("GET /orders/%s status = %d (body: %s)", w.orderID, w.last.status, w.last.body)
+	}
+	got := w.last.json()
+	promiseDate, _ := got["promiseDate"].(string)
+	if promiseDate == "" {
+		return "", fmt.Errorf("order %s has no promiseDate (body: %s)", w.orderID, w.last.body)
+	}
+	return promiseDate, nil
+}
+
+// captureOrderPromiseDate records the order's CURRENT promise date on
+// w.capturedPromiseDate, so a later step
+// (orderPromiseDateEventuallyChanges) can prove a missed-CPT re-promise
+// (ADR 0014 §5 / ADR 0018) genuinely moved it. Must be called once, right
+// after allocation, before anything downstream (WES/FE/the sweep) has a
+// chance to trigger RepromiseOrder.
+func (w *world) captureOrderPromiseDate() error {
+	d, err := w.currentOrderPromiseDate()
+	if err != nil {
+		return err
+	}
+	w.capturedPromiseDate = d
+	return nil
+}
+
+// orderPromiseDateEventuallyChanges polls GET /orders/{id} until its
+// promiseDate differs from w.capturedPromiseDate — the loop's closing
+// proof: fulfillment-execution's CPT-missed sweep published
+// TaskCPTMissed, order-management's RepromiseConsumer (ADR 0018) consumed
+// it, recomputed the promise fresh via the SAME PromisePolicy the order
+// was originally promised with (LeadTimePolicy in this harness — see
+// promise_repromise_loop.feature's header comment for why that alone is
+// enough to discriminate this scenario), found it moved, and persisted +
+// published OrderRepromised. Errors loudly (not silently) if the field
+// ever goes missing on a later read, matching captureOrderPromiseDate's
+// own fail-loud discipline.
+func (w *world) orderPromiseDateEventuallyChanges() error {
+	if w.capturedPromiseDate == "" {
+		return fmt.Errorf("no promise date was captured yet this scenario")
+	}
+	return eventually(func() error {
+		d, err := w.currentOrderPromiseDate()
+		if err != nil {
+			return err
+		}
+		if d == w.capturedPromiseDate {
+			return fmt.Errorf("promise date unchanged: still %q", d)
 		}
 		return nil
 	})
@@ -1356,6 +1555,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^wes-work-planning has a release-fed work pool for process path "([^"]*)" with WIP limit (\d+)$`, w.wesHasReleaseFedWorkPoolWithWIPLimit)
 	sc.Step(`^I enqueue work unit "([^"]*)" with cpt in (\d+) hour(?:s)? and reference "([^"]*)" to process path "([^"]*)" in wes-work-planning$`, w.enqueueWorkUnit)
 	sc.Step(`^work is released from process path "([^"]*)" in wes-work-planning$`, w.releaseWorkFor)
+	sc.Step(`^work is eventually released from process path "([^"]*)" for the order's line (\d+) in wes-work-planning$`, w.releaseWorkEventuallyReleasesOrderLine)
 	sc.Step(`^the released work unit is "([^"]*)"$`, w.releasedWorkUnitIs)
 	sc.Step(`^wes-work-planning eventually reports work unit "([^"]*)" as completed$`, w.wesEventuallyReportsCompleted)
 	sc.Step(`^wes-work-planning's rebalance recommendation for path "([^"]*)" is "([^"]*)"$`, w.wesRebalanceRecommendationIs)
@@ -1369,6 +1569,10 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the claimed task is for order "([^"]*)"$`, w.claimedTaskIsForOrder)
 	sc.Step(`^station "([^"]*)" completes the claimed task in fulfillment-execution$`, w.completeClaimedTask)
 	sc.Step(`^the claimed task's lease is forced to have already expired in fulfillment-execution$`, w.claimedTaskLeaseForcedExpired)
+	sc.Step(`^fulfillment-execution eventually creates a task for the order's line (\d+)$`, w.fulfillmentEventuallyCreatesTaskForOrderLine)
+	sc.Step(`^the task for the order's line (\d+) has its CPT forced into the past in fulfillment-execution$`, w.theTaskForOrderLineHasCPTForcedIntoThePast)
+	sc.Step(`^I trigger fulfillment-execution's CPT-missed sweep$`, w.triggerFulfillmentCPTMissedSweep)
+	sc.Step(`^fulfillment-execution reports at least 1 CPT miss$`, w.fulfillmentReportsAtLeastOneCPTMiss)
 
 	// warehouse-ops-agent (T5)
 	sc.Step(`^I request the flow-balance exception for path "([^"]*)" building "([^"]*)" shift "([^"]*)" from warehouse-ops-agent$`, w.requestFlowBalanceException)
@@ -1386,6 +1590,8 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^I place an order for (\d+) units? of SKU "([^"]*)" allowing ship-complete only in order-management$`, w.iPlaceAnOrderForUnitsOfSKU)
 	sc.Step(`^the order is allocated in order-management$`, w.theOrderIsAllocated)
 	sc.Step(`^wes-work-planning eventually enqueues a work unit for the order's line (\d+) on process path "([^"]*)"$`, w.wesEventuallyEnqueuesWorkUnitForOrderLine)
+	sc.Step(`^I capture the order's current promise date in order-management$`, w.captureOrderPromiseDate)
+	sc.Step(`^the order's promise date in order-management eventually changes from the captured value$`, w.orderPromiseDateEventuallyChanges)
 
 	// labor-performance
 	sc.Step(`^labor-performance defines a standard of (\d+) expected seconds for task type "([^"]*)"$`, w.laborDefinesStandard)
