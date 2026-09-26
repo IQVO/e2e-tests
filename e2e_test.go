@@ -47,6 +47,7 @@ var (
 	orderBaseURL       = envOrDefault("ORDER_BASE_URL", "http://localhost:8086")
 	processPathBaseURL = envOrDefault("PROCESS_PATH_BASE_URL", "http://localhost:8087")
 	laborBaseURL       = envOrDefault("LABOR_BASE_URL", "http://localhost:8088")
+	networkBaseURL     = envOrDefault("NETWORK_BASE_URL", "http://localhost:8089")
 	inventoryDBURL     = envOrDefault("INVENTORY_DB_URL", "postgres://inventory@localhost:5442/inventory?sslmode=disable")
 	wesDBURL           = envOrDefault("WES_DB_URL", "postgres://wes@localhost:5443/wes?sslmode=disable")
 	fulfillmentDBURL   = envOrDefault("FULFILLMENT_DB_URL", "postgres://fulfillment@localhost:5444/fulfillment_execution?sslmode=disable")
@@ -1306,6 +1307,92 @@ func (w *world) laborEventuallyReportsScorecard(associateID string, minTasks int
 // future scenario once one does.)
 // ---------------------------------------------------------------------
 
+// networkFulfillmentIsHealthy is a separate Background step (rather than
+// folded into allServicesAreHealthy) for the same reason
+// opsAgentIsHealthy is: bootstrap.feature and every other existing
+// scenario's Background is unaware of network-fulfillment, and only its
+// own feature requires the service to be up.
+func (w *world) networkFulfillmentIsHealthy() error {
+	if err := w.doJSON(http.MethodGet, networkBaseURL+"/healthz", nil); err != nil {
+		return fmt.Errorf("network-fulfillment not reachable: %w", err)
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("network-fulfillment /healthz returned %d, body=%s", w.last.status, w.last.body)
+	}
+	return nil
+}
+
+// networkOrderResponse mirrors network-fulfillment's networkOrderResponse
+// DTO (internal/adapters/inbound/http/dto.go) just enough for this
+// harness's assertions — both network vocabularies per line, so the ACL
+// translation decision is directly observable over the wire.
+type networkOrderResponse struct {
+	NetworkRef string `json:"networkRef"`
+	State      string `json:"state"`
+	Lines      []struct {
+		NetworkProductId string `json:"networkProductId"`
+		SKU              string `json:"sku"`
+		Quantity         int    `json:"quantity"`
+	} `json:"lines"`
+}
+
+// networkOrderEventuallyReportsState polls GET /network-orders/{ref} until
+// network-fulfillment's poller (POLL_INTERVAL=5s, see 03-up-services.sh)
+// has picked up the seeded demand and answered it, storing the decoded
+// response on w.last so a following step can assert on its lines.
+func (w *world) networkOrderEventuallyReportsState(networkRef, wantState string) error {
+	return eventually(func() error {
+		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/network-orders/%s", networkBaseURL, networkRef), nil); err != nil {
+			return err
+		}
+		if w.last.status != http.StatusOK {
+			return fmt.Errorf("GET /network-orders/%s status = %d (body: %s)", networkRef, w.last.status, w.last.body)
+		}
+		var got networkOrderResponse
+		if err := json.Unmarshal(w.last.body, &got); err != nil {
+			return fmt.Errorf("decode network order: %w (body: %s)", err, w.last.body)
+		}
+		if got.State != wantState {
+			return fmt.Errorf("network order %s state = %q, want %q", networkRef, got.State, wantState)
+		}
+		return nil
+	})
+}
+
+// theNetworkOrderHasNoLines asserts the last-fetched network order (see
+// networkOrderEventuallyReportsState) carries no lines — the shape
+// ReceiveUntranslatable builds, proving the untranslatable product never
+// reached the domain's normal line-bearing path.
+func (w *world) theNetworkOrderHasNoLines() error {
+	var got networkOrderResponse
+	if err := json.Unmarshal(w.last.body, &got); err != nil {
+		return fmt.Errorf("decode network order: %w (body: %s)", err, w.last.body)
+	}
+	if len(got.Lines) != 0 {
+		return fmt.Errorf("network order lines = %d, want 0 (body: %s)", len(got.Lines), w.last.body)
+	}
+	return nil
+}
+
+// theNetworkOrderHasLineWithProductAndSKU asserts the last-fetched network
+// order carries a line exposing BOTH the network's product id and the
+// SKU the Anti-Corruption Layer translated it to — publishing only one
+// would make the ACL's translation decision invisible to an operator
+// reconciling a disputed order (see network-fulfillment's own dto.go doc
+// comment).
+func (w *world) theNetworkOrderHasLineWithProductAndSKU(networkProductId, sku string) error {
+	var got networkOrderResponse
+	if err := json.Unmarshal(w.last.body, &got); err != nil {
+		return fmt.Errorf("decode network order: %w (body: %s)", err, w.last.body)
+	}
+	for _, l := range got.Lines {
+		if l.NetworkProductId == networkProductId && l.SKU == sku {
+			return nil
+		}
+	}
+	return fmt.Errorf("no line with networkProductId=%q sku=%q in %+v", networkProductId, sku, got.Lines)
+}
+
 // rs ("run scope") expands the literal token "<run>" in an identifier into
 // a value unique to this test process, so a scenario creates fresh entities
 // on every run instead of colliding with, or accumulating on top of, what
@@ -1520,6 +1607,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 
 	sc.Step(`^all warehouse-systems services are healthy$`, w.allServicesAreHealthy)
 	sc.Step(`^warehouse-ops-agent is healthy$`, w.opsAgentIsHealthy)
+	sc.Step(`^network-fulfillment is healthy$`, w.networkFulfillmentIsHealthy)
 
 	// facility-layout
 
@@ -1607,6 +1695,11 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^process-path-management's active process path listing includes "([^"]*)"$`, w.activeListingIncludes)
 	sc.Step(`^process-path-management's active process path listing does not include "([^"]*)"$`, w.activeListingDoesNotInclude)
 	sc.Step(`^process-path-management's full process path listing includes "([^"]*)"$`, w.fullListingIncludes)
+
+	// network-fulfillment (inbound leg, ADR 0001)
+	sc.Step(`^network-fulfillment eventually reports network order "([^"]*)" as ([A-Z]+)$`, w.networkOrderEventuallyReportsState)
+	sc.Step(`^that network order has no lines$`, w.theNetworkOrderHasNoLines)
+	sc.Step(`^that network order has a line with network product id "([^"]*)" and SKU "([^"]*)"$`, w.theNetworkOrderHasLineWithProductAndSKU)
 
 	// soak backlog ramp (features/soak_backlog_ramp.feature, @soak —
 	// excluded from the default run, see TestMain's Tags option)

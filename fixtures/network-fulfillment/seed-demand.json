@@ -1,0 +1,20 @@
+{
+  "demands": [
+    {
+      "networkRef": "po-e2e-netful-known",
+      "siteId": "site-1",
+      "requiredShipBy": "+36h",
+      "lines": [
+        {"networkLineRef": "1", "networkProductId": "ASIN-E2E-NETFUL-1", "quantity": 2}
+      ]
+    },
+    {
+      "networkRef": "po-e2e-netful-untranslatable",
+      "siteId": "site-1",
+      "requiredShipBy": "+36h",
+      "lines": [
+        {"networkLineRef": "1", "networkProductId": "ASIN-E2E-NETFUL-NO-MAPPING", "quantity": 1}
+      ]
+    }
+  ]
+}
