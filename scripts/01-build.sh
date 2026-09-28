@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib.sh"
 
-log "building 8 service binaries into ${BIN_DIR}"
+log "building 9 service binaries into ${BIN_DIR}"
 
 build_one() {
   local name="$1" repo="$2" cmd_pkg="$3"
@@ -36,6 +36,11 @@ build_one process-path "${PROCESS_PATH_REPO}" pathmgmt
 # analytics data product) which this harness does not build/run --
 # out of scope, no consumer of them exists in this harness's own scenarios.
 build_one labor         "${LABOR_REPO}"         labor
+# network-fulfillment (9th bounded context): cmd/netfulfil is its HTTP
+# binary package (poller + read-only REST, ADR 0001). No cmd/mcp exists
+# yet in this repo (see its own AGENTS.md "CURRENT STATE"), so there is
+# no *-mcp binary to build for it below, unlike the other 6 contexts.
+build_one network       "${NETWORK_REPO}"       netfulfil
 
 log "building 7 MCP server binaries into ${BIN_DIR} (cmd/mcp — the agentic see-layer)"
 build_one facility-mcp     "${FACILITY_REPO}"     mcp
@@ -49,5 +54,5 @@ build_one order-mcp        "${ORDER_REPO}"        mcp
 log "building warehouse-ops-agent (cmd/agent — the agentic analyze/act layer, T5)"
 build_one ops-agent "${OPS_AGENT_REPO}" agent
 
-log "all 16 binaries built"
+log "all 17 binaries built"
 ls -la "${BIN_DIR}"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 8 bounded-context HTTP services as background processes
+# Starts all 9 bounded-context HTTP services as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -46,6 +46,15 @@
 #                           the choreographed-release path this repo's new
 #                           order_management_choreographed_release.feature
 #                           proves end-to-end.
+#   9. network-fulfillment — the anti-corruption layer to an external
+#                           retail network (ADR 0001). Calls
+#                           order-management over HTTP (POST /orders with
+#                           releaseOnAllocation=false, a HELD order) to ask
+#                           feasibility, then POST /orders/{id}/release on
+#                           acceptance. No Kafka publisher of its own in
+#                           this harness (NETWORK_MODE=stub, no
+#                           EVENT_PUBLISHER); its inbound demand is a
+#                           poller reading a seeded stub file, never HTTP.
 #
 # All seven publisher-capable services run with EVENT_PUBLISHER=kafka
 # against the shared broker (labor-performance is the exception -- it has
@@ -190,7 +199,33 @@ start_service order "${BIN_DIR}/order" \
   LOG_LEVEL=info
 wait_for_http "${ORDER_BASE_URL}/healthz"
 
-log "all 8 services up and healthy"
+log "starting network-fulfillment on ${NETWORK_BASE_URL}"
+# network-fulfillment (9th bounded context): the anti-corruption layer to
+# the external retail network (ADR 0001). Started LAST because its only
+# outbound dependency is order-management (ORDER_MANAGEMENT_URL, HTTP,
+# POST /orders with releaseOnAllocation=false -- the same held-order
+# pattern ADR 0020 documents), which must already be up. NETWORK_MODE is
+# left at its default (stub) deliberately -- see that package's own doc
+# comment: the kind cluster and this harness must never need real network
+# credentials. Inbound demand arrives ONLY via NETWORK_SEED_FILE (there is
+# no HTTP intake endpoint, ADR 0001 §5) and PRODUCT_TRANSLATION_FILE is
+# the ACL dictionary without which every seeded order rejects as
+# untranslatable -- both fixtures live in this repo's own
+# fixtures/network-fulfillment/, not network-fulfillment's.
+start_service network "${BIN_DIR}/network" \
+  PORT="${NETWORK_HTTP_PORT}" \
+  DATABASE_URL="${NETWORK_DB_URL}" \
+  PGPASSWORD="network" \
+  MIGRATIONS_PATH="${NETWORK_REPO}/migrations" \
+  ORDER_MANAGEMENT_URL="${ORDER_BASE_URL}" \
+  PRODUCT_TRANSLATION_FILE="${NETWORK_PRODUCT_TRANSLATION_FILE}" \
+  NETWORK_SEED_FILE="${NETWORK_SEED_FILE}" \
+  POLL_INTERVAL="5s" \
+  SWEEP_INTERVAL="30s" \
+  LOG_LEVEL=info
+wait_for_http "${NETWORK_BASE_URL}/healthz"
+
+log "all 9 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' inventory-storage      "${INVENTORY_BASE_URL}"
@@ -199,6 +234,7 @@ printf '  %-24s %s\n' fulfillment-execution  "${FULFILLMENT_BASE_URL}"
 printf '  %-24s %s\n' labor-performance      "${LABOR_BASE_URL}"
 printf '  %-24s %s\n' workforce-management   "${WORKFORCE_BASE_URL}"
 printf '  %-24s %s\n' order-management       "${ORDER_BASE_URL}"
+printf '  %-24s %s\n' network-fulfillment    "${NETWORK_BASE_URL}"
 
 # --- MCP servers (cmd/mcp), one per context, pointed at the SAME
 # Postgres each HTTP service above just started against — so a fact an
