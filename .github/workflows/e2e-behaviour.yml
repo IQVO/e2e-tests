@@ -9,7 +9,7 @@ name: E2E Behaviour
 # a real multi-repo checkout + a real single-node Kafka broker + real
 # per-service Postgres instances, staged deliberately as ONE scenario
 # first rather than the full suite -- see this repo's CLAUDE.md/AGENTS.md
-# for why growing this incrementally (not all 7 features at once) is the
+# for why growing this incrementally (not all 8 features at once) is the
 # safer rollout.
 #
 # This is a SEPARATE workflow file from ci.yml (not a new job in it)
