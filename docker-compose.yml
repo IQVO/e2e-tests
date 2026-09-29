@@ -109,9 +109,102 @@ services:
       timeout: 3s
       retries: 20
 
+  # order-management (6th bounded context — the choreographed-release
+  # redesign, see this repo's env.sh header for the port-offset rationale).
+  # Own user/db name "order", matching order-management's own
+  # docker-compose.yml, on host port 5446 (past this harness's own
+  # 5441-5445 range and disjoint from order-management's own :5434
+  # default).
+  postgres-order:
+    image: postgres:16
+    container_name: e2e-postgres-order
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: order
+      POSTGRES_PASSWORD: order
+      POSTGRES_DB: order
+    ports:
+      - "5446:5432"
+    volumes:
+      - e2e_order_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U order -d order"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # process-path-management (8th bounded context — see env.sh's own
+  # comment for the Generic Subdomain rationale). Own user/db name
+  # "process_path", on host port 5447 (past this harness's own
+  # 5441-5446 range).
+  postgres-process-path:
+    image: postgres:16
+    container_name: e2e-postgres-process-path
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: process_path
+      POSTGRES_PASSWORD: process_path
+      POSTGRES_DB: process_path
+    ports:
+      - "5447:5432"
+    volumes:
+      - e2e_process_path_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U process_path -d process_path"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # labor-performance (7th bounded context — see env.sh's own comment
+  # for the pure-Kafka-consumer rationale). Own user/db name "labor",
+  # on host port 5448 (past this harness's own 5441-5447 range),
+  # matching labor-performance's own docker-compose.yml naming.
+  postgres-labor:
+    image: postgres:16
+    container_name: e2e-postgres-labor
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: labor
+      POSTGRES_PASSWORD: labor
+      POSTGRES_DB: labor
+    ports:
+      - "5448:5432"
+    volumes:
+      - e2e_labor_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labor -d labor"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # network-fulfillment (9th bounded context — Supporting/ACL to the
+  # external retail network, ADR 0001). Own user/db name "network", on
+  # host port 5449 (past this harness's own 5441-5448 range).
+  postgres-network:
+    image: postgres:16
+    container_name: e2e-postgres-network
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: network
+      POSTGRES_PASSWORD: network
+      POSTGRES_DB: network
+    ports:
+      - "5449:5432"
+    volumes:
+      - e2e_network_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U network -d network"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
   e2e_wes_pg_data:
   e2e_fulfillment_pg_data:
   e2e_workforce_pg_data:
+  e2e_order_pg_data:
+  e2e_process_path_pg_data:
+  e2e_labor_pg_data:
+  e2e_network_pg_data:

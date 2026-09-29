@@ -23,11 +23,22 @@ Feature: warehouse-ops-agent correlates a flow imbalance into a FlowBalanceExcep
     # rebalance recommendation is ReassignLabor (WIP >= WIPLimit with
     # backlog still pending) --------------------------------------------
     Given wes-work-planning has a release-fed work pool for process path "pick-t5-imbalance" with WIP limit 1
-    And I enqueue work unit "wu-t5-1" with cpt in 1 hour and reference "order-t5-1" to process path "pick-t5-imbalance" in wes-work-planning
-    And I enqueue work unit "wu-t5-2" with cpt in 2 hours and reference "order-t5-2" to process path "pick-t5-imbalance" in wes-work-planning
+    And I enqueue work unit "wu-t5-<run>" with cpt in 1 hour and reference "order-t5-<run>" to process path "pick-t5-imbalance" in wes-work-planning
+    And I enqueue work unit "wu-t5b-<run>" with cpt in 2 hours and reference "order-t5b-<run>" to process path "pick-t5-imbalance" in wes-work-planning
     When work is released from process path "pick-t5-imbalance" in wes-work-planning
-    Then the released work unit is "wu-t5-1"
+    Then the released work unit is "wu-t5-<run>"
     And wes-work-planning's rebalance recommendation for path "pick-t5-imbalance" is "ReassignLabor"
+
+    # The station must carry "pick-t5-imbalance" as an explicit capability of
+    # its own, alongside the "pick" task-type capability claim-next checks,
+    # because workforce-management's CommitShiftPlan below validates planned
+    # heads against fulfillment-execution's LIVE installed capacity
+    # (GET /capacity/{pathId}) using the PathId's string form VERBATIM
+    # (ADR-0014/0018) -- not resolved through the catalogue's matchPrefix
+    # family rule. Two stations are registered because that commit plans 2
+    # heads, and capacity is counted per capable station.
+    Given a station "station-t5-<run>" is registered with capabilities "pick,pick-t5-imbalance" in fulfillment-execution
+    And a station "station-t5b-<run>" is registered with capabilities "pick,pick-t5-imbalance" in fulfillment-execution
 
     # --- workforce-management: commit a shift plan with no assignments,
     # so the path is confirmed understaffed (0 active < planned) ---------
@@ -36,15 +47,14 @@ Feature: warehouse-ops-agent correlates a flow imbalance into a FlowBalanceExcep
 
     # --- fulfillment-execution: the WorkReleased event from wes's release
     # above (published because wes runs with EVENT_PUBLISHER=kafka) is
-    # consumed here and creates a PICK task for order "wu-t5-1" (the
+    # consumed here and creates a PICK task for order "wu-t5-<run>" (the
     # released work unit's id — see internal/adapters/inbound/kafka
     # /consumer.go's deriveTaskType/orderRef mapping). Claim it, then force
     # its lease already expired (bypassing the 5-minute default so the
     # scenario runs in seconds, not minutes) -----------------------------
-    Given a station "station-t5-1" is registered with capabilities "pick" in fulfillment-execution
-    When fulfillment-execution eventually creates a task for order "wu-t5-1"
-    And station "station-t5-1" claims the next "PICK" task in fulfillment-execution
-    Then the claimed task is for order "wu-t5-1"
+    When fulfillment-execution eventually creates a task for order "wu-t5-<run>"
+    And station "station-t5-<run>" claims the next "PICK" task for order "wu-t5-<run>" in fulfillment-execution
+    Then the claimed task is for order "wu-t5-<run>"
     When the claimed task's lease is forced to have already expired in fulfillment-execution
 
     # --- warehouse-ops-agent: correlate all three signals -----------------

@@ -8,14 +8,17 @@ their published REST APIs with a [godog](https://github.com/cucumber/godog)
 (Cucumber for Go) suite. It never imports another repo's Go packages —
 exactly like a human running curl against a live deployment.
 
-This repo is a study-project companion to five bounded-context repos
+This repo is a study-project companion to eight bounded-context repos
 (`facility-layout`, `inventory-storage`, `wes-work-planning`,
-`fulfillment-execution`, `workforce-management`) plus the read-side
+`fulfillment-execution`, `workforce-management`, `order-management`,
+`process-path-management`, `labor-performance`) plus the read-side
 decision-support agent `warehouse-ops-agent`, all siblings under the same
 `warehouse-systems/` workspace root — see `env.sh`'s `REPOS_ROOT` for the
 layout this harness assumes.
 
 ## What's covered
+
+8 feature files, each with exactly one scenario:
 
 - **`features/bootstrap.feature`** — a single work unit flowing through
   every bounded context: facility-layout's physical map, inventory-storage
@@ -23,6 +26,12 @@ layout this harness assumes.
   wes-work-planning's labor-plan-view), wes-work-planning's release (Kafka →
   fulfillment-execution's task creation), and fulfillment-execution's task
   completion (Kafka → wes-work-planning's completion read model).
+- **`features/facility_layout_propagation.feature`** — proves
+  facility-layout's warehouse-map events (zone hazmat/temperature
+  attributes, newly-registered and decommissioned slots) reach
+  inventory-storage's local placement-rules read model purely over Kafka,
+  picked up live without a restart — the only proof these two contexts
+  actually agree over the wire.
 - **`features/flow_balance_exception.feature`** (T5) — proves
   `warehouse-ops-agent`, the agentic read-side decision-support layer, end
   -to-end against the real MCP servers of all five contexts: three
@@ -32,25 +41,96 @@ layout this harness assumes.
   the expected `FlowBalanceException` (E1) — a ranked recommendation with a
   full evidence trail — and surface the same exception in its daily brief
   (E3).
+- **`features/labor_performance.feature`** — proves labor-performance's
+  PURE Kafka consumption of fulfillment-execution's `TaskCompleted` event
+  (no REST endpoint any caller writes to): an associate checked into a
+  station completes a task against an active engineered standard, and
+  labor-performance eventually reports a scorecard reflecting it.
+- **`features/order_management_choreographed_release.feature`** — proves
+  order-management's choreographed-release redesign end-to-end: placing an
+  order (`POST /orders`) with `allowPartialShipment=false` and lines that
+  can be immediately allocated triggers, in the SAME call, synchronous
+  allocation against inventory-storage (unchanged HTTP) followed by
+  publishing `OrderAllocated`/`OrderPartiallyAllocated` to Kafka topic
+  `warehouse.order-management.events` — which wes-work-planning's 4th
+  consumer subscription (`handleOrderManagementEvent`) picks up and turns
+  into a real work unit via its existing `EnqueueWorkUnit` use case, using
+  the deterministic id `{order_id}-line-{line_no}`. This is order-
+  management's only public REST surface in v1 (`POST /orders`,
+  `GET /orders/{id}`, `POST /orders/{id}/retry-allocation`,
+  `DELETE /orders/{id}`, `GET /healthz`) — there is no `/allocate` or
+  `/release` endpoint anymore; release happens implicitly, choreographed
+  over Kafka.
+- **`features/process_path_management.feature`** — exercises
+  process-path-management's full REST lifecycle (define, get, list,
+  revise, deactivate) directly plus its Kafka publisher
+  (`ProcessPathCreated`/`Updated`/`Deactivated`) — the only proof this
+  context's write side and event contract both work against a real,
+  independently running process and a real broker.
+- **`features/promise_repromise_loop.feature`** — the closing proof of
+  the "promise derived from fulfillment capability" initiative (ADR 0014,
+  all sections): a missed CPT flows through three bounded contexts and
+  three Kafka topics — order-management's original promise, fulfillment-
+  execution's CPT-miss sweep publishing `TaskCPTMissed`, and
+  order-management's `RepromiseConsumer` (ADR 0018) re-running its promise
+  policy and publishing `OrderRepromised` — with zero manual intervention.
+- **`features/soak_backlog_ramp.feature`** (`@soak`, excluded from the
+  default run) — ramps injected backlog into both the PICK and PACK
+  process paths over a sustained, configurable duration while a pool of
+  picker/packer stations continuously claims and completes the resulting
+  tasks, proving the estate stays up and keeps processing under sustained
+  load rather than a single deterministic unit of work; see "Sustained
+  backlog-ramp soak" below for details.
 
 ## Running locally
 
 Prerequisites: Docker (for Postgres + the shared Kafka broker), Go
-(matching `go.mod`), and all six sibling repos checked out alongside this
+(matching `go.mod`), and all seven sibling repos checked out alongside this
 one under the same parent directory.
 
 ```bash
 cd e2e-tests
 bash scripts/02-up-infra.sh      # Postgres (this repo) + shared Kafka
-bash scripts/02b-migrate-wes.sh  # wes-work-planning has no self-migrate step
-bash scripts/01-build.sh         # builds all 11 binaries (5 HTTP + 5 MCP + ops-agent)
-bash scripts/03-up-services.sh   # starts all 11 as background processes
-bash scripts/04-run-tests.sh     # runs the godog suite against the live services
+bash scripts/01-build.sh         # builds all 12 binaries (6 HTTP + 5 MCP + ops-agent)
+bash scripts/03-up-services.sh   # starts all 12 as background processes
+bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)
+bash scripts/06-run-soak.sh      # OPTIONAL: the long-running @soak backlog-ramp run (see below)
 bash scripts/05-down-services.sh # stops only what this harness started
 ```
 
 `env.sh` is the single source of truth for every port, DB URL, and MCP
 bearer key `scripts/*.sh` uses — edit ports there only.
+
+## Sustained backlog-ramp soak (`features/soak_backlog_ramp.feature`, `@soak`)
+
+`scripts/06-run-soak.sh` runs a dedicated, long-running scenario — by
+default one hour — that ramps injected backlog into BOTH the `pick-soak`
+and `pack-soak` process paths while a configurable pool of picker and
+packer stations continuously claims and completes the resulting
+fulfillment-execution tasks. It proves the estate stays up and keeps
+processing under sustained, ramping load — unlike every other scenario
+here, which proves a single deterministic unit of work flows correctly.
+
+- **Excluded by default.** `e2e_test.go`'s `TestMain` filters scenarios
+  with `GODOG_TAGS` (default `~@soak`, i.e. "everything except `@soak`"),
+  so `scripts/04-run-tests.sh` and a plain `go test ./...` never run it.
+  Only `scripts/06-run-soak.sh` sets `GODOG_TAGS=@soak` to run it in
+  isolation.
+- **Observational, not assertive.** Once picker/packer throughput can't
+  keep up with the ramp, `wes-work-planning`'s `/release` legitimately
+  returns `409` (WIP limit reached / pool empty) and
+  `fulfillment-execution`'s `/claim-next` legitimately returns `409` (no
+  claimable task) — both are counted in the printed summary, not treated
+  as failures. The scenario only fails on a hard connectivity/setup
+  problem (it never managed to enqueue a single work unit for the whole
+  run).
+- **Tunable via env vars** (all optional — see `soak_test.go` for exact
+  defaults): `SOAK_DURATION` (default `1h`), `SOAK_RAMP_START_INTERVAL`
+  (default `2s`), `SOAK_RAMP_END_INTERVAL` (default `200ms`),
+  `SOAK_WIP_LIMIT` (default `20`, both paths), `SOAK_PICKERS` (default
+  `3`), `SOAK_PACKERS` (default `2`).
+- A quick smoke run before committing to the full hour:
+  `SOAK_DURATION=1m SOAK_RAMP_START_INTERVAL=1s SOAK_RAMP_END_INTERVAL=200ms bash scripts/06-run-soak.sh`.
 
 ## Service lifecycle notes
 
@@ -70,13 +150,19 @@ bearer key `scripts/*.sh` uses — edit ports there only.
   `start_service_in` with their CWD set to that repo's root; every other
   service reads `MIGRATIONS_PATH` from the environment and runs fine from
   this harness's own CWD.
+- EVERY service self-migrates on startup via `postgres.RunMigrations` /
+  `postgres.Migrate` inside its own `main()`, so no separate migrate step
+  is needed for any of them. `wes-work-planning` used to be the sole
+  exception and needed a `02b-migrate-wes.sh` workaround; it now migrates
+  itself like the rest (wes-work-planning PR #52), and that script has
+  been removed.
 
 ## CI
 
 `.github/workflows/ci.yml` runs `gofmt`, `go build`/`go vet`, a shell
 syntax check on every `scripts/*.sh`, and `docker compose config`
 validation. The full godog suite is NOT run in CI: it is a genuinely
-multi-repo black-box harness (it builds and runs binaries from five
+multi-repo black-box harness (it builds and runs binaries from six
 sibling repos plus `warehouse-ops-agent`, none of which are checked out in
 a single-repo GitHub Actions run) — it is run and verified locally as part
 of every change that touches it, the same pattern `e2s-tests`' equivalent
