@@ -501,7 +501,7 @@ func (s *sim) planTheDay(ctx context.Context) error {
 			"quantity": int(float64(units) * share),
 		})
 	}
-	r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/charge", "/paths/PICK/charge", map[string]any{"buckets": buckets})
+	r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/charge", "/paths/"+s.cfg.wesPickPath+"/charge", map[string]any{"buckets": buckets})
 	if !r.ok() {
 		return fail("POST /paths/PICK/charge -> %d %s", r.status, truncate(string(r.body), 200))
 	}
@@ -532,7 +532,7 @@ func (s *sim) planTheDay(ctx context.Context) error {
 	} else {
 		s.shiftPlanned = true
 	}
-	r = s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/plan", "/paths/PICK/plan", map[string]any{
+	r = s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/plan", "/paths/"+s.cfg.wesPickPath+"/plan", map[string]any{
 		"plannedHeads": heads["PICK"], "installedStations": heads["PICK"], "rateUnitsPerHour": 60.0, "hours": 8.0,
 	})
 	if !r.ok() {
@@ -687,6 +687,11 @@ func (s *sim) placeOrder(ctx context.Context, o *orderRec) {
 	if err := r.decode(&created); err != nil {
 		s.finding("POST /orders body undecodable: %v", err)
 		return
+	}
+	for _, l := range created.Lines {
+		if l.PathID != "" && l.PathID != s.cfg.wesPickPath {
+			s.finding("order %s line %d landed on path %q, but the floor drives WES pool %q (-wes-pick-path)", created.ID, l.LineNo, l.PathID, s.cfg.wesPickPath)
+		}
 	}
 	s.mu.Lock()
 	o.id, o.intakeStatus, o.promiseDate = created.ID, created.Status, created.PromiseDate

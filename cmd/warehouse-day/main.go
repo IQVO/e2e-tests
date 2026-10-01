@@ -58,8 +58,13 @@ type config struct {
 	siteCode     string // facility-layout site the simulated building lives in
 	cptSiteID    string // order-management's DEFAULT_SITE_ID (CPT schedule key)
 	buildingID   string
-	reportDir    string
-	seed         int64
+	// wesPickPath is the WES work pool PICK work lands in: the pathId
+	// order-management stamps on order lines (its DefaultPathId "pick"),
+	// which the catalogue resolves to the PICK family. WES pools by the
+	// raw path id, so charge/plan/release must target it, not "PICK".
+	wesPickPath string
+	reportDir   string
+	seed        int64
 }
 
 func envOr(k, def string) string {
@@ -107,6 +112,7 @@ func loadConfig() config {
 	flag.Float64Var(&c.packSeconds, "pack-seconds", envFloat("DAY_PACK_SECONDS", 2.0), "wall seconds a pack takes at standard")
 	flag.StringVar(&c.siteCode, "site", envOr("DAY_SITE", "SIM1"), "facility-layout site code of the simulated building")
 	flag.StringVar(&c.cptSiteID, "cpt-site", envOr("DEFAULT_SITE_ID", "site-1"), "site id order-management promises against (its DEFAULT_SITE_ID)")
+	flag.StringVar(&c.wesPickPath, "wes-pick-path", envOr("DAY_WES_PICK_PATH", "pick"), "WES work pool for PICK work (the pathId order-management stamps on order lines)")
 	flag.StringVar(&c.buildingID, "building", envOr("DAY_BUILDING", "SIM1"), "workforce-management building id")
 	flag.StringVar(&c.reportDir, "report-dir", envOr("DAY_REPORT_DIR", "run"), "where the JSON audit report is written")
 	flag.Int64Var(&c.seed, "seed", int64(envInt("DAY_SEED", 0)), "random seed (0 = time based)")

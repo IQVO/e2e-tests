@@ -615,7 +615,7 @@ func (s *sim) releaseScheduler(ctx context.Context, wg *sync.WaitGroup) {
 	for ctx.Err() == nil {
 		depth := s.queueDepth(ctx, "PICK")
 		for depth < target && ctx.Err() == nil {
-			r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/release", "/paths/PICK/release", nil)
+			r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/release", "/paths/"+s.cfg.wesPickPath+"/release", nil)
 			if r.status == http.StatusOK {
 				s.m.released.Add(1)
 				depth++
@@ -725,13 +725,13 @@ func (s *sim) supervisor(ctx context.Context, wg *sync.WaitGroup) {
 			WIP          int    `json:"wip"`
 			Mode         string `json:"mode"`
 		}
-		if r := s.api.call(ctx, svcWES, http.MethodGet, "/paths/{pathId}/telemetry", "/paths/PICK/telemetry", nil); r.ok() {
+		if r := s.api.call(ctx, svcWES, http.MethodGet, "/paths/{pathId}/telemetry", "/paths/"+s.cfg.wesPickPath+"/telemetry", nil); r.ok() {
 			_ = r.decode(&tel)
 		}
 		var reb struct {
 			Action string `json:"action"`
 		}
-		rb := s.api.call(ctx, svcWES, http.MethodGet, "/paths/{pathId}/rebalance", "/paths/PICK/rebalance", nil)
+		rb := s.api.call(ctx, svcWES, http.MethodGet, "/paths/{pathId}/rebalance", "/paths/"+s.cfg.wesPickPath+"/rebalance", nil)
 		_ = rb.decode(&reb)
 		gaps := []string{}
 		for _, p := range []string{"PICK", "PACK"} {
