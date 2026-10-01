@@ -224,7 +224,11 @@ KAFKA_BROKERS="localhost:9092"
 # the topics itself instead of competing for them. This does NOT change how
 # the services behave in the cluster, where sharing one group per service is
 # exactly right.
-E2E_CONSUMER_GROUP_SUFFIX="e2e-$$-$(date +%s)"
+# Overridable: the warehouse-day simulator pins a STABLE suffix so the
+# services resume their committed offsets across restarts (as in
+# production) instead of replaying the shared broker's whole history on
+# every boot. Unset, every run still gets an isolated, unique group.
+E2E_CONSUMER_GROUP_SUFFIX="${E2E_CONSUMER_GROUP_SUFFIX:-e2e-$$-$(date +%s)}"
 WES_CONSUMER_GROUP="wes-work-planning-${E2E_CONSUMER_GROUP_SUFFIX}"
 FULFILLMENT_CONSUMER_GROUP="fulfillment-execution-${E2E_CONSUMER_GROUP_SUFFIX}"
 LABOR_CONSUMER_GROUP="labor-performance-${E2E_CONSUMER_GROUP_SUFFIX}"

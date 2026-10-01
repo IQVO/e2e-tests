@@ -16,7 +16,7 @@
 
 GO ?= go
 
-.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak down
+.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day down
 
 help:
 	@echo "e2e-tests — local quality gate (targets mirror .github/workflows/ci.yml)"
@@ -36,6 +36,7 @@ help:
 	@echo "  up              scripts/02-up-infra.sh + 01-build.sh + 03-up-services.sh"
 	@echo "  run             scripts/04-run-tests.sh — the default godog suite (excludes @soak)"
 	@echo "  soak            scripts/06-run-soak.sh — the long-running @soak backlog-ramp scenario"
+	@echo "  warehouse-day   scripts/07-run-warehouse-day.sh — simulate a full operating day, KPI + cross-context audit"
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:
@@ -83,6 +84,9 @@ run:
 
 soak:
 	bash scripts/06-run-soak.sh
+
+warehouse-day:
+	bash scripts/07-run-warehouse-day.sh
 
 down:
 	bash scripts/05-down-services.sh
