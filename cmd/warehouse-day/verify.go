@@ -262,6 +262,7 @@ func (s *sim) run(ctx context.Context) bool {
 
 	floorCtx, stopFloor := context.WithCancel(ctx)
 	defer stopFloor()
+	go s.suspend.run(floorCtx)
 	var floor, office sync.WaitGroup
 	for _, a := range s.associates {
 		floor.Add(1)
@@ -487,8 +488,13 @@ func (s *sim) audit(ctx context.Context) bool {
 
 	s.mu.Lock()
 	findings := append([]string(nil), s.findings...)
+	suspended := len(s.findingsDuringSuspend)
 	s.mu.Unlock()
-	add("no operational findings", len(findings) == 0, "%d findings (see findings[])", len(findings))
+	detail := fmt.Sprintf("%d findings (see findings[])", len(findings))
+	if w := s.suspend.snapshot(); len(w) > 0 {
+		detail += fmt.Sprintf("; %d more raised during %d host suspension(s), not counted (see findingsDuringSuspend[])", suspended, len(w))
+	}
+	add("no operational findings", len(findings) == 0, "%s", detail)
 
 	pass := true
 	for _, c := range checks {
@@ -765,7 +771,7 @@ func (s *sim) writeReportFull(pass bool, checks []check, audits []orderAudit, fi
 			"day": s.cfg.day.String(), "orders": s.cfg.orders, "pickers": s.cfg.pickers, "packers": s.cfg.packers,
 			"rebin": s.cfg.rebinners, "slam": s.cfg.slammers, "flex": s.cfg.flex, "seed": s.cfg.seed,
 		},
-		"checks": checks, "orders": audits, "findings": findings, "snapshots": s.snapshots, "routes": s.stats.lines(),
+		"checks": checks, "orders": audits, "findings": findings, "findingsDuringSuspend": s.findingsDuringSuspend, "suspensions": s.suspend.snapshot(), "snapshots": s.snapshots, "routes": s.stats.lines(),
 	}
 	if s.tap != nil {
 		s.tap.mu.Lock()

@@ -45,6 +45,9 @@ var skuCatalogue = []skuDef{
 	{"SAMPLE", 0.10, false, 20, 0},
 }
 
+// replenishHour is when the CAMERA replenishment truck arrives (sim time).
+const replenishHour = 13
+
 const (
 	storageAisles = 4
 	storageBays   = 6
@@ -156,7 +159,11 @@ type sim struct {
 
 	associates []*associate
 	findings   []string
-	snapshots  []string
+	// findingsDuringSuspend are findings raised inside a host-suspension
+	// window (see suspendWatch); reported, but not counted as failures.
+	findingsDuringSuspend []string
+	snapshots             []string
+	suspend               suspendWatch
 
 	m struct {
 		released, releaseRejected               atomic.Int64
@@ -203,14 +210,24 @@ func (s *sim) skuKey(sku string) string {
 	return strings.TrimPrefix(sku, fmt.Sprintf("SKU-%s-", s.cfg.runID))
 }
 
+// suspendGrace covers the real 5-minute claim leases that lapse while the
+// host sleeps and only surface on the associates' next calls after wake.
+const suspendGrace = 6 * time.Minute
+
 func (s *sim) finding(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+	duringSuspend := s.suspend.covers(time.Now(), suspendGrace)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, f := range s.findings {
+	for _, f := range append(s.findings, s.findingsDuringSuspend...) {
 		if f == msg {
 			return
 		}
+	}
+	if duringSuspend {
+		s.findingsDuringSuspend = append(s.findingsDuringSuspend, msg)
+		logf("FINDING*", "%s (during/just after a host suspension; not counted)", msg)
+		return
 	}
 	s.findings = append(s.findings, msg)
 	logf("FINDING", "%s", msg)
@@ -636,6 +653,13 @@ func (s *sim) planOrders() {
 			o.allowPartial = true
 		}
 		m := simMinute()
+		if o.kind == kindBackorder {
+			// A backorder only exists while CAMERA is out of stock: the
+			// 13:00 replenishment would let a later order allocate in full.
+			for m >= (replenishHour-dayOpenHour)*60-30 {
+				m = simMinute()
+			}
+		}
 		o.arriveAt = s.clock.wallAt(dayOpenHour, 0).Add(s.clock.simDur(time.Duration(m) * time.Minute))
 		o.simAt = fmt.Sprintf("%02d:%02d", dayOpenHour+m/60, m%60)
 		s.orders = append(s.orders, o)

@@ -659,7 +659,7 @@ func (s *sim) inventoryControl(ctx context.Context, wg *sync.WaitGroup) {
 
 	// 13:00 — the CAMERA replenishment truck arrives; inventory control
 	// retries every backordered order.
-	if !sleepCtx(ctx, time.Until(s.clock.wallAt(13, 0))) {
+	if !sleepCtx(ctx, time.Until(s.clock.wallAt(replenishHour, 0))) {
 		return
 	}
 	if err := s.receiveAndStow(ctx, "receiving", skuByKey("CAMERA"), 30, s.storage); err != nil {
