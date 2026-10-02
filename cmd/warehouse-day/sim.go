@@ -169,6 +169,7 @@ type sim struct {
 		released, releaseRejected               atomic.Int64
 		picks, picksNoLocation, foreignTasks    atomic.Int64
 		confirmPickConflicts, completeConflicts atomic.Int64
+		confirmPickRetries                      atomic.Int64
 		rebinScans, packs, slams, labeled       atomic.Int64
 		diverted, travelMetres                  atomic.Int64
 		breaks, reassignments, cycleCounts      atomic.Int64

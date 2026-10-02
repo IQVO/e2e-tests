@@ -344,7 +344,7 @@ func (s *sim) pickOne(ctx context.Context, a *associate) bool {
 			}
 		}
 	}
-	r := s.api.call(ctx, svcInventory, http.MethodPost, "/reservations/{id}/confirm-pick", "/reservations/"+url.PathEscape(res.ID)+"/confirm-pick", nil)
+	r := s.confirmPick(ctx, res.ID)
 	if r.status == http.StatusConflict {
 		s.m.confirmPickConflicts.Add(1)
 		s.finding("confirm-pick %s -> 409 %s", res.ID, truncate(string(r.body), 160))
@@ -765,4 +765,23 @@ func (s *sim) sweeps(ctx context.Context, wg *sync.WaitGroup) {
 		s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/sweep-cpt-misses", "/tasks/sweep-cpt-misses", nil)
 		sleepCtx(ctx, 3*time.Second)
 	}
+}
+
+// confirmPick scans the pick into inventory-storage. A 409 whose problem
+// type is concurrent-modification is the optimistic-concurrency signal
+// inventory-storage documents as "re-fetch the latest version and retry"
+// (two pickers emptying the same bin at once); a real RF gun retries it,
+// so this does too, a few times with a short pause. Any other 409 (e.g.
+// reservation-already-resolved) is a real finding.
+func (s *sim) confirmPick(ctx context.Context, reservationID string) resp {
+	var r resp
+	for attempt := 0; attempt < 5; attempt++ {
+		r = s.api.call(ctx, svcInventory, http.MethodPost, "/reservations/{id}/confirm-pick", "/reservations/"+url.PathEscape(reservationID)+"/confirm-pick", nil)
+		if r.status != http.StatusConflict || !strings.Contains(string(r.body), "/concurrent-modification") {
+			return r
+		}
+		s.m.confirmPickRetries.Add(1)
+		sleepCtx(ctx, time.Duration(50*(attempt+1))*time.Millisecond)
+	}
+	return r
 }
