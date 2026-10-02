@@ -425,7 +425,12 @@ func (s *sim) audit(ctx context.Context) bool {
 		}
 		want := received - pickedUnits[sd.key]
 		if sd.key == "SAMPLE" {
-			want -= 3 // found short at the 10:00 cycle count -> unlocated
+			// Found 3 short at the 10:00 cycle count. inventory-storage's
+			// reconciliation is deliberately coarse (its ADR-0002): a
+			// shortfall marks whole StockUnits UNLOCATED rather than
+			// splitting located from lost portions, so the overflow bin's
+			// single SAMPLE unit goes entirely unusable.
+			want = 0
 		}
 		var u struct {
 			Usable int `json:"usable"`
