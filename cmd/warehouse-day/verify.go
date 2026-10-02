@@ -30,13 +30,17 @@ import (
 // ("ce_type" header) and the legacy flat envelope ("event_type"), so it
 // audits whichever envelope the deployed images speak.
 type eventTap struct {
-	mu      sync.Mutex
-	counts  map[string]map[string]int // topic -> short type -> n
-	byRef   map[string]map[string]int // correlation id -> short type -> n
-	refs    []string
-	dlq     map[string]int
-	readers []*kafkago.Reader
-	errs    []string
+	mu     sync.Mutex
+	counts map[string]map[string]int // topic -> short type -> n
+	byRef  map[string]map[string]int // correlation id -> short type -> n
+	refs   []string
+	dlq    map[string]int // dead-lettered messages that belong to this run
+	// dlqLegacy counts dead-lettered messages unrelated to this run (legacy
+	// history replayed by a new consumer group on a shared broker).
+	dlqLegacy map[string]int
+	runID     string
+	readers   []*kafkago.Reader
+	errs      []string
 }
 
 var tappedTopics = []string{
@@ -48,10 +52,22 @@ var tappedTopics = []string{
 	"warehouse.order-management.events",
 	"warehouse.workforce.events",
 	"warehouse.labor-performance.events",
+	// Analytics topics: most domain facts (StockReceived, TaskClaimed,
+	// PackageSealed, AssociateShiftStarted, ...) are published ONLY on a
+	// context's analytics stream, never on its integration topic (see each
+	// repo's apis/asyncapi.yaml). Auditing the day must read both.
+	"warehouse.facility.analytics",
+	"warehouse.inventory.analytics",
+	"warehouse.fulfillment.analytics",
+	"warehouse.workforce.analytics",
+	"warehouse.labor-performance.analytics",
+	"warehouse.wes.analytics",
+	"warehouse.order-management.analytics",
+	"warehouse.process-path-management.analytics",
 }
 
-func startTap(ctx context.Context, brokers []string) (*eventTap, error) {
-	t := &eventTap{counts: map[string]map[string]int{}, byRef: map[string]map[string]int{}, dlq: map[string]int{}}
+func startTap(ctx context.Context, brokers []string, runID string) (*eventTap, error) {
+	t := &eventTap{counts: map[string]map[string]int{}, byRef: map[string]map[string]int{}, dlq: map[string]int{}, dlqLegacy: map[string]int{}, runID: runID}
 	conn, err := ipv4Dialer().DialContext(ctx, "tcp", brokers[0])
 	if err != nil {
 		return nil, err
@@ -81,7 +97,7 @@ func startTap(ctx context.Context, brokers []string) (*eventTap, error) {
 		n++
 		go t.consume(ctx, r, p.Topic)
 	}
-	logf("event-tap", "tapping %d partitions across %d integration topics + DLQs", n, len(tappedTopics))
+	logf("event-tap", "tapping %d partitions across %d integration + analytics topics and their DLQs", n, len(tappedTopics))
 	return t, nil
 }
 
@@ -130,7 +146,15 @@ func (t *eventTap) consume(ctx context.Context, r *kafkago.Reader, topic string)
 		raw := string(m.Value)
 		t.mu.Lock()
 		if strings.HasSuffix(topic, ".dlq") {
-			t.dlq[topic]++
+			// A shared, long-lived broker dead-letters legacy (pre-CloudEvents)
+			// messages whenever a consumer group replays history. Those are
+			// not today's failures; count them separately and fail the day
+			// only on dead-lettered messages that mention this run.
+			if t.runID != "" && strings.Contains(raw, t.runID) {
+				t.dlq[topic]++
+			} else {
+				t.dlqLegacy[topic]++
+			}
 		} else {
 			if t.counts[topic] == nil {
 				t.counts[topic] = map[string]int{}
@@ -187,7 +211,7 @@ func (s *sim) run(ctx context.Context) bool {
 	tapCtx, stopTap := context.WithCancel(context.Background())
 	defer stopTap()
 	if len(cfg.brokers) > 0 {
-		tap, err := startTap(tapCtx, cfg.brokers)
+		tap, err := startTap(tapCtx, cfg.brokers, cfg.runID)
 		if err != nil {
 			s.finding("Kafka event tap unavailable (%v) — event audit skipped", err)
 		} else {
@@ -443,7 +467,11 @@ func (s *sim) audit(ctx context.Context) bool {
 		for _, n := range s.tap.dlq {
 			dlq += n
 		}
-		dlqDetail := fmt.Sprintf("%v", s.tap.dlq)
+		legacy := 0
+		for _, n := range s.tap.dlqLegacy {
+			legacy += n
+		}
+		dlqDetail := fmt.Sprintf("%v (plus %d legacy/unrelated messages dead-lettered by consumer replay)", s.tap.dlq, legacy)
 		tapErrs := append([]string(nil), s.tap.errs...)
 		s.tap.mu.Unlock()
 		add("no dead-lettered events", dlq == 0, "%d messages dead-lettered during the day %s", dlq, dlqDetail)
@@ -736,7 +764,7 @@ func (s *sim) writeReportFull(pass bool, checks []check, audits []orderAudit, fi
 	}
 	if s.tap != nil {
 		s.tap.mu.Lock()
-		rep["events"], rep["dlq"] = s.tap.counts, s.tap.dlq
+		rep["events"], rep["dlq"], rep["dlqLegacy"] = s.tap.counts, s.tap.dlq, s.tap.dlqLegacy
 		b, _ := json.MarshalIndent(rep, "", "  ")
 		s.tap.mu.Unlock()
 		s.saveReport(b)
