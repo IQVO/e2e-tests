@@ -174,9 +174,13 @@ type sim struct {
 		breaks, reassignments, cycleCounts      atomic.Int64
 		discrepancies, leaseRenewals            atomic.Int64
 	}
-	intakeDone   atomic.Bool
-	shiftPlanned bool
-	tap          *eventTap
+	intakeDone atomic.Bool
+	// slotsImported is how many NEW slots facility-layout registered this
+	// morning. The building is mapped once and reused on later days (as in
+	// a real FC), so LocationSlotRegistered is only expected on day one.
+	slotsImported int
+	shiftPlanned  bool
+	tap           *eventTap
 }
 
 func newSim(cfg config) *sim {
@@ -424,6 +428,7 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 		}
 		return fail("facility import rejected %s: %s", res.LocationCode, res.Error)
 	}
+	s.slotsImported = rep.SlotsImported
 	logf("facilities", "building map: %d slots imported, %d already on the map (site %s)", rep.SlotsImported, reused, s.cfg.siteCode)
 
 	for a := 1; a <= storageAisles; a++ {

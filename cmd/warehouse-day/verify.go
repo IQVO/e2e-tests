@@ -461,6 +461,11 @@ func (s *sim) audit(ctx context.Context) bool {
 			"AssociateShiftStarted", "LaborAssigned", "AssociateBreakStarted", "AssociateBreakEnded", "AssociateShiftEnded",
 			"ShiftPlanCommitted", "TaskPerformanceRecorded", "CPTScheduleChanged", "LocationSlotRegistered",
 		}
+		if s.slotsImported == 0 {
+			// The site was already mapped on an earlier day: no slot is new,
+			// so facility-layout correctly registers (and publishes) nothing.
+			required = removeString(required, "LocationSlotRegistered")
+		}
 		var missing []string
 		for _, ty := range required {
 			if s.tap.total(ty) == 0 {
@@ -807,4 +812,14 @@ func ipv4Dialer() *kafkago.Dialer {
 			return nd.DialContext(ctx, "tcp4", addr)
 		},
 	}
+}
+
+func removeString(xs []string, drop string) []string {
+	out := xs[:0:0]
+	for _, x := range xs {
+		if x != drop {
+			out = append(out, x)
+		}
+	}
+	return out
 }
