@@ -20,11 +20,10 @@ defaults:
 jobs:
 
   # Agent-guide sensor (harness-template v3): skills load, references resolve, context budget.
-  # ADVISORY (continue-on-error) until the guides are clean; then flip to blocking.
+  # BLOCKING: the guides are clean (0 errors); keep them that way.
   guide-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - run: python3 scripts/harness/guide_lint.py
