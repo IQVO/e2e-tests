@@ -9,7 +9,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -130,6 +132,15 @@ func newWorld() *world {
 	return &world{client: &http.Client{Timeout: 10 * time.Second}}
 }
 
+// newIdempotencyKey returns a random 128-bit hex key.
+func newIdempotencyKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
 // doJSON performs method against url with an optional JSON body and
 // records the result on w.last.
 func (w *world) doJSON(method, url string, body any) error {
@@ -147,6 +158,12 @@ func (w *world) doJSON(method, url string, body any) error {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if method == http.MethodPost {
+		// Creating POSTs require an Idempotency-Key (facility-layout ADR-0019 and the fleet
+		// idempotency middleware). This client never re-sends a request, so a fresh key per
+		// call is the honest equivalent of a device minting one per logical action.
+		req.Header.Set("Idempotency-Key", newIdempotencyKey())
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
