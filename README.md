@@ -132,6 +132,42 @@ here, which proves a single deterministic unit of work flows correctly.
 - A quick smoke run before committing to the full hour:
   `SOAK_DURATION=1m SOAK_RAMP_START_INTERVAL=1s SOAK_RAMP_END_INTERVAL=200ms bash scripts/06-run-soak.sh`.
 
+## Simulated operating day (`cmd/warehouse-day`)
+
+A deep, black-box simulation of one warehouse working day, compressed into
+minutes of wall time (default 8m for 06:00-22:00). Every action is a call to
+a bounded context's **published REST contract** — no DB seeding, no internal
+endpoints — and every integration topic is tapped to audit the async side.
+
+```sh
+make up                                     # infra + build + services
+make warehouse-day                          # default day: 150 orders, 13 associates
+DAY_DURATION=90s DAY_ORDERS=20 make warehouse-day   # quick smoke
+```
+
+The day, hour by hour:
+
+| Sim time | Persona | APIs driven |
+|---|---|---|
+| 05:30 | control tower | facility-layout `POST /location-types` + `POST /locations/import` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}` + `PUT /products/{sku}/classification`; process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule`; labor-performance `POST /standards` |
+| 05:30 | receiving | inventory-storage `POST /stock/receive` + `POST /stock/stow` into registered bins |
+| 06:00 | supervisor | workforce-management start-shift, `POST /shift-plans`, assignments; WES charge/plan; fulfillment station registration + check-in |
+| 06:00-20:00 | customers | order-management `POST /orders` on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
+| all day | pickers / flex | `claim-next PICK`, `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `confirm-pick`, complete, `POST /rebin/arrivals` |
+| all day | packers / SLAM | `claim-next PACK`, `seal-package`, `POST /packages/{id}/slam` (weight mismatch injected), `GET /packages?orderRef=` -> LABELED / DIVERTED |
+| hourly | supervisor | WES telemetry + rebalance, queue depths, staffing gaps, flex reassignment, breaks (lunch 11:30-12:30) |
+| 10:00, 13:00 | inventory control | cycle counts (one deliberate shortage), replenishment + `retry-allocation` for backorders |
+| 22:00+ | auditor | per-order trace across order-management, WES, inventory, fulfillment, packages, labor scorecards and Kafka; inventory conservation; DLQ count |
+
+The run prints an end-of-day report (hourly snapshots, per-associate
+throughput, events per topic, per-order problems, PASS/FAIL checks) and writes
+`run/warehouse-day-<RUN_ID>.json`. Exit code is non-zero unless the warehouse
+worked end to end.
+
+Pin `E2E_CONSUMER_GROUP_SUFFIX` (e.g. `warehouse-day`) before `make up` when
+running against a long-lived shared broker, so services resume their
+committed offsets across restarts instead of replaying the topic history.
+
 ## Service lifecycle notes
 
 - `scripts/lib.sh`'s `start_service_in`/`start_service` launch each binary
