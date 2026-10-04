@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib.sh"
 
-log "building 9 service binaries into ${BIN_DIR}"
+log "building 10 service binaries into ${BIN_DIR}"
 
 build_one() {
   local name="$1" repo="$2" cmd_pkg="$3"
@@ -41,6 +41,10 @@ build_one labor         "${LABOR_REPO}"         labor
 # yet in this repo (see its own AGENTS.md "CURRENT STATE"), so there is
 # no *-mcp binary to build for it below, unlike the other 6 contexts.
 build_one network       "${NETWORK_REPO}"       netfulfil
+# warehouse-planning (10th bounded context): cmd/api is its HTTP binary
+# package. It also has cmd/mcp, which this harness does not build/run --
+# no MCP step vocabulary exists here for it.
+build_one planning      "${PLANNING_REPO}"      api
 
 log "building 7 MCP server binaries into ${BIN_DIR} (cmd/mcp — the agentic see-layer)"
 build_one facility-mcp     "${FACILITY_REPO}"     mcp
@@ -54,5 +58,5 @@ build_one order-mcp        "${ORDER_REPO}"        mcp
 log "building warehouse-ops-agent (cmd/agent — the agentic analyze/act layer, T5)"
 build_one ops-agent "${OPS_AGENT_REPO}" agent
 
-log "all 17 binaries built"
+log "all 18 binaries built"
 ls -la "${BIN_DIR}"

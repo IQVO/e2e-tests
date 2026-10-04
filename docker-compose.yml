@@ -198,6 +198,27 @@ services:
       timeout: 3s
       retries: 20
 
+  # warehouse-planning (10th bounded context — capacity planning). Own
+  # user/db name "planning" (warehouse-planning ships no docker-compose of
+  # its own), on host port 5450 (past this harness's own 5441-5449 range).
+  postgres-planning:
+    image: postgres:16
+    container_name: e2e-postgres-planning
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: planning
+      POSTGRES_PASSWORD: planning
+      POSTGRES_DB: planning
+    ports:
+      - "5450:5432"
+    volumes:
+      - e2e_planning_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planning -d planning"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -208,3 +229,4 @@ volumes:
   e2e_process_path_pg_data:
   e2e_labor_pg_data:
   e2e_network_pg_data:
+  e2e_planning_pg_data:

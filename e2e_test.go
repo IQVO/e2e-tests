@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,9 +52,11 @@ var (
 	processPathBaseURL = envOrDefault("PROCESS_PATH_BASE_URL", "http://localhost:8087")
 	laborBaseURL       = envOrDefault("LABOR_BASE_URL", "http://localhost:8088")
 	networkBaseURL     = envOrDefault("NETWORK_BASE_URL", "http://localhost:8089")
+	planningBaseURL    = envOrDefault("PLANNING_BASE_URL", "http://localhost:8099")
 	inventoryDBURL     = envOrDefault("INVENTORY_DB_URL", "postgres://inventory@localhost:5442/inventory?sslmode=disable")
 	wesDBURL           = envOrDefault("WES_DB_URL", "postgres://wes@localhost:5443/wes?sslmode=disable")
 	fulfillmentDBURL   = envOrDefault("FULFILLMENT_DB_URL", "postgres://fulfillment@localhost:5444/fulfillment_execution?sslmode=disable")
+	planningDBURL      = envOrDefault("PLANNING_DB_URL", "postgres://planning@localhost:5450/planning?sslmode=disable")
 	// This harness's own docker-compose.yml sets each service's Postgres
 	// password equal to its own username (facility/facility,
 	// inventory/inventory, ...) -- see env.sh's DB_URL comment for why
@@ -62,6 +66,7 @@ var (
 	inventoryDBPassword   = envOrDefault("INVENTORY_DB_PASSWORD", "inventory")
 	wesDBPassword         = envOrDefault("WES_DB_PASSWORD", "wes")
 	fulfillmentDBPassword = envOrDefault("FULFILLMENT_DB_PASSWORD", "fulfillment")
+	planningDBPassword    = envOrDefault("PLANNING_DB_PASSWORD", "planning")
 	eventualWaitTimeout   = 30 * time.Second
 	eventualWaitPoll      = 500 * time.Millisecond
 )
@@ -120,6 +125,11 @@ type world struct {
 	// feature-file identifier expands to (see rs). Resolved lazily and
 	// held for the whole run so every step agrees on it.
 	runSuffix string
+
+	// planningPlanID is the id of the CapacityPlan this scenario created in
+	// warehouse-planning (server-generated), so the publish/get steps can
+	// address it without the feature file ever spelling it out.
+	planningPlanID string
 
 	// soak carries state across soak_backlog_ramp.feature's own three
 	// steps (seed pools -> register stations -> run ramp -> print
@@ -1559,6 +1569,288 @@ func (w *world) listingContains(pathID string, want bool) error {
 }
 
 // ---------------------------------------------------------------------
+// warehouse-planning steps
+//
+// warehouse-planning is driven over its REST surface only. Its Kafka
+// consumers (LABOR constraints from workforce-management's shift plans,
+// the facility-layout station/storage tally) are DISABLED in this harness
+// -- scripts/03-up-services.sh starts it with no KAFKA_BROKERS so the local
+// binary never joins the live cluster's consumer groups -- and the harness
+// has no Kafka vocabulary. LABOR constraints are therefore registered
+// through POST /process-capacities, and the one thing the facility-layout
+// consumer would have written (a work-center station count in
+// location_slot_tally) is seeded directly in its own Postgres, mirroring
+// claimedTaskLeaseForcedExpired. No test-only endpoint is invented.
+// Everything that is mutable is run-scoped (w.rs): locations, process
+// paths and tally zones; capacity plan ids are server-generated.
+// ---------------------------------------------------------------------
+
+// planningFloatTolerance absorbs float64 rounding when the service divides a
+// rate by a conversion factor (4000 UNIT/h / 2.5 = 1600). Expected values in
+// the feature files are exact figures; this is not a "greater than" slack.
+const planningFloatTolerance = 1e-6
+
+func planningFloatEq(got, want float64) bool {
+	d := got - want
+	return d < planningFloatTolerance && d > -planningFloatTolerance
+}
+
+func parseFloatArg(name, s string) (float64, error) {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a number: %w", name, s, err)
+	}
+	return v, nil
+}
+
+func (w *world) warehousePlanningIsHealthy() error {
+	if err := w.doJSON(http.MethodGet, planningBaseURL+"/healthz", nil); err != nil {
+		return fmt.Errorf("warehouse-planning not reachable: %w", err)
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("warehouse-planning /healthz returned %d, body=%s", w.last.status, w.last.body)
+	}
+	return nil
+}
+
+// planningRegisterConstraint registers one rate constraint ("N <unit> per
+// HOUR") of a process at a location for a window.
+func (w *world) planningRegisterConstraint(constraintType, qty, unit, processType, location, windowStart, windowEnd string) error {
+	q, err := parseFloatArg("quantity", qty)
+	if err != nil {
+		return err
+	}
+	return w.expectOK2xx(w.doJSON(http.MethodPost, planningBaseURL+"/process-capacities", map[string]any{
+		"process_type": processType, "location": w.rs(location),
+		"window_start": windowStart, "window_end": windowEnd,
+		"constraint_type": constraintType, "quantity": q, "unit": unit, "period_seconds": 3600,
+	}))
+}
+
+func (w *world) planningRegisterPath(pathID, name, steps string) error {
+	parts := strings.Split(steps, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return w.expectOK2xx(w.doJSON(http.MethodPost, planningBaseURL+"/process-paths", map[string]any{
+		"id": w.rs(pathID), "name": name, "steps": parts,
+	}))
+}
+
+// planningLookUpPathCapacity does not require a 2xx: validation scenarios
+// assert the error status themselves.
+func (w *world) planningLookUpPathCapacity(pathID, location, windowStart, windowEnd, unitsPerOrder, packagesPerOrder string) error {
+	q := url.Values{}
+	q.Set("location", w.rs(location))
+	q.Set("window_start", windowStart)
+	q.Set("window_end", windowEnd)
+	q.Set("units_per_order", unitsPerOrder)
+	q.Set("packages_per_order", packagesPerOrder)
+	return w.doJSON(http.MethodGet, fmt.Sprintf("%s/process-paths/%s/capacity?%s", planningBaseURL, w.rs(pathID), q.Encode()), nil)
+}
+
+func (w *world) planningPathCapacityIs(want, bottleneck string) error {
+	wantRate, err := parseFloatArg("rate", want)
+	if err != nil {
+		return err
+	}
+	got := w.last.json()
+	rate, _ := toFloat(got["normalized_rate"])
+	if !planningFloatEq(rate, wantRate) || got["normalized_unit"] != "ORDER" || got["bottleneck_step"] != bottleneck {
+		return fmt.Errorf("path capacity = %v %v bottleneck %v, want %v ORDER bottleneck %q (full body: %s)",
+			got["normalized_rate"], got["normalized_unit"], got["bottleneck_step"], wantRate, bottleneck, w.last.body)
+	}
+	return nil
+}
+
+// planningStepBreakdownIs asserts the response's step_breakdown against
+// "STEP:rate:CONSTRAINT,..." in path order, e.g. "PACK:1800:STATION".
+func (w *world) planningStepBreakdownIs(want string) error {
+	items, _ := w.last.json()["step_breakdown"].([]any)
+	wantItems := strings.Split(want, ",")
+	if len(items) != len(wantItems) {
+		return fmt.Errorf("step_breakdown has %d entries, want %d (full body: %s)", len(items), len(wantItems), w.last.body)
+	}
+	for i, wi := range wantItems {
+		f := strings.Split(wi, ":")
+		if len(f) != 3 {
+			return fmt.Errorf("malformed expected step %q, want STEP:rate:CONSTRAINT", wi)
+		}
+		wantRate, err := parseFloatArg("rate", f[1])
+		if err != nil {
+			return err
+		}
+		item, _ := items[i].(map[string]any)
+		rate, _ := toFloat(item["normalized_rate"])
+		if item["step"] != f[0] || !planningFloatEq(rate, wantRate) || item["binding_constraint"] != f[2] {
+			return fmt.Errorf("step_breakdown[%d] = %v, want %s (full body: %s)", i, item, wi, w.last.body)
+		}
+	}
+	return nil
+}
+
+func (w *world) planningResponseHasWarnings(want int) error {
+	warnings, ok := w.last.json()["warnings"].([]any)
+	if !ok {
+		return fmt.Errorf("response has no warnings array (body: %s)", w.last.body)
+	}
+	if len(warnings) != want {
+		return fmt.Errorf("response has %d warnings, want %d (body: %s)", len(warnings), want, w.last.body)
+	}
+	return nil
+}
+
+// planningCreatePlan creates a DRAFT CapacityPlan. demand is nil to leave
+// assigned_demand out of the body entirely (the 422 "missing" case).
+func (w *world) planningCreatePlan(warehouse, location, pathID, windowStart, windowEnd string, demand, unitsPerOrder, packagesPerOrder *float64) error {
+	body := map[string]any{
+		"warehouse_id": warehouse, "location": w.rs(location), "path_id": w.rs(pathID),
+		"window_start": windowStart, "window_end": windowEnd,
+	}
+	if demand != nil {
+		body["assigned_demand"] = *demand
+	}
+	if unitsPerOrder != nil {
+		body["units_per_order"] = *unitsPerOrder
+	}
+	if packagesPerOrder != nil {
+		body["packages_per_order"] = *packagesPerOrder
+	}
+	if err := w.doJSON(http.MethodPost, planningBaseURL+"/capacity-plans", body); err != nil {
+		return err
+	}
+	if w.last.status == http.StatusCreated {
+		w.planningPlanID, _ = w.last.json()["id"].(string)
+	}
+	return nil
+}
+
+func (w *world) planningCreatePlanWithDemand(warehouse, location, pathID, windowStart, windowEnd, demand, unitsPerOrder, packagesPerOrder string) error {
+	d, err := parseFloatArg("assigned demand", demand)
+	if err != nil {
+		return err
+	}
+	u, err := parseFloatArg("units_per_order", unitsPerOrder)
+	if err != nil {
+		return err
+	}
+	p, err := parseFloatArg("packages_per_order", packagesPerOrder)
+	if err != nil {
+		return err
+	}
+	return w.planningCreatePlan(warehouse, location, pathID, windowStart, windowEnd, &d, &u, &p)
+}
+
+func (w *world) planningCreatePlanWithoutDemand(warehouse, location, pathID, windowStart, windowEnd string) error {
+	return w.planningCreatePlan(warehouse, location, pathID, windowStart, windowEnd, nil, nil, nil)
+}
+
+func (w *world) planningPublishPlan() error {
+	return w.doJSON(http.MethodPost, fmt.Sprintf("%s/capacity-plans/%s/publish", planningBaseURL, w.planningPlanID), nil)
+}
+
+func (w *world) planningGetPlan() error {
+	return w.doJSON(http.MethodGet, fmt.Sprintf("%s/capacity-plans/%s", planningBaseURL, w.planningPlanID), nil)
+}
+
+func (w *world) planningPlanIs(status, pathCapacity, overWindow, shortage, bottleneck string) error {
+	for name, s := range map[string]string{"path capacity": pathCapacity, "capacity over window": overWindow, "shortage": shortage} {
+		if _, err := parseFloatArg(name, s); err != nil {
+			return err
+		}
+	}
+	wantPC, _ := strconv.ParseFloat(pathCapacity, 64)
+	wantOW, _ := strconv.ParseFloat(overWindow, 64)
+	wantSh, _ := strconv.ParseFloat(shortage, 64)
+	got := w.last.json()
+	pc, _ := toFloat(got["path_capacity"])
+	ow, _ := toFloat(got["capacity_over_window"])
+	sh, _ := toFloat(got["shortage"])
+	if got["id"] != w.planningPlanID || got["status"] != status ||
+		!planningFloatEq(pc, wantPC) || !planningFloatEq(ow, wantOW) || !planningFloatEq(sh, wantSh) ||
+		got["bottleneck_step"] != bottleneck {
+		return fmt.Errorf("capacity plan = %s, want id %s status %s path capacity %v capacity over window %v shortage %v bottleneck %s",
+			w.last.body, w.planningPlanID, status, wantPC, wantOW, wantSh, bottleneck)
+	}
+	return nil
+}
+
+func (w *world) planningPlanIsBoundBy(constraint string) error {
+	if got := w.last.json()["bottleneck_constraint"]; got != constraint {
+		return fmt.Errorf("bottleneck_constraint = %v, want %q (body: %s)", got, constraint, w.last.body)
+	}
+	return nil
+}
+
+// planningResponseIsProblem asserts an RFC 7807 problem+json response: the
+// content type, the status member, and the type URI's slug.
+func (w *world) planningResponseIsProblem(status int, slug string) error {
+	if w.last.status != status {
+		return fmt.Errorf("response status = %d, want %d (body: %s)", w.last.status, status, w.last.body)
+	}
+	if ct := w.last.header.Get("Content-Type"); !strings.HasPrefix(ct, "application/problem+json") {
+		return fmt.Errorf("Content-Type = %q, want application/problem+json (body: %s)", ct, w.last.body)
+	}
+	got := w.last.json()
+	wantType := "https://errors.warehouse-planning.warehouse-systems.dev/" + slug
+	gotStatus, _ := toFloat(got["status"])
+	if got["type"] != wantType || int(gotStatus) != status {
+		return fmt.Errorf("problem = %s, want type %q status %d", w.last.body, wantType, status)
+	}
+	return nil
+}
+
+func (w *world) planningDeclareStationStandard(qty, unit, processType, location string) error {
+	q, err := parseFloatArg("quantity", qty)
+	if err != nil {
+		return err
+	}
+	return w.doJSON(http.MethodPut, fmt.Sprintf("%s/station-standards/%s/%s", planningBaseURL, w.rs(location), processType), map[string]any{
+		"quantity": q, "unit": unit, "period_seconds": 3600,
+	})
+}
+
+// planningSeedStationTally stands in for warehouse-planning's Kafka
+// facility-layout consumer (disabled in this harness): it writes the count
+// of work-center stations the consumer would have tallied for a zone, via
+// the same upsert shape the service's own repository uses. The zone id is
+// run-scoped by the caller; the count is set (not incremented), so a re-run
+// of the same scenario can never accumulate.
+func (w *world) planningSeedStationTally(count int, activity, zoneID string) error {
+	db, err := dbOpen(planningDBURL, planningDBPassword)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.ExecContext(context.Background(), `
+		INSERT INTO location_slot_tally (zone_id, tally_type, tally_key, count)
+		VALUES ($1, 'STATION', $2, $3)
+		ON CONFLICT (zone_id, tally_type, tally_key) DO UPDATE SET count = EXCLUDED.count`,
+		w.rs(zoneID), activity, count)
+	return err
+}
+
+func (w *world) planningLookUpStorageCapacity(location string) error {
+	return w.doJSON(http.MethodGet, planningBaseURL+"/storage-capacity?location="+url.QueryEscape(w.rs(location)), nil)
+}
+
+// planningStorageCapacityListsStations asserts the site lists exactly one
+// station bucket, the given activity in the given zone, with the given count.
+func (w *world) planningStorageCapacityListsStations(count int, activity, zoneID string) error {
+	zoneID = w.rs(zoneID)
+	stations, _ := w.last.json()["stations"].([]any)
+	if len(stations) != 1 {
+		return fmt.Errorf("storage capacity lists %d station buckets, want exactly 1 (body: %s)", len(stations), w.last.body)
+	}
+	item, _ := stations[0].(map[string]any)
+	n, _ := toFloat(item["stations"])
+	if item["zone_id"] != zoneID || item["activity"] != activity || int(n) != count {
+		return fmt.Errorf("station bucket = %v, want %d %s stations in zone %q (body: %s)", item, count, activity, zoneID, w.last.body)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------
 // generic assertion helpers
 // ---------------------------------------------------------------------
 
@@ -1717,6 +2009,26 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^network-fulfillment eventually reports network order "([^"]*)" as ([A-Z]+)$`, w.networkOrderEventuallyReportsState)
 	sc.Step(`^that network order has no lines$`, w.theNetworkOrderHasNoLines)
 	sc.Step(`^that network order has a line with network product id "([^"]*)" and SKU "([^"]*)"$`, w.theNetworkOrderHasLineWithProductAndSKU)
+
+	// warehouse-planning
+	sc.Step(`^warehouse-planning is healthy$`, w.warehousePlanningIsHealthy)
+	sc.Step(`^I register a ([A-Z]+) constraint of (\d+) ([A-Z]+) per HOUR for ([A-Z]+) at "([^"]*)" for the window "([^"]*)" to "([^"]*)" in warehouse-planning$`, w.planningRegisterConstraint)
+	sc.Step(`^I register process path "([^"]*)" named "([^"]*)" with steps ([A-Z, ]+) in warehouse-planning$`, w.planningRegisterPath)
+	sc.Step(`^I look up the capacity of process path "([^"]*)" at "([^"]*)" for the window "([^"]*)" to "([^"]*)" with units_per_order ([\d.]+) and packages_per_order ([\d.]+) in warehouse-planning$`, w.planningLookUpPathCapacity)
+	sc.Step(`^the process path capacity is ([\d.]+) ORDER per HOUR bound by ([A-Z]+)$`, w.planningPathCapacityIs)
+	sc.Step(`^the step breakdown is "([^"]*)"$`, w.planningStepBreakdownIs)
+	sc.Step(`^the response has (\d+) warnings?$`, w.planningResponseHasWarnings)
+	sc.Step(`^I create a capacity plan for warehouse "([^"]*)" at "([^"]*)" on path "([^"]*)" for the window "([^"]*)" to "([^"]*)" with assigned demand (-?[\d.]+), units_per_order ([\d.]+) and packages_per_order ([\d.]+) in warehouse-planning$`, w.planningCreatePlanWithDemand)
+	sc.Step(`^I create a capacity plan for warehouse "([^"]*)" at "([^"]*)" on path "([^"]*)" for the window "([^"]*)" to "([^"]*)" without an assigned demand in warehouse-planning$`, w.planningCreatePlanWithoutDemand)
+	sc.Step(`^I publish the capacity plan in warehouse-planning$`, w.planningPublishPlan)
+	sc.Step(`^I get the capacity plan in warehouse-planning$`, w.planningGetPlan)
+	sc.Step(`^the capacity plan is (DRAFT|PUBLISHED) with path capacity ([\d.]+) ORDER per HOUR, capacity over window ([\d.]+), shortage ([\d.]+) and bottleneck ([A-Z]+)$`, w.planningPlanIs)
+	sc.Step(`^the capacity plan is bound by ([A-Z]+)$`, w.planningPlanIsBoundBy)
+	sc.Step(`^the response is a problem with status (\d+) and type "([^"]*)"$`, w.planningResponseIsProblem)
+	sc.Step(`^warehouse-planning's facility-layout tally holds (\d+) ([A-Z]+) work-center stations in zone "([^"]*)"$`, w.planningSeedStationTally)
+	sc.Step(`^I declare a station standard of (\d+) ([A-Z]+) per HOUR for ([A-Z]+) at "([^"]*)" in warehouse-planning$`, w.planningDeclareStationStandard)
+	sc.Step(`^I look up the storage capacity of "([^"]*)" in warehouse-planning$`, w.planningLookUpStorageCapacity)
+	sc.Step(`^the storage capacity lists (\d+) ([A-Z]+) stations in zone "([^"]*)"$`, w.planningStorageCapacityListsStations)
 
 	// soak backlog ramp (features/soak_backlog_ramp.feature, @soak —
 	// excluded from the default run, see TestMain's Tags option)

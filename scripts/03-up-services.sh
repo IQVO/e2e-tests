@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 9 bounded-context HTTP services as background processes
+# Starts all 10 bounded-context HTTP services as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -55,6 +55,15 @@
 #                           this harness (NETWORK_MODE=stub, no
 #                           EVENT_PUBLISHER); its inbound demand is a
 #                           poller reading a seeded stub file, never HTTP.
+#  10. warehouse-planning  — capacity planning (what a process path can do
+#                           over a window vs. the demand assigned to it).
+#                           No HTTP dependency on any other context. Runs
+#                           with NO KAFKA_BROKERS and EVENT_PUBLISHER=log:
+#                           its labor/storage Kafka consumers are disabled
+#                           and its outbox relay only logs, so it never
+#                           joins the live cluster's consumer groups. Its
+#                           scenarios drive its REST surface and seed its
+#                           own facility-layout tally table directly.
 #
 # All seven publisher-capable services run with EVENT_PUBLISHER=kafka
 # against the shared broker (labor-performance is the exception -- it has
@@ -225,7 +234,32 @@ start_service network "${BIN_DIR}/network" \
   LOG_LEVEL=info
 wait_for_http "${NETWORK_BASE_URL}/healthz"
 
-log "all 9 services up and healthy"
+log "starting warehouse-planning on ${PLANNING_BASE_URL}"
+# warehouse-planning (10th bounded context): cmd/api reads these env vars
+# (see its main.go). KAFKA_BROKERS is blanked EXPLICITLY, not just left
+# out: with it set, startKafkaConsumers would start the labor-capacity and
+# storage-capacity consumers under the service's DEFAULT group ids
+# ("warehouse-planning-labor-capacity"/"-storage-capacity"), i.e. the very
+# groups the live in-cluster pod holds, and the local process would either
+# starve or steal its partitions. Blank = ingestion disabled (logged, not
+# fatal). EVENT_PUBLISHER=log (its default) keeps the outbox relay off
+# Kafka too; CapacityPlan events are only logged. No
+# *_CONSUMER_GROUP is needed while Kafka is off; if a scenario ever turns
+# it on, add LABOR_CAPACITY_CONSUMER_GROUP/STORAGE_CAPACITY_CONSUMER_GROUP
+# derived from E2E_CONSUMER_GROUP_SUFFIX in env.sh first.
+# The migrations live under internal/adapters/outbound/postgres/migrations
+# (its default is relative to the repo root, hence the absolute path).
+start_service planning "${BIN_DIR}/planning" \
+  HTTP_ADDR=":${PLANNING_HTTP_PORT}" \
+  DATABASE_URL="${PLANNING_DB_URL}" \
+  PGPASSWORD="planning" \
+  MIGRATIONS_PATH="${PLANNING_REPO}/internal/adapters/outbound/postgres/migrations" \
+  EVENT_PUBLISHER=log \
+  KAFKA_BROKERS="" \
+  LOG_LEVEL=info
+wait_for_http "${PLANNING_BASE_URL}/healthz"
+
+log "all 10 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' inventory-storage      "${INVENTORY_BASE_URL}"
@@ -235,6 +269,7 @@ printf '  %-24s %s\n' labor-performance      "${LABOR_BASE_URL}"
 printf '  %-24s %s\n' workforce-management   "${WORKFORCE_BASE_URL}"
 printf '  %-24s %s\n' order-management       "${ORDER_BASE_URL}"
 printf '  %-24s %s\n' network-fulfillment    "${NETWORK_BASE_URL}"
+printf '  %-24s %s\n' warehouse-planning     "${PLANNING_BASE_URL}"
 
 # --- MCP servers (cmd/mcp), one per context, pointed at the SAME
 # Postgres each HTTP service above just started against — so a fact an

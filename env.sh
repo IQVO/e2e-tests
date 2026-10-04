@@ -44,6 +44,15 @@ LABOR_REPO="${REPOS_ROOT}/labor-performance"
 # it via NETWORK_SEED_FILE/PRODUCT_TRANSLATION_FILE fixtures in
 # fixtures/network-fulfillment/ rather than an HTTP step.
 NETWORK_REPO="${REPOS_ROOT}/network-fulfillment"
+# warehouse-planning (10th bounded context -- capacity planning: what a
+# process path can do over a window vs. the demand assigned to it).
+# Started with NO KAFKA_BROKERS on purpose (see 03-up-services.sh): its
+# labor/storage Kafka consumers are disabled, so this harness's local
+# binary never joins the live cluster's consumer groups, and the
+# scenarios feed it through its REST surface plus one direct seed of
+# its own facility-layout tally table (the only thing its consumer
+# would have written).
+PLANNING_REPO="${REPOS_ROOT}/warehouse-planning"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
@@ -69,6 +78,10 @@ LABOR_HTTP_PORT=8088
 # network-fulfillment (9th bounded context) — next free slot after
 # labor-performance's :8088.
 NETWORK_HTTP_PORT=8089
+# warehouse-planning (10th bounded context) -- next free slot after
+# network-fulfillment's :8089 that is clear of the 8091-8098 MCP/agent
+# range and the 8101-8107 reports range below.
+PLANNING_HTTP_PORT=8099
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -79,6 +92,7 @@ ORDER_BASE_URL="http://localhost:${ORDER_HTTP_PORT}"
 PROCESS_PATH_BASE_URL="http://localhost:${PROCESS_PATH_HTTP_PORT}"
 LABOR_BASE_URL="http://localhost:${LABOR_HTTP_PORT}"
 NETWORK_BASE_URL="http://localhost:${NETWORK_HTTP_PORT}"
+PLANNING_BASE_URL="http://localhost:${PLANNING_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -198,6 +212,9 @@ LABOR_DB_URL="postgres://labor@localhost:5448/labor?sslmode=disable"
 # network-fulfillment (9th bounded context) — next free slot after
 # labor-performance's :5448.
 NETWORK_DB_URL="postgres://network@localhost:5449/network?sslmode=disable"
+# warehouse-planning (10th bounded context) — next free slot after
+# network-fulfillment's :5449.
+PLANNING_DB_URL="postgres://planning@localhost:5450/planning?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
