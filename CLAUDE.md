@@ -92,10 +92,5 @@ feature at a time.
 
 Claude Code loads each rule below automatically when you touch the matching paths. OpenCode and Codex do NOT: read the rule BEFORE editing matching files.
 
-| When touching | Read |
-|---|---|
-| `features/**`, `e2e_test.go`, `soak_test.go`, `cmd/warehouse-day/**` | `.claude/rules/idempotent-suite.md` |
-| `scripts/*.sh`, `env.sh`, `docker-compose.yml`, `Makefile`, `.github/workflows/**`, `fixtures/**` | `.claude/rules/harness-infra-and-ci.md` |
-
 Hooks (`scripts/harness/hook.py`, wired for Claude Code, Codex and OpenCode) block pushes to develop/main, `--no-verify`, bare `rm -rf`, and edits to generated files, and feed gofmt/vet findings back after each edit. Before saying "done" run `make check-fast`; the full gate is `make check-all`. `HARNESS_OFF=1` disables the hooks when debugging the harness itself.
 <!-- harness:scoped-rules:end -->
