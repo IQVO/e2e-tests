@@ -73,49 +73,49 @@ jobs:
       - name: Checkout facility-layout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: claudioed/facility-layout
+          repository: IQVO/facility-layout
           ref: develop
           path: facility-layout
 
       - name: Checkout inventory-storage
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: claudioed/inventory-storage
+          repository: IQVO/inventory-storage
           ref: develop
           path: inventory-storage
 
       - name: Checkout wes-work-planning
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: claudioed/wes-work-planning
+          repository: IQVO/wes-work-planning
           ref: develop
           path: wes-work-planning
 
       - name: Checkout fulfillment-execution
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: claudioed/fulfillment-execution
+          repository: IQVO/fulfillment-execution
           ref: develop
           path: fulfillment-execution
 
       - name: Checkout workforce-management
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: claudioed/workforce-management
+          repository: IQVO/workforce-management
           ref: develop
           path: workforce-management
 
       - name: Checkout order-management
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: claudioed/order-management
+          repository: IQVO/order-management
           ref: develop
           path: order-management
 
       - name: Checkout warehouse-infra (config only -- process-path catalogue)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: claudioed/warehouse-infra
+          repository: IQVO/warehouse-infra
           ref: develop
           path: warehouse-infra
           sparse-checkout: |
