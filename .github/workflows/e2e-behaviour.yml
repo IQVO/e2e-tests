@@ -35,6 +35,9 @@ defaults:
 jobs:
   bootstrap-scenario:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     timeout-minutes: 20
 
     services:
@@ -296,3 +299,13 @@ jobs:
       - name: Dump service logs on failure
         if: failure()
         run: tail -n +1 /tmp/facility.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log 2>&1 || true
+      - name: Open or refresh the harness:red issue on a scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/harness/red_issue.py bootstrap-scenario "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Close the harness:red issue when the scheduled run recovers
+        if: success() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/harness/red_issue.py bootstrap-scenario --close
