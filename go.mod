@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/cucumber/godog v0.16.0
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/segmentio/kafka-go v0.4.51
 )
 
