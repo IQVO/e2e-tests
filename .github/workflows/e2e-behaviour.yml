@@ -299,13 +299,19 @@ jobs:
       - name: Dump service logs on failure
         if: failure()
         run: tail -n +1 /tmp/facility.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log 2>&1 || true
-      - name: Open or refresh the harness:red issue on a scheduled failure
-        if: failure() && github.event_name == 'schedule'
+      # This job checks the repo out into ./e2e-tests next to the service repos, so repo scripts (and the git remote
+      # `gh` needs) are only found from that directory. A scheduled run is what the weekly sensor reads; a manual run
+      # on develop counts as proof too (harness-health), so both trigger these steps. They must run for real on a
+      # dispatch, otherwise a broken step stays invisible until the next Monday.
+      - name: Open or refresh the harness:red issue on a failure of the weekly (or a manual develop) run
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/develop'
+        working-directory: e2e-tests
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/harness/red_issue.py bootstrap-scenario "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      - name: Close the harness:red issue when the scheduled run recovers
-        if: success() && github.event_name == 'schedule'
+      - name: Close the harness:red issue when the weekly (or a manual develop) run recovers
+        if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/develop'
+        working-directory: e2e-tests
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/harness/red_issue.py bootstrap-scenario --close
