@@ -15,7 +15,23 @@ import unittest
 LINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repo_lint.py")
 
 
-def make(files):
+DEP_GOMOD = """  - package-ecosystem: "gomod"
+    directory: "/"
+"""
+DEP_ACTIONS = """  - package-ecosystem: "github-actions"
+    directory: "/"
+"""
+
+
+def make(files, auto_dep=True):
+    """auto_dep: add a valid dependabot.yml when the fixture has workflows/go.mod and none of its own, so tests of
+    the OTHER rules are not tripped by R6 (the R6 tests pass auto_dep=False)."""
+    files = dict(files)
+    has_dep = any(k.startswith(".github/dependabot") for k in files)
+    wf = any(k.startswith(".github/workflows/") and k.endswith((".yml", ".yaml")) for k in files)
+    gomod = "go.mod" in files
+    if auto_dep and not has_dep and (wf or gomod):
+        files[".github/dependabot.yml"] = "version: 2\nupdates:\n" + (DEP_GOMOD if gomod else "") + (DEP_ACTIONS if wf else "")
     root = tempfile.mkdtemp(prefix="rl-")
     for rel, body in files.items():
         p = os.path.join(root, rel)
@@ -232,6 +248,137 @@ class RepoLint(unittest.TestCase):
     def test_r5_skipped_in_the_template_repo(self):
         files = {".github/workflows/ci.yml.template": "x: {{SERVICE}}\n", "Makefile": "PKG := {{RICHEST_AGGREGATE}}\n"}
         self.assertEqual(lint(make(files))[0], 0)
+
+    # ---- R6 ----
+    def test_r6_incident_no_dependabot_config_at_all(self):
+        files = {"go.mod": "module x\n", ".github/workflows/ci.yml": "name: CI\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: true\n"}
+        code, out = lint(make(files, auto_dep=False))
+        self.assertEqual(code, 1, out)
+        self.assertIn("[R6]", out)
+        self.assertIn("gomod", out)
+        self.assertIn("github-actions", out)
+
+    def test_r6_partial_coverage_reports_only_the_missing_ecosystem(self):
+        dep = """
+            version: 2
+            updates:
+              - package-ecosystem: "gomod"
+                directory: "/"
+                schedule:
+                  interval: "weekly"
+        """
+        files = {"go.mod": "module x\n", ".github/dependabot.yml": dep,
+                 ".github/workflows/ci.yml": "name: CI\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: true\n"}
+        code, out = lint(make(files, auto_dep=False))
+        self.assertEqual(code, 1)
+        self.assertEqual(out.count("[R6]"), 1, out)
+        self.assertIn("github-actions", out)
+
+    def test_r6_full_coverage_and_comment_between_keys(self):
+        dep = """
+            version: 2
+            updates:
+              - package-ecosystem: "gomod"
+                directory: "/"
+              - package-ecosystem: "github-actions"
+                # actions are pinned by SHA
+                directory: "/"
+        """
+        files = {"go.mod": "module x\n", ".github/dependabot.yml": dep,
+                 ".github/workflows/ci.yml": "name: CI\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: true\n"}
+        self.assertEqual(lint(make(files))[0], 0, lint(make(files))[1])
+
+    def test_r6_not_required_without_go_or_workflows(self):
+        self.assertEqual(lint(make({"README.md": "x\n"}))[0], 0)
+
+    # ---- R7: scripts invoked from workflow steps ------------------------------------------------------
+    E2E_WF = """
+        name: E2E
+        on: schedule
+        jobs:
+          scenario:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v7
+                with:
+                  path: e2e-tests
+              - uses: actions/checkout@v7
+                with:
+                  repository: IQVO/facility-layout
+                  path: facility-layout
+              - name: Close the harness:red issue
+                if: success()
+                run: python3 scripts/harness/red_issue.py bootstrap-scenario --close
+    """
+
+    def test_r7_incident_multi_repo_job_runs_repo_script_from_workspace_root(self):
+        # e2e-tests: the scenario passed, the job still went red, because the step ran where the script is not
+        root = make({".github/workflows/e2e.yml": self.E2E_WF, "scripts/harness/red_issue.py": "print(1)\n"})
+        code, out = lint(root)
+        self.assertEqual(code, 1, out)
+        self.assertIn("[R7]", out)
+        self.assertIn("e2e-tests/", out)
+        self.assertIn("working-directory: e2e-tests", out)
+
+    def test_r7_working_directory_on_the_step_fixes_it(self):
+        wf = self.E2E_WF.replace("                run: python3", "                working-directory: e2e-tests\n                run: python3")
+        root = make({".github/workflows/e2e.yml": wf, "scripts/harness/red_issue.py": "print(1)\n"})
+        code, out = lint(root)
+        self.assertEqual(code, 0, out)
+
+    def test_r7_job_level_default_working_directory_counts(self):
+        wf = """
+        name: E2E
+        on: schedule
+        jobs:
+          scenario:
+            runs-on: ubuntu-latest
+            defaults:
+              run:
+                working-directory: e2e-tests
+            steps:
+              - uses: actions/checkout@v7
+                with:
+                  path: e2e-tests
+              - run: python3 scripts/harness/red_issue.py x --close
+        """
+        root = make({".github/workflows/e2e.yml": wf, "scripts/harness/red_issue.py": "print(1)\n"})
+        code, out = lint(root)
+        self.assertEqual(code, 0, out)
+
+    def test_r7_missing_script_in_a_single_checkout_job(self):
+        wf = """
+        name: CI
+        on: push
+        jobs:
+          t:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v7
+              - run: bash scripts/does-not-exist.sh
+        """
+        root = make({".github/workflows/ci.yml": wf})
+        code, out = lint(root)
+        self.assertEqual(code, 1, out)
+        self.assertIn("[R7]", out)
+        self.assertIn("scripts/does-not-exist.sh", out)
+
+    def test_r7_existing_script_expressions_and_ignore_marker_are_fine(self):
+        wf = """
+        name: CI
+        on: push
+        jobs:
+          t:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v7
+              - run: python3 scripts/ok.py
+              - run: bash scripts/${{ matrix.x }}.sh
+              - run: bash scripts/gone.sh # repo-lint: ignore generated at runtime
+        """
+        root = make({".github/workflows/ci.yml": wf, "scripts/ok.py": "print(1)\n"})
+        code, out = lint(root)
+        self.assertEqual(code, 0, out)
 
     def test_empty_repo_is_clean(self):
         self.assertEqual(lint(make({"README.md": "x\n"}))[0], 0)

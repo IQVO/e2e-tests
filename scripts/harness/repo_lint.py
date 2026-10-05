@@ -16,6 +16,16 @@ Checks
   R4 owner-drift      no stale GitHub owner in URLs/registry names in .github/, charts/, docusaurus config.
                       (incident: GHCR pushes to a namespace that no longer exists; docs sitemap on a dead host)
   R5 placeholders     no unsubstituted {{TEMPLATE_PLACEHOLDER}} outside *.template files.
+  R6 dependabot-cover a repo with go.mod needs a gomod entry for `/`, one with .github/workflows needs github-actions.
+                      (incident: warehouse-planning shipped with no dependabot.yml: Go modules and pinned
+                      action SHAs were never updated, and nothing reported it)
+
+  R7 workflow-scripts a `run:` step that invokes a repo script (python3|bash|sh scripts/x, ./scripts/x) must run where
+                      that file exists: it must exist, and in a job that checks THIS repo out into a subdirectory
+                      the step needs `working-directory: <that dir>`.
+                      (incident: e2e-tests' scheduled run went red although the scenario passed: the red_issue
+                      steps ran from the workspace root, where scripts/harness/red_issue.py does not exist; a
+                      manual dispatch never ran those schedule-only steps, so nobody saw it)
 
 Usage: repo_lint.py [--root .] [--stale-owners claudioed,other]   exit 0 clean, 1 findings.
 Suppress one line with the text `repo-lint: ignore` on it (use sparingly, say why).
@@ -99,6 +109,49 @@ def val(line):
     return v
 
 
+SCRIPT_RX = re.compile(
+    r"""(?:^|[\s;&|(`"'])(?:(?:python3?|bash|sh)\s+|\./)((?:scripts|tools|hack|ci|\.github/scripts)/[A-Za-z0-9_./-]+\.(?:py|sh|js|mjs))""")
+
+
+def check_scripts(root, rp, jid, first, buf, self_paths, ext_paths):
+    """R7: repo scripts invoked from `run:` steps must resolve from the directory the step runs in."""
+    jm = re.search(r"^    defaults:\s*\n(?:\s+.*\n)*?\s+working-directory:\s*(\S+)", "\n".join(buf) + "\n", re.M)
+    job_wd = jm.group(1).strip("\"'") if jm else ""
+    for off, blk in steps_of(buf):
+        body = "\n".join(blk)
+        if "repo-lint: ignore" in body:
+            continue
+        sm = re.search(r"^\s+working-directory:\s*(\S+)", body, re.M)
+        wd = (sm.group(1) if sm else job_wd).strip("\"'") if (sm or job_wd) else ""
+        if "${{" in wd or (wd.split("/", 1)[0] in ext_paths and wd):
+            continue  # an expression or another repo's checkout: cannot judge statically
+        for i, line in enumerate(blk):
+            if line.lstrip().startswith(("#", "- name:", "name:")):
+                continue
+            for m in SCRIPT_RX.finditer(line):
+                script = m.group(1)
+                if "${{" in script:
+                    continue
+                lineno = first + off + i
+                seg = wd.split("/", 1)[0] if wd else ""
+                if self_paths and seg not in self_paths:
+                    d = sorted(self_paths)[0]
+                    err("R7", rp, lineno,
+                        f"job `{jid}` runs `{script}` from the workspace root, but this job checks the repository out into `{d}/`",
+                        "the file is at `" + d + "/" + script + "`, so the step dies with `can't open file` / `No such file or "
+                        "directory`; on a schedule-only step nobody sees it until the weekly run fails (the scenario can pass "
+                        "and the job still goes red)",
+                        f"add `working-directory: {d}` to the step (or `defaults.run.working-directory` to the job)")
+                    continue
+                local = wd.split("/", 1)[1] if (seg in self_paths and "/" in wd) else ("" if seg in self_paths else wd)
+                if not os.path.exists(os.path.join(root, local, script)):
+                    err("R7", rp, lineno, f"job `{jid}` runs `{script}`, which does not exist in this repository"
+                        + (f" (relative to `{local}`)" if local else ""),
+                        "the step fails at runtime with `No such file or directory`",
+                        "ship the file (managed harness scripts: run tools/migrate_v3.py or sync_managed.py), correct the path, "
+                        "or delete the step")
+
+
 def check_workflow(root, path):
     text = read(path)
     jobs = split_jobs(text)
@@ -142,6 +195,7 @@ def check_workflow(root, path):
                         "if it is not a required check, stays red on develop unnoticed",
                         f"create `{local}`, point {kind} at a path that exists, or delete the job/step if this repo "
                         "does not have that component (a backend context has no web/ or docs/ unless you add it)")
+        check_scripts(root, rp, jid, first, buf, self_paths, ext_paths)
         # R2: needs
         need_blob = " ".join(buf)
         for off, l in enumerate(buf):
@@ -171,9 +225,26 @@ def check_workflow(root, path):
 def check_dependabot(root):
     cfg = next((p for p in (os.path.join(root, ".github", "dependabot.yml"),
                             os.path.join(root, ".github", "dependabot.yaml")) if os.path.isfile(p)), None)
+    need = []
+    if os.path.isfile(os.path.join(root, "go.mod")):
+        need.append(("gomod", "/"))
+    if glob.glob(os.path.join(root, ".github", "workflows", "*.y*ml")):
+        need.append(("github-actions", "/"))
     if not cfg:
+        if need:
+            err("R6", ".github/dependabot.yml", 0,
+                "no dependabot.yml, so " + " and ".join(e for e, _ in need) + " are never updated",
+                "dependency and action-pin drift (and the CVEs that come with it) goes unnoticed until a scanner shouts",
+                "add .github/dependabot.yml with weekly entries for: " + ", ".join(f"{e} `{d}`" for e, d in need))
         return
     rp = rel(root, cfg)
+    covered = {(m.group(1), m.group(2)) for m in re.finditer(
+        r"package-ecosystem:\s*[\"']?([A-Za-z_-]+)[\"']?\s*\n(?:\s*#[^\n]*\n)*\s*directory:\s*[\"']?([^\"'\s#]+)", read(cfg))}
+    for eco, d in need:
+        if (eco, d) not in covered:
+            err("R6", rp, 0, f"no `{eco}` entry for `{d}`",
+                f"{eco} dependencies of this repo are never updated by Dependabot",
+                f"add a weekly `{eco}` entry with directory `{d}` (copy the block from a sibling repo's dependabot.yml)")
     text = read(cfg)
     blocks = re.split(r"(?m)^(?=\s*-\s*package-ecosystem:)", text)
     base_line = 1
