@@ -18,6 +18,19 @@ defaults:
     shell: bash
 
 jobs:
+
+  # Agent-guide sensor (harness-template v3): skills load, references resolve, context budget.
+  # BLOCKING: the guides are clean (0 errors); keep them that way.
+  guide-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 scripts/harness/guide_lint.py
+      - run: python3 scripts/harness/repo_lint.py
+      - run: python3 scripts/harness/test_hook.py
+      - run: python3 scripts/harness/test_repo_lint.py
+
   build-and-vet:
     runs-on: ubuntu-latest
     timeout-minutes: 10
