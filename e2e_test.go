@@ -50,9 +50,12 @@ var (
 	processPathBaseURL = envOrDefault("PROCESS_PATH_BASE_URL", "http://localhost:8087")
 	laborBaseURL       = envOrDefault("LABOR_BASE_URL", "http://localhost:8088")
 	networkBaseURL     = envOrDefault("NETWORK_BASE_URL", "http://localhost:8089")
-	inventoryDBURL     = envOrDefault("INVENTORY_DB_URL", "postgres://inventory@localhost:5442/inventory?sslmode=disable")
-	wesDBURL           = envOrDefault("WES_DB_URL", "postgres://wes@localhost:5443/wes?sslmode=disable")
-	fulfillmentDBURL   = envOrDefault("FULFILLMENT_DB_URL", "postgres://fulfillment@localhost:5444/fulfillment_execution?sslmode=disable")
+	// productMasterBaseURL is product-master, the owner of SKU
+	// classification and the physical profile (its ADR 0001/0003).
+	productMasterBaseURL = envOrDefault("PRODUCT_MASTER_BASE_URL", "http://localhost:8090")
+	inventoryDBURL       = envOrDefault("INVENTORY_DB_URL", "postgres://inventory@localhost:5442/inventory?sslmode=disable")
+	wesDBURL             = envOrDefault("WES_DB_URL", "postgres://wes@localhost:5443/wes?sslmode=disable")
+	fulfillmentDBURL     = envOrDefault("FULFILLMENT_DB_URL", "postgres://fulfillment@localhost:5444/fulfillment_execution?sslmode=disable")
 	// This harness's own docker-compose.yml sets each service's Postgres
 	// password equal to its own username (facility/facility,
 	// inventory/inventory, ...) -- see env.sh's DB_URL comment for why
@@ -185,6 +188,7 @@ func (w *world) doJSON(method, url string, body any) error {
 func (w *world) allServicesAreHealthy() error {
 	for name, base := range map[string]string{
 		"facility-layout":       facilityBaseURL,
+		"product-master":        productMasterBaseURL,
 		"inventory-storage":     inventoryBaseURL,
 		"wes-work-planning":     wesBaseURL,
 		"fulfillment-execution": fulfillmentBaseURL,
@@ -328,23 +332,216 @@ func (w *world) decommissionLocationSlot(locationCode string) error {
 }
 
 // ---------------------------------------------------------------------
-// inventory-storage steps
+// product-master steps (classification owner since product-master ADR
+// 0003 stage C; inventory-storage ADR 0034 hands its write path over)
 // ---------------------------------------------------------------------
 
-// classifyProduct registers a SKU's ProductClassification. handlingTags is
-// a comma-separated list of the closed HandlingTag vocabulary (e.g.
-// "Hazmat"); inventory-storage is the source of truth for this master data.
-func (w *world) classifyProduct(sku, handlingTags string) error {
+// splitTags turns a feature file's comma-separated handling-tag list (e.g.
+// "Hazmat,Fragile") into the JSON array every classification API takes.
+func splitTags(handlingTags string) []string {
 	tags := []string{}
 	for _, t := range strings.Split(handlingTags, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			tags = append(tags, t)
 		}
 	}
-	return w.expectOK2xx(w.doJSON(http.MethodPut,
-		fmt.Sprintf("%s/products/%s/classification", inventoryBaseURL, sku),
-		map[string]any{"handlingTags": tags}))
+	return tags
 }
+
+// registerProductInProductMaster registers the SKU (PUT /products/{sku}).
+// The PUT is idempotent: 201 on first registration, 200 when the product
+// already exists with this description, so a fixed reference SKU re-runs
+// cleanly against a dirty database.
+func (w *world) registerProductInProductMaster(sku string) error {
+	sku = w.rs(sku)
+	return w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s", productMasterBaseURL, sku),
+		map[string]any{"description": "e2e product " + sku}))
+}
+
+// classifyProductInProductMaster sets the SKU's ProductClassification in
+// product-master (PUT /products/{sku}/classification, the same body
+// inventory-storage's retired endpoint took). The response must say the
+// classification is product-master's own (`classificationSource=native`)
+// and carry exactly the requested tags.
+func (w *world) classifyProductInProductMaster(sku, handlingTags string) error {
+	sku = w.rs(sku)
+	want := splitTags(handlingTags)
+	if err := w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/classification", productMasterBaseURL, sku),
+		map[string]any{"handlingTags": want})); err != nil {
+		return err
+	}
+	got := w.last.json()
+	if got["classificationSource"] != "native" {
+		return fmt.Errorf("product-master classified %s with classificationSource=%v, want native (body: %s)", sku, got["classificationSource"], w.last.body)
+	}
+	if !sameTags(got["handlingTags"], want) {
+		return fmt.Errorf("product-master classified %s with handlingTags=%v, want %v (body: %s)", sku, got["handlingTags"], want, w.last.body)
+	}
+	return nil
+}
+
+// registerAndClassifyInProductMaster is the replacement for the retired
+// "SKU X is classified with handling tags Y in inventory-storage" step:
+// a product must be registered before product-master accepts a
+// classification for it.
+func (w *world) registerAndClassifyInProductMaster(sku, handlingTags string) error {
+	if err := w.registerProductInProductMaster(sku); err != nil {
+		return fmt.Errorf("register %s in product-master: %w", sku, err)
+	}
+	return w.classifyProductInProductMaster(sku, handlingTags)
+}
+
+// sameTags reports whether a decoded JSON handlingTags array holds exactly
+// the tags in want (as a set: both sides are duplicate-free by contract).
+func sameTags(raw any, want []string) bool {
+	arr, ok := raw.([]any)
+	if !ok || len(arr) != len(want) {
+		return false
+	}
+	have := map[string]bool{}
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			return false
+		}
+		have[s] = true
+	}
+	for _, t := range want {
+		if !have[t] {
+			return false
+		}
+	}
+	return len(have) == len(want)
+}
+
+// inventoryKnowsSKUAs is one read of inventory-storage's local copy
+// (GET /products/{sku}/classification, deprecated but still served until
+// product-master ADR 0003 stage E) compared EXACTLY with want.
+func (w *world) inventoryKnowsSKUAs(sku string, want []string) error {
+	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/products/%s/classification", inventoryBaseURL, sku), nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("inventory-storage GET classification of %s: status %d (body: %s)", sku, w.last.status, w.last.body)
+	}
+	if got := w.last.json()["handlingTags"]; !sameTags(got, want) {
+		return fmt.Errorf("inventory-storage knows %s as %v, want %v (body: %s)", sku, got, want, w.last.body)
+	}
+	return nil
+}
+
+// inventoryEventuallyKnowsSKUAs polls inventory-storage until its local
+// copy (fed by warehouse.product-master.events through the consumer group
+// in PRODUCT_MASTER_CONSUMER_GROUP) holds exactly the expected tags. A 404
+// while the event is in flight is the expected transient.
+func (w *world) inventoryEventuallyKnowsSKUAs(sku, handlingTags string) error {
+	sku = w.rs(sku)
+	want := splitTags(handlingTags)
+	return eventually(func() error { return w.inventoryKnowsSKUAs(sku, want) })
+}
+
+// inventoryStillKnowsSKUAs is the one-shot variant, used right after the
+// retired inventory-storage PUT to prove that call wrote nothing.
+func (w *world) inventoryStillKnowsSKUAs(sku, handlingTags string) error {
+	return w.inventoryKnowsSKUAs(w.rs(sku), splitTags(handlingTags))
+}
+
+// inventoryClassificationPutIsGone calls inventory-storage's retired
+// PUT /products/{sku}/classification and requires 410 with the RFC 7807
+// problem type ending in "/<slug>" (classification-moved, inventory-storage
+// ADR 0034). The status alone is not enough: any 410 would pass.
+func (w *world) inventoryClassificationPutIsGone(sku, handlingTags, slug string) error {
+	sku = w.rs(sku)
+	if err := w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/classification", inventoryBaseURL, sku),
+		map[string]any{"handlingTags": splitTags(handlingTags)}); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusGone {
+		return fmt.Errorf("inventory-storage PUT classification of %s: status %d, want 410 (body: %s)", sku, w.last.status, w.last.body)
+	}
+	typ, _ := w.last.json()["type"].(string)
+	if !strings.HasSuffix(typ, "/"+slug) {
+		return fmt.Errorf("inventory-storage PUT classification of %s: problem type %q, want .../%s (body: %s)", sku, typ, slug, w.last.body)
+	}
+	return nil
+}
+
+// declareDimensionsInProductMaster sets the declared unit dimensions and
+// weight (PUT /products/{sku}/dimensions/declared, ADR 0002).
+func (w *world) declareDimensionsInProductMaster(sku string, l, wd, h, g int) error {
+	sku = w.rs(sku)
+	return w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/dimensions/declared", productMasterBaseURL, sku),
+		map[string]any{"lengthMm": l, "widthMm": wd, "heightMm": h, "weightG": g}))
+}
+
+// measureDimensionsInProductMaster records a cubiscan reading
+// (PUT /products/{sku}/dimensions/measured). measuredAt is one minute in
+// the past: product-master rejects a future timestamp with 400, and the SKU
+// is run-scoped, so a re-run never hits 409 stale-measurement.
+func (w *world) measureDimensionsInProductMaster(sku string, l, wd, h, g int) error {
+	sku = w.rs(sku)
+	return w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/dimensions/measured", productMasterBaseURL, sku),
+		map[string]any{
+			"lengthMm": l, "widthMm": wd, "heightMm": h, "weightG": g,
+			"measuredAt": time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+			"deviceId":   "CUBISCAN-E2E",
+		}))
+}
+
+// physicalProfileIs reads GET /products/{sku}/physical-profile and asserts
+// effectiveSource and the declared-vs-measured discrepancy flag exactly.
+func (w *world) physicalProfileIs(sku, source, discrepancy string) error {
+	if err := w.physicalProfileReadFor(sku); err != nil {
+		return err
+	}
+	sku = w.rs(sku)
+	got := w.last.json()
+	if got["effectiveSource"] != source {
+		return fmt.Errorf("physical profile of %s: effectiveSource=%v, want %q (body: %s)", sku, got["effectiveSource"], source, w.last.body)
+	}
+	if fmt.Sprint(got["discrepancy"]) != discrepancy {
+		return fmt.Errorf("physical profile of %s: discrepancy=%v, want %s (body: %s)", sku, got["discrepancy"], discrepancy, w.last.body)
+	}
+	return nil
+}
+
+// effectiveDimensionsAre re-reads the physical profile and asserts its
+// effective values exactly.
+func (w *world) effectiveDimensionsAre(sku string, l, wd, h, g int) error {
+	if err := w.physicalProfileReadFor(sku); err != nil {
+		return err
+	}
+	eff, ok := w.last.json()["effective"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("physical profile of %s has no effective block (body: %s)", w.rs(sku), w.last.body)
+	}
+	for field, want := range map[string]int{"lengthMm": l, "widthMm": wd, "heightMm": h, "weightG": g} {
+		if v, _ := toFloat(eff[field]); int(v) != want {
+			return fmt.Errorf("physical profile of %s: effective.%s=%v, want %d (body: %s)", w.rs(sku), field, eff[field], want, w.last.body)
+		}
+	}
+	return nil
+}
+
+func (w *world) physicalProfileReadFor(sku string) error {
+	sku = w.rs(sku)
+	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/products/%s/physical-profile", productMasterBaseURL, sku), nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("product-master GET physical-profile of %s: status %d (body: %s)", sku, w.last.status, w.last.body)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------
+// inventory-storage steps
+// ---------------------------------------------------------------------
 
 // stowIsRejected asserts a stow is REFUSED, and specifically by the
 // placement-rule check rather than by any other failure: a 409 whose RFC-7807
@@ -1628,6 +1825,15 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 
 	// facility-layout
 
+	// product-master (classification + physical profile owner)
+	sc.Step(`^SKU "([^"]*)" is registered in product-master$`, w.registerProductInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is classified with handling tags "([^"]*)" in product-master$`, w.classifyProductInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is registered and classified with handling tags "([^"]*)" in product-master$`, w.registerAndClassifyInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is declared in product-master as (\d+)x(\d+)x(\d+) mm and (\d+) g$`, w.declareDimensionsInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is measured in product-master as (\d+)x(\d+)x(\d+) mm and (\d+) g$`, w.measureDimensionsInProductMaster)
+	sc.Step(`^product-master's physical profile of SKU "([^"]*)" has effective source "([^"]*)" and discrepancy (true|false)$`, w.physicalProfileIs)
+	sc.Step(`^product-master's effective dimensions of SKU "([^"]*)" are (\d+)x(\d+)x(\d+) mm and (\d+) g$`, w.effectiveDimensionsAre)
+
 	// inventory-storage
 	sc.Step(`^I decommission location slot "([^"]*)" in facility-layout$`, w.decommissionLocationSlot)
 
@@ -1641,7 +1847,9 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^location slot "([^"]*)" of type "([^"]*)" exists in facility-layout$`, w.ensureLocationSlot)
 
 	sc.Step(`^a Bin "([^"]*)" with capacity (\d+) exists in inventory-storage$`, w.binExists)
-	sc.Step(`^SKU "([^"]*)" is classified with handling tags "([^"]*)" in inventory-storage$`, w.classifyProduct)
+	sc.Step(`^inventory-storage eventually knows SKU "([^"]*)" as "([^"]*)"$`, w.inventoryEventuallyKnowsSKUAs)
+	sc.Step(`^inventory-storage still knows SKU "([^"]*)" as "([^"]*)"$`, w.inventoryStillKnowsSKUAs)
+	sc.Step(`^classifying SKU "([^"]*)" with handling tags "([^"]*)" in inventory-storage is refused with 410 "([^"]*)"$`, w.inventoryClassificationPutIsGone)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage is rejected$`, w.stowIsRejected)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage eventually succeeds$`, w.stowEventuallySucceeds)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage is eventually rejected$`, w.stowEventuallyRejected)
