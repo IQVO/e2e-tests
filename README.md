@@ -148,7 +148,7 @@ missing).
 
 ```bash
 cd e2e-tests
-bash scripts/02-up-infra.sh      # Postgres (12 instances, this repo) + shared Kafka
+bash scripts/02-up-infra.sh      # Postgres (12 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
 bash scripts/01-build.sh         # builds all 20 binaries (12 HTTP incl. product-master, network-inventory-planning, warehouse-planning + 7 MCP + ops-agent)
 bash scripts/03-up-services.sh   # starts them as background processes (product-master before inventory-storage; NIP last)
 bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)

@@ -30,6 +30,14 @@ else
 fi
 wait_for_tcp "${KAFKA_BROKERS%%:*}" "${KAFKA_BROKERS##*:}" 30
 
+# Create every topic up front and wait for a leader on each. A fresh broker's
+# first publish can race its metadata propagation ("Unknown Topic Or
+# Partition"), and a consumer group on a topic that does not exist yet is never
+# assigned a partition -- both silently stall the cross-service scenarios.
+# Idempotent, so it is safe against the shared cluster broker as well.
+log "ensuring every harness topic exists with a leader"
+( cd "${WORKSPACE_ROOT}" && GOTOOLCHAIN=auto go run ./cmd/ensure-topics ) || die "could not ensure the harness's Kafka topics on ${KAFKA_BROKERS}"
+
 log "starting per-service Postgres instances (docker compose, project warehouse-e2e)"
 docker compose -f "${WORKSPACE_ROOT}/docker-compose.yml" up -d
 
