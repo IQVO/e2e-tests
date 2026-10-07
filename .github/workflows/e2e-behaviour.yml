@@ -186,6 +186,12 @@ jobs:
             warehouse.workforce.analytics
             warehouse.order-management.events
             warehouse.order-management.analytics
+            # Consumed (not published) by wes-work-planning's integration
+            # consumer group (NIP WorkDemandReleased, wes-work-planning #150).
+            # No service here publishes it, but a kafka-go group subscribed
+            # to a topic that does not exist never gets an assignment, so
+            # ShiftPlanCommitted etc. would stall with it.
+            warehouse.network-inventory-planning.events
           )
           for t in "${topics[@]}"; do
             docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
