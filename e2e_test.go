@@ -129,6 +129,10 @@ type world struct {
 	// summary) within a single scenario. Left nil by every other
 	// feature's scenarios. See soak_test.go.
 	soak *soakState
+
+	// xfer is the inter-warehouse transfer saga's correlation (ids minted by
+	// network-inventory-planning at approval). See transfer_test.go.
+	xfer *transferState
 }
 
 func newWorld() *world {
@@ -1814,6 +1818,7 @@ func eventually(fn func() error) error {
 
 func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
+	registerTransferSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
 		return ctx, nil

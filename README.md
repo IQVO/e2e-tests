@@ -12,10 +12,12 @@ This repo is a study-project companion to the bounded-context repos
 (`facility-layout`, `product-master`, `inventory-storage`,
 `wes-work-planning`, `fulfillment-execution`, `workforce-management`,
 `order-management`, `process-path-management`, `labor-performance`,
-`network-fulfillment`) plus the read-side decision-support agent
-`warehouse-ops-agent`, all siblings under the same `warehouse-systems/`
-workspace root — see `env.sh`'s `REPOS_ROOT` for the layout this harness
-assumes.
+`network-fulfillment`, `network-inventory-planning`, `warehouse-planning`)
+plus the read-side decision-support agent `warehouse-ops-agent`, all siblings
+under the same `warehouse-systems/` workspace root — see `env.sh`'s
+`REPOS_ROOT` for the layout this harness assumes (it is overridable:
+`REPOS_ROOT=/path/to/repos`, so a git worktree of this repo can build the
+siblings).
 
 ## Services the harness runs
 
@@ -33,6 +35,8 @@ Ports and DSNs live in `env.sh` only; this table mirrors it.
 | workforce-management | `workforce` | 8085 | 5445 | — |
 | order-management | `order` | 8086 | 5446 | local copy (`PRODUCT_CLASSIFICATION_MODE=kafka`) |
 | network-fulfillment | `netfulfil` | 8089 | 5449 | — |
+| network-inventory-planning | `network-inventory-planning` | 8099 | 5451 | — |
+| warehouse-planning | `api` | 8100 | 5452 | — |
 | warehouse-ops-agent | `agent` | 8096 | — | — |
 
 Every local copy uses a per-run consumer group derived from
@@ -42,8 +46,26 @@ refuse to boot with it.
 
 ## What's covered
 
-10 feature files:
+11 feature files (the inter-warehouse transfer feature has two scenarios):
 
+- **`features/inter_warehouse_transfer.feature`** — the whole
+  inter-warehouse transfer saga across real service binaries and real Kafka:
+  network-inventory-planning approves a transfer, inventory-storage
+  allocates the origin stock, NIP releases the pick demand
+  (`WorkDemandReleased`), wes-work-planning enqueues and releases it,
+  fulfillment-execution's floor picks (`TransferPicked`), NIP releases the
+  dispatch demand, the floor dispatches (`TransferDispatched`), the
+  destination scans and stows through inventory-storage's REST
+  (`TransferReceiptStaged` / `TransferStockStowed`) and NIP reaches
+  `RECEIVED`. A second scenario proves the compensation: origin stock that
+  cannot cover the transfer → `TransferStockAllocationRejected` → `UNFULFILLABLE`,
+  no work released. The feature header lists exactly what is injected or
+  seeded rather than produced by a real service (`SiteCapabilityChanged`,
+  `SiteSkuDemandChanged`, site custody of stock/bins) and why. It needs
+  warehouse-planning (the real producer of `CapacityPlanPublished`) and
+  network-inventory-planning, both started by `scripts/03-up-services.sh`.
+  A short-pick scenario is not possible today: fulfillment-execution's
+  completion carries no picked quantity.
 - **`features/bootstrap.feature`** — a single work unit flowing through
   every bounded context: facility-layout's physical map, inventory-storage
   stock, workforce-management's committed shift plan (Kafka →
@@ -126,9 +148,9 @@ missing).
 
 ```bash
 cd e2e-tests
-bash scripts/02-up-infra.sh      # Postgres (10 instances, this repo) + shared Kafka
-bash scripts/01-build.sh         # builds all 18 binaries (10 HTTP incl. product-master + 7 MCP + ops-agent)
-bash scripts/03-up-services.sh   # starts them as background processes (product-master before inventory-storage)
+bash scripts/02-up-infra.sh      # Postgres (12 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
+bash scripts/01-build.sh         # builds all 20 binaries (12 HTTP incl. product-master, network-inventory-planning, warehouse-planning + 7 MCP + ops-agent)
+bash scripts/03-up-services.sh   # starts them as background processes (product-master before inventory-storage; NIP last)
 bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)
 GODOG_TAGS=@product-master bash scripts/04-run-tests.sh  # just the product-master scenario
 bash scripts/06-run-soak.sh      # OPTIONAL: the long-running @soak backlog-ramp run (see below)
@@ -229,6 +251,28 @@ committed offsets across restarts instead of replaying the topic history.
   exception and needed a `02b-migrate-wes.sh` workaround; it now migrates
   itself like the rest (wes-work-planning PR #52), and that script has
   been removed.
+- `KAFKA_BROKERS` (default `localhost:9092`, the warehouse-infra kind
+  cluster's broker) and `REPOS_ROOT` are overridable. Run the transfer
+  feature against a throwaway broker, not the shared cluster: the saga
+  publishes AND consumes commands (`TransferAllocationRequested`) on shared
+  topics, so a live in-cluster inventory-storage could answer the same
+  command with a different reservation. E.g.
+  `docker run -d -p 29092:29092 -e KAFKA_NODE_ID=1 ... apache/kafka:3.8.0`
+  (the CI job's single-node KRaft config with the listener on `:29092`) and
+  `export KAFKA_BROKERS=localhost:29092` before the `scripts/*.sh`. Create
+  the topics up front (CI does) so no first publish races topic creation.
+- `fixtures/process-paths/sortable-fc.yaml` is this harness's own copy of
+  warehouse-infra's process-path catalogue plus a `DISPATCH` family
+  (`dispatch-*`), which the transfer saga's dispatch leg needs
+  (fulfillment-execution ADR-0036) and warehouse-infra's frozen file lacks.
+  NIP's pick leg is `pick-transfer` (inside the existing `PICK` family) and
+  its dispatch leg `dispatch-transfer`.
+- `PLANNING_MAX_STALENESS` for NIP is `720h` here (`NIP_PLANNING_MAX_STALENESS`):
+  NIP refuses to plan from ANY stale fact in its read models, and this
+  harness's Postgres volumes persist across runs.
+- `NIP_TRANSFER_READ_MODE=rest` switches the transfer feature's state
+  assertion from NIP's own table (default, `db`) to `GET /v1/transfers/{id}`
+  once that endpoint is on NIP's develop.
 
 ## CI
 
@@ -242,7 +286,10 @@ of every change that touches it, the same pattern `e2s-tests`' equivalent
 harness follows.
 
 `.github/workflows/e2e-behaviour.yml` (weekly + manual dispatch) is the
-exception: it checks out the 7 core repos (facility-layout, product-master,
-inventory-storage, wes-work-planning, fulfillment-execution,
-workforce-management, order-management), starts them against a throwaway
-Kafka and per-service Postgres, and runs `@bootstrap,@product-master`.
+exception, with two jobs. The first checks out the 7 core repos
+(facility-layout, product-master, inventory-storage, wes-work-planning,
+fulfillment-execution, workforce-management, order-management), starts them
+against a throwaway Kafka and per-service Postgres, and runs
+`@bootstrap,@product-master`. The second (`@inter-warehouse-transfer`) adds
+network-inventory-planning and warehouse-planning (9 services in all) and
+pre-creates the topics they exchange.

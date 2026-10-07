@@ -11,6 +11,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WORKFORCE_BASE_URL OPS_AGENT_BASE_URL ORDER_BASE_URL PRODUCT_MASTER_BASE_URL INVENTORY_DB_URL WES_DB_URL FULFILLMENT_DB_URL ORDER_DB_URL
+# inter_warehouse_transfer.feature: the two services it adds, NIP's own
+# Postgres (read as a fallback until NIP ships GET /v1/transfers/{id}), the
+# broker it publishes injected facts to and reads published facts from, and
+# the saga's path ids (so the scenario and 03-up-services.sh cannot drift).
+export NIP_BASE_URL WAREHOUSE_PLANNING_BASE_URL NIP_DB_URL KAFKA_BROKERS NIP_TRANSFER_PICK_PATH_ID NIP_TRANSFER_DISPATCH_PATH_ID
 
 # The *_DB_URL values above deliberately carry NO password in the URL
 # itself (see env.sh's own comment) -- e2e_test.go's dbOpen helper fills
@@ -21,4 +26,4 @@ export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WO
 
 log "running e2e suite (godog) against the live services"
 cd "${WORKSPACE_ROOT}"
-go test -v -run TestMain -timeout 5m ./...
+go test -v -run TestMain -timeout 10m ./...
