@@ -45,6 +45,7 @@ type eventTap struct {
 
 var tappedTopics = []string{
 	"warehouse.facility.events",
+	"warehouse.product-master.events",
 	"warehouse.inventory.events",
 	"warehouse.process-path-management.events",
 	"warehouse.work-planning.events",
@@ -227,6 +228,7 @@ func (s *sim) run(ctx context.Context) bool {
 		s.defineLaborStandards,
 		func(ctx context.Context) error { return s.mapBuilding(ctx, s.stationCount()) },
 		s.registerStations,
+		s.catalogueProducts,
 		s.inbound,
 	}
 	for _, step := range setup {

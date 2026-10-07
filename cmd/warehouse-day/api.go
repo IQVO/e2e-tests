@@ -26,9 +26,13 @@ const (
 	svcOrder       = "order-management"
 	svcProcessPath = "process-path-management"
 	svcLabor       = "labor-performance"
+	// svcProductMaster owns SKU classification and the physical profile
+	// (product-master ADR 0001/0003); inventory-storage and the readers
+	// only keep local copies fed by its events.
+	svcProductMaster = "product-master"
 )
 
-var allServices = []string{svcFacility, svcInventory, svcWES, svcFulfillment, svcWorkforce, svcOrder, svcProcessPath, svcLabor}
+var allServices = []string{svcFacility, svcProductMaster, svcInventory, svcWES, svcFulfillment, svcWorkforce, svcOrder, svcProcessPath, svcLabor}
 
 // api is a black-box REST client over every bounded context's PUBLISHED
 // contract. It never touches a database and never imports a service's Go
@@ -120,6 +124,7 @@ func newAPI(cfg config, stats *callStats) *api {
 		base[svcOrder] = envOr("ORDER_BASE_URL", "http://localhost:8086")
 		base[svcProcessPath] = envOr("PROCESS_PATH_BASE_URL", "http://localhost:8087")
 		base[svcLabor] = envOr("LABOR_BASE_URL", "http://localhost:8088")
+		base[svcProductMaster] = envOr("PRODUCT_MASTER_BASE_URL", "http://localhost:8090")
 	}
 	return &api{
 		client: &http.Client{Timeout: 15 * time.Second},
