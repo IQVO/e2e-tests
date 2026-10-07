@@ -14,6 +14,15 @@ ok()   { printf '\033[1;32m  OK\033[0m   %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m  FAIL\033[0m %s\n' "$*" >&2; }
 die()  { fail "$*"; exit 1; }
 
+# require_repo name path -- dies with an actionable message when a sibling
+# repo the harness builds from is not checked out next to this one (the
+# newest context, product-master, is the usual one missing on an older
+# workspace).
+require_repo() {
+  local name="$1" path="$2"
+  [[ -d "${path}" ]] || die "${name} is not checked out at ${path} -- clone it next to e2e-tests (git clone git@github.com:IQVO/${name}.git \"${path}\")"
+}
+
 # wait_for_http URL [timeout_secs]
 # Polls URL until it returns any 2xx, or dies after timeout.
 wait_for_http() {

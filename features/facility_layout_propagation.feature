@@ -41,10 +41,17 @@ Feature: facility-layout's warehouse map propagates to inventory-storage over Ka
     And location slot "<disposable>" of type "PropRack" exists in facility-layout
     And location slot "WH2-STOR-HAZ-A01-01-01-A" of type "PropRack" exists in facility-layout
 
-    # --- inventory-storage: a hazmat SKU and matching bins ---
+    # --- inventory-storage: a hazmat SKU and matching bins. The SKU is
+    # classified in product-master (the owner since product-master ADR 0003
+    # stage C; inventory-storage's own PUT answers 410). inventory-storage
+    # learns it asynchronously from warehouse.product-master.events, so wait
+    # for its local copy first: otherwise the first stow below could pass
+    # only because the SKU is still unknown there (fail-open), not because
+    # the hazmat zone's attributes were learned. ---
     Given a Bin "<disposable>" with capacity 100 exists in inventory-storage
     And a Bin "WH2-STOR-HAZ-A01-01-01-A" with capacity 100 exists in inventory-storage
-    And SKU "SKU-PROP-HAZ" is classified with handling tags "Hazmat" in inventory-storage
+    And SKU "SKU-PROP-HAZ" is registered and classified with handling tags "Hazmat" in product-master
+    And inventory-storage eventually knows SKU "SKU-PROP-HAZ" as "Hazmat"
     When I receive 10 units of SKU "SKU-PROP-HAZ" in inventory-storage
 
     # --- the hazmat zone's attributes crossed the boundary: a hazmat SKU is

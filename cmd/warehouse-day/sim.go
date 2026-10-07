@@ -483,19 +483,44 @@ func (s *sim) receiveAndStow(ctx context.Context, who string, sd skuDef, qty int
 	return nil
 }
 
+// catalogueProducts is the control tower's product-master step: every SKU
+// of the day is registered (PUT /products/{sku}) and the fragile ones are
+// classified (PUT /products/{sku}/classification) in product-master, the
+// owner of classification since product-master ADR 0003 stage C.
+// inventory-storage answers its own retired PUT with 410
+// classification-moved and learns the classification asynchronously from
+// warehouse.product-master.events, like order-management, wes-work-planning
+// and fulfillment-execution (local copies). Both PUTs are idempotent, so a
+// re-run with the same run id changes nothing.
+func (s *sim) catalogueProducts(ctx context.Context) error {
+	classified := 0
+	for _, sd := range skuCatalogue {
+		sku := s.sku(sd.key)
+		r := s.api.call(ctx, svcProductMaster, http.MethodPut, "/products/{sku}", "/products/"+url.PathEscape(sku),
+			map[string]any{"description": fmt.Sprintf("Simulated %s (%.2f kg)", strings.ToLower(sd.key), sd.weightKg)})
+		if !r.ok() {
+			return fail("register %s in product-master -> %d %s", sd.key, r.status, truncate(string(r.body), 200))
+		}
+		if !sd.fragile {
+			continue
+		}
+		r = s.api.call(ctx, svcProductMaster, http.MethodPut, "/products/{sku}/classification", "/products/"+url.PathEscape(sku)+"/classification",
+			map[string]any{"handlingTags": []string{"Fragile"}})
+		if !r.ok() {
+			return fail("classify %s in product-master -> %d %s", sd.key, r.status, truncate(string(r.body), 200))
+		}
+		classified++
+	}
+	logf("control-tower", "product-master: %d SKUs registered, %d classified Fragile", len(skuCatalogue), classified)
+	return nil
+}
+
 func (s *sim) inbound(ctx context.Context) error {
 	total := 0
 	for _, sd := range skuCatalogue {
 		bins := s.storage
 		if sd.key == "SAMPLE" {
 			bins = []string{s.overflow}
-		}
-		if sd.fragile {
-			r := s.api.call(ctx, svcInventory, http.MethodPut, "/products/{sku}/classification", "/products/"+url.PathEscape(s.sku(sd.key))+"/classification",
-				map[string]any{"handlingTags": []string{"Fragile"}})
-			if !r.ok() {
-				return fail("classify %s -> %d %s", sd.key, r.status, truncate(string(r.body), 200))
-			}
 		}
 		if err := s.receiveAndStow(ctx, "receiving", sd, sd.stock, bins); err != nil {
 			return err

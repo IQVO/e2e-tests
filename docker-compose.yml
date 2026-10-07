@@ -198,6 +198,28 @@ services:
       timeout: 3s
       retries: 20
 
+  # product-master (10th bounded context — owner of SKU classification and
+  # the physical profile, see env.sh's own comment). Own user/db name
+  # "product_master", on host port 5450 (past this harness's own
+  # 5441-5449 range). Migrations are embedded in its binary.
+  postgres-product-master:
+    image: postgres:16
+    container_name: e2e-postgres-product-master
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: product_master
+      POSTGRES_PASSWORD: product_master
+      POSTGRES_DB: product_master
+    ports:
+      - "5450:5432"
+    volumes:
+      - e2e_product_master_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U product_master -d product_master"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -208,3 +230,4 @@ volumes:
   e2e_process_path_pg_data:
   e2e_labor_pg_data:
   e2e_network_pg_data:
+  e2e_product_master_pg_data:
