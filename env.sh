@@ -4,7 +4,11 @@
 
 # ---- repo layout -------------------------------------------------
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPOS_ROOT="$(cd "${WORKSPACE_ROOT}/.." && pwd)"
+# REPOS_ROOT is the directory holding every sibling repo checkout. It
+# defaults to the parent of this checkout, but is overridable so a git
+# worktree of e2e-tests (whose parent is NOT the repos root) can still point
+# at the sibling checkouts: REPOS_ROOT=/path/to/repos bash scripts/01-build.sh
+REPOS_ROOT="${REPOS_ROOT:-$(cd "${WORKSPACE_ROOT}/.." && pwd)}"
 
 FACILITY_REPO="${REPOS_ROOT}/facility-layout"
 INVENTORY_REPO="${REPOS_ROOT}/inventory-storage"
@@ -22,7 +26,15 @@ ORDER_REPO="${REPOS_ROOT}/order-management"
 # each of those three services' main() treats a missing/malformed
 # catalogue as a boot-time fatal error, by design (never falls back to
 # an empty catalogue).
-PATH_CATALOGUE_FILE="${REPOS_ROOT}/warehouse-infra/config/process-paths/sortable-fc.yaml"
+#
+# This harness points at ITS OWN copy (fixtures/process-paths/sortable-fc.yaml):
+# warehouse-infra's four entries plus the dispatch family the inter-warehouse
+# transfer saga needs (fulfillment-execution ADR-0036 requires a
+# `dispatch-*` family in the catalogue before TRANSFER_DISPATCH work can be
+# released; warehouse-infra's frozen file has none). Override
+# PATH_CATALOGUE_FILE to run against the infra file verbatim (the transfer
+# scenario then fails at the dispatch leg, by design).
+PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE:-${WORKSPACE_ROOT}/fixtures/process-paths/sortable-fc.yaml}"
 # process-path-management (8th bounded context — Generic Subdomain owning
 # the fleet's declared process-path catalogue, replacing the static
 # config/process-paths/*.yaml file the other five services used to boot
@@ -54,6 +66,18 @@ NETWORK_REPO="${REPOS_ROOT}/network-fulfillment"
 # facility-layout and BEFORE inventory-storage, so its topic exists by the
 # time the consumers subscribe.
 PRODUCT_MASTER_REPO="${REPOS_ROOT}/product-master"
+# network-inventory-planning (NIP): plans and drives the inter-warehouse
+# transfer saga (approve -> allocate at origin -> pick -> dispatch ->
+# destination receipt). Started AFTER every service it exchanges events
+# with; it has no outbound HTTP at all (Kafka + its own Postgres only).
+NIP_REPO="${REPOS_ROOT}/network-inventory-planning"
+# warehouse-planning: the producer of CapacityPlanPublished, one of the
+# three fail-closed read-model inputs NIP needs before it will simulate or
+# approve anything (the other two are facility-layout's SiteCapabilityChanged
+# and order-management's SiteSkuDemandChanged -- see
+# features/inter_warehouse_transfer.feature's header for which of the three
+# this harness can produce from a real service and which it must inject).
+WAREHOUSE_PLANNING_REPO="${REPOS_ROOT}/warehouse-planning"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
@@ -82,6 +106,11 @@ NETWORK_HTTP_PORT=8089
 # product-master (10th bounded context) — next free slot after
 # network-fulfillment's :8089 (8091+ are the MCP ports below).
 PRODUCT_MASTER_HTTP_PORT=8090
+# network-inventory-planning / warehouse-planning -- 8099 and 8100 are the
+# next free slots after the 8091-8098 MCP/agent range and before the
+# 8101-8107 analytics reports range below.
+NIP_HTTP_PORT=8099
+WAREHOUSE_PLANNING_HTTP_PORT=8100
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -93,6 +122,8 @@ PROCESS_PATH_BASE_URL="http://localhost:${PROCESS_PATH_HTTP_PORT}"
 LABOR_BASE_URL="http://localhost:${LABOR_HTTP_PORT}"
 NETWORK_BASE_URL="http://localhost:${NETWORK_HTTP_PORT}"
 PRODUCT_MASTER_BASE_URL="http://localhost:${PRODUCT_MASTER_HTTP_PORT}"
+NIP_BASE_URL="http://localhost:${NIP_HTTP_PORT}"
+WAREHOUSE_PLANNING_BASE_URL="http://localhost:${WAREHOUSE_PLANNING_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -216,12 +247,23 @@ NETWORK_DB_URL="postgres://network@localhost:5449/network?sslmode=disable"
 # network-fulfillment's :5449. product-master ships no docker-compose of its
 # own; user/db "product_master" follows the fleet's <context> naming.
 PRODUCT_MASTER_DB_URL="postgres://product_master@localhost:5450/product_master?sslmode=disable"
+# network-inventory-planning -- next free slot after network-fulfillment's
+# :5449. Own user/db name "nip" (it ships no docker-compose.yml of its own).
+NIP_DB_URL="postgres://nip@localhost:5451/nip?sslmode=disable"
+# warehouse-planning -- next free slot after NIP's :5451.
+WAREHOUSE_PLANNING_DB_URL="postgres://planning@localhost:5452/planning?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
 #      Bitnami externalAccess NodePort (warehouse-infra PR #6). This
 #      harness does not start its own broker -- see scripts/02-up-infra.sh.
-KAFKA_BROKERS="localhost:9092"
+#      KAFKA_BROKERS is overridable so a run can target a throwaway broker
+#      instead (CI's `services: kafka` container is on :9092 too; a
+#      developer who must not touch the shared cluster topics -- the
+#      transfer saga publishes and CONSUMES commands on shared topics --
+#      starts e.g. an apache/kafka container on :29092 and exports
+#      KAFKA_BROKERS=localhost:29092).
+KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:9092}"
 
 # ---- Kafka consumer-group isolation --------------------------------
 # Consumer-group offsets are SHARED infrastructure state, not per-process
@@ -260,6 +302,34 @@ INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP="inventory-storage-product-master-${E2E_
 WES_CLASSIFICATION_CONSUMER_GROUP="wes-work-planning-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
 FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP="fulfillment-execution-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
 ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# inventory-storage's transfer allocation command consumer (ADR-0030; dark
+# unless TRANSFER_ALLOCATION_CONSUMER_MODE=kafka, set in 03-up-services.sh)
+# and network-inventory-planning's five consumers (each group env var is its
+# own on-switch; none has a default).
+INVENTORY_TRANSFER_CONSUMER_GROUP="inventory-storage-transfer-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_CAPABILITY_CONSUMER_GROUP="nip-site-capability-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_DEMAND_CONSUMER_GROUP="nip-site-sku-demand-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_CAPACITY_PLAN_CONSUMER_GROUP="nip-capacity-plan-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_TRANSFER_REPLY_CONSUMER_GROUP="nip-transfer-reply-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_TRANSFER_FACT_CONSUMER_GROUP="nip-transfer-fact-${E2E_CONSUMER_GROUP_SUFFIX}"
+# warehouse-planning's two inbound consumers DO have literal defaults, which
+# would join the live cluster's groups -- always override.
+WAREHOUSE_PLANNING_LABOR_CONSUMER_GROUP="warehouse-planning-labor-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP="warehouse-planning-storage-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# ---- inter-warehouse transfer saga configuration --------------------
+# The pick leg's path is `pick-transfer` (inside the existing PICK family,
+# matchPrefix `pick`); the dispatch leg's is `dispatch-transfer` (the
+# DISPATCH family this harness's catalogue fixture adds). NIP has no
+# default for the pick path: unset, POST /v1/transfers:approve answers 503.
+NIP_TRANSFER_PICK_PATH_ID="pick-transfer"
+NIP_TRANSFER_DISPATCH_PATH_ID="dispatch-transfer"
+# NIP refuses to plan from a single stale fact, anywhere in its read models
+# (ADR 0002), and this harness's Postgres volumes persist across runs, so a
+# row published by an earlier run would otherwise poison the next. A wide
+# budget keeps the suite re-runnable; production uses the 10m default.
+NIP_PLANNING_MAX_STALENESS="${NIP_PLANNING_MAX_STALENESS:-720h}"
 
 # ---- misc -----------------------------------------------------------
 HEALTH_TIMEOUT_SECS=60

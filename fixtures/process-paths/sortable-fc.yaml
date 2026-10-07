@@ -1,0 +1,52 @@
+# e2e-tests' own copy of warehouse-infra's config/process-paths/sortable-fc.yaml
+# (schema, matchPrefix family rule and requiredCapabilities semantics are
+# documented in that file's header), plus ONE additive entry: DISPATCH.
+#
+# Why a copy: fulfillment-execution ADR-0036 makes the inter-warehouse
+# transfer's dispatch leg a DISPATCH task type whose path family
+# (`dispatch-*`) "must be declared in the process-path catalogue before
+# such work can be released". warehouse-infra's file is FROZEN
+# (process-path-management is the live source of truth in the cluster), so
+# the harness, which runs the three catalogue consumers with
+# PATH_CATALOGUE_SOURCE=file, carries the extra entry itself.
+#
+# The transfer saga's pick leg needs NO new entry: network-inventory-
+# planning's TRANSFER_PICK_PATH_ID is `pick-transfer`, which belongs to the
+# existing PICK family (matchPrefix `pick`). Its dispatch leg is
+# `dispatch-transfer`, which belongs to the DISPATCH family below.
+#
+# The four original entries below must stay identical to warehouse-infra's.
+
+building: sortable-fc
+
+paths:
+  - id: PICK
+    matchPrefix: pick
+    direct: true
+    requiredCapabilities:
+      - pick
+
+  - id: PACK
+    matchPrefix: pack
+    direct: true
+    requiredCapabilities:
+      - pack
+
+  - id: REBIN
+    matchPrefix: rebin
+    direct: true
+    requiredCapabilities:
+      - rebin
+
+  - id: SLAM
+    matchPrefix: slam
+    direct: true
+    requiredCapabilities:
+      - slam
+
+  # Added for the inter-warehouse transfer saga (not in warehouse-infra's file).
+  - id: DISPATCH
+    matchPrefix: dispatch
+    direct: true
+    requiredCapabilities:
+      - dispatch

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 10 bounded-context HTTP services as background processes
+# Starts all 12 bounded-context HTTP services as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -73,6 +73,19 @@
 #                           this harness (NETWORK_MODE=stub, no
 #                           EVENT_PUBLISHER); its inbound demand is a
 #                           poller reading a seeded stub file, never HTTP.
+#  10. warehouse-planning  — producer of CapacityPlanPublished (its own REST
+#                           API creates + publishes the plans; the outbox
+#                           relay publishes to Kafka). No deps on the
+#                           services above beyond Kafka.
+#  11. network-inventory-planning — plans/drives the inter-warehouse
+#                           transfer saga. Kafka + own Postgres only; it
+#                           consumes SiteCapabilityChanged,
+#                           SiteSkuDemandChanged, CapacityPlanPublished
+#                           (read models) and inventory-storage /
+#                           fulfillment-execution replies+facts, and
+#                           publishes TransferAllocationRequested /
+#                           WorkDemandReleased. inventory-storage (3) now
+#                           also runs its transfer allocation consumer.
 #
 # All eight publisher-capable services run with EVENT_PUBLISHER=kafka
 # against the shared broker (labor-performance is the exception -- it has
@@ -142,6 +155,8 @@ start_service inventory "${BIN_DIR}/inventory" \
   LOCATION_LOOKUP_MODE=kafka \
   FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" \
   PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" \
+  TRANSFER_ALLOCATION_CONSUMER_MODE=kafka \
+  TRANSFER_ALLOCATION_CONSUMER_GROUP="${INVENTORY_TRANSFER_CONSUMER_GROUP}" \
   LOG_LEVEL=info
 wait_for_http "${INVENTORY_BASE_URL}/healthz"
 
@@ -260,7 +275,57 @@ start_service network "${BIN_DIR}/network" \
   LOG_LEVEL=info
 wait_for_http "${NETWORK_BASE_URL}/healthz"
 
-log "all 10 services up and healthy"
+log "starting warehouse-planning on ${WAREHOUSE_PLANNING_BASE_URL}"
+# warehouse-planning: the real producer of CapacityPlanPublished (one of
+# the three fail-closed read-model inputs network-inventory-planning needs).
+# Its plans are created through its own REST API by the inter-warehouse
+# transfer scenario. EVENT_PUBLISHER=kafka makes its outbox relay publish to
+# warehouse.warehouse-planning.events. Its two inbound consumers (labor
+# capacity, facility storage tally) have LITERAL default consumer groups, so
+# both are overridden with the run-scoped suffix; its order-demand consumer
+# stays off (no DEMAND_CONSUMER_GROUP). Plans here are created with an
+# explicit assigned_demand, which never reads that consumer's read model.
+start_service planning "${BIN_DIR}/planning" \
+  HTTP_ADDR=":${WAREHOUSE_PLANNING_HTTP_PORT}" \
+  DATABASE_URL="${WAREHOUSE_PLANNING_DB_URL}" \
+  PGPASSWORD="planning" \
+  MIGRATIONS_PATH="${WAREHOUSE_PLANNING_REPO}/internal/adapters/outbound/postgres/migrations" \
+  EVENT_PUBLISHER=kafka \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  LABOR_CAPACITY_CONSUMER_GROUP="${WAREHOUSE_PLANNING_LABOR_CONSUMER_GROUP}" \
+  STORAGE_CAPACITY_CONSUMER_GROUP="${WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP}" \
+  OUTBOX_RELAY_INTERVAL="500ms" \
+  LOG_LEVEL=info
+wait_for_http "${WAREHOUSE_PLANNING_BASE_URL}/healthz"
+
+log "starting network-inventory-planning on ${NIP_BASE_URL}"
+# network-inventory-planning (NIP): started after every context it
+# exchanges events with. No HTTP calls out; Kafka + its own Postgres. Each
+# consumer group env var is its own on-switch (no defaults, so a local
+# process can never join the live cluster's group). OUTBOX_RELAY_ENABLED
+# turns on the relay that drains approvals / work demands onto
+# warehouse.network-inventory-planning.events; without it POST
+# /v1/transfers:approve would persist but never emit. TRANSFER_PICK_PATH_ID
+# has no default (unset => approve answers 503 config-incomplete).
+start_service nip "${BIN_DIR}/nip" \
+  HTTP_ADDR=":${NIP_HTTP_PORT}" \
+  DATABASE_URL="${NIP_DB_URL}" \
+  PGPASSWORD="nip" \
+  MIGRATIONS_PATH="${NIP_REPO}/internal/adapters/outbound/postgres/migrations" \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  SITE_CAPABILITY_CONSUMER_GROUP="${NIP_CAPABILITY_CONSUMER_GROUP}" \
+  SITE_SKU_DEMAND_CONSUMER_GROUP="${NIP_DEMAND_CONSUMER_GROUP}" \
+  CAPACITY_PLAN_CONSUMER_GROUP="${NIP_CAPACITY_PLAN_CONSUMER_GROUP}" \
+  TRANSFER_REPLY_CONSUMER_GROUP="${NIP_TRANSFER_REPLY_CONSUMER_GROUP}" \
+  TRANSFER_FACT_CONSUMER_GROUP="${NIP_TRANSFER_FACT_CONSUMER_GROUP}" \
+  OUTBOX_RELAY_ENABLED=true \
+  TRANSFER_PICK_PATH_ID="${NIP_TRANSFER_PICK_PATH_ID}" \
+  TRANSFER_DISPATCH_PATH_ID="${NIP_TRANSFER_DISPATCH_PATH_ID}" \
+  PLANNING_MAX_STALENESS="${NIP_PLANNING_MAX_STALENESS}" \
+  LOG_LEVEL=info
+wait_for_http "${NIP_BASE_URL}/healthz"
+
+log "all 12 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
@@ -271,6 +336,8 @@ printf '  %-24s %s\n' labor-performance      "${LABOR_BASE_URL}"
 printf '  %-24s %s\n' workforce-management   "${WORKFORCE_BASE_URL}"
 printf '  %-24s %s\n' order-management       "${ORDER_BASE_URL}"
 printf '  %-24s %s\n' network-fulfillment    "${NETWORK_BASE_URL}"
+printf '  %-24s %s\n' warehouse-planning     "${WAREHOUSE_PLANNING_BASE_URL}"
+printf '  %-24s %s\n' network-inventory-planning "${NIP_BASE_URL}"
 
 # --- MCP servers (cmd/mcp), one per context, pointed at the SAME
 # Postgres each HTTP service above just started against — so a fact an
@@ -329,6 +396,7 @@ start_service workforce-mcp "${BIN_DIR}/workforce-mcp" \
   DATABASE_URL="${WORKFORCE_DB_URL}" \
   PGPASSWORD="workforce" \
   MIGRATIONS_PATH="${WORKFORCE_REPO}/migrations" \
+  PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" \
   MCP_READ_KEY="${WORKFORCE_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${WORKFORCE_MCP_PORT}"
