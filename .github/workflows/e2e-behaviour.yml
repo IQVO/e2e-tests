@@ -241,7 +241,11 @@ jobs:
           build_one() {
             local name="$1" repo="$2" cmd_pkg="$3"
             echo "==> go build ${name} (${repo}/cmd/${cmd_pkg})"
-            ( cd "${repo}" && CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
+            # setup-go pins GOTOOLCHAIN=local to e2e-tests' own go.mod, but a
+            # sibling may require a newer Go (product-master needs >= 1.27.1).
+            # auto lets each repo's go.mod pick its toolchain, as it does on
+            # a developer machine (GOTOOLCHAIN's default).
+            ( cd "${repo}" && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
             echo "  OK   ${name} -> ${BIN_DIR}/${name}"
           }
 
