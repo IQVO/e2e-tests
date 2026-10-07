@@ -44,6 +44,16 @@ LABOR_REPO="${REPOS_ROOT}/labor-performance"
 # it via NETWORK_SEED_FILE/PRODUCT_TRANSLATION_FILE fixtures in
 # fixtures/network-fulfillment/ rather than an HTTP step.
 NETWORK_REPO="${REPOS_ROOT}/network-fulfillment"
+# product-master (10th bounded context -- the WMS-tier owner of SKU master
+# data: handling classification and the declared/measured physical profile,
+# its ADR 0001/0002). Classification moved here from inventory-storage (its
+# ADR 0003, inventory-storage ADR 0034): inventory-storage's PUT answers
+# 410 classification-moved and every reader (inventory-storage,
+# order-management, wes-work-planning, fulfillment-execution) keeps a local
+# copy fed by warehouse.product-master.events. Started right after
+# facility-layout and BEFORE inventory-storage, so its topic exists by the
+# time the consumers subscribe.
+PRODUCT_MASTER_REPO="${REPOS_ROOT}/product-master"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
@@ -69,6 +79,9 @@ LABOR_HTTP_PORT=8088
 # network-fulfillment (9th bounded context) — next free slot after
 # labor-performance's :8088.
 NETWORK_HTTP_PORT=8089
+# product-master (10th bounded context) — next free slot after
+# network-fulfillment's :8089 (8091+ are the MCP ports below).
+PRODUCT_MASTER_HTTP_PORT=8090
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -79,6 +92,7 @@ ORDER_BASE_URL="http://localhost:${ORDER_HTTP_PORT}"
 PROCESS_PATH_BASE_URL="http://localhost:${PROCESS_PATH_HTTP_PORT}"
 LABOR_BASE_URL="http://localhost:${LABOR_HTTP_PORT}"
 NETWORK_BASE_URL="http://localhost:${NETWORK_HTTP_PORT}"
+PRODUCT_MASTER_BASE_URL="http://localhost:${PRODUCT_MASTER_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -198,6 +212,10 @@ LABOR_DB_URL="postgres://labor@localhost:5448/labor?sslmode=disable"
 # network-fulfillment (9th bounded context) — next free slot after
 # labor-performance's :5448.
 NETWORK_DB_URL="postgres://network@localhost:5449/network?sslmode=disable"
+# product-master (10th bounded context) — next free slot after
+# network-fulfillment's :5449. product-master ships no docker-compose of its
+# own; user/db "product_master" follows the fleet's <context> naming.
+PRODUCT_MASTER_DB_URL="postgres://product_master@localhost:5450/product_master?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
@@ -232,6 +250,16 @@ E2E_CONSUMER_GROUP_SUFFIX="${E2E_CONSUMER_GROUP_SUFFIX:-e2e-$$-$(date +%s)}"
 WES_CONSUMER_GROUP="wes-work-planning-${E2E_CONSUMER_GROUP_SUFFIX}"
 FULFILLMENT_CONSUMER_GROUP="fulfillment-execution-${E2E_CONSUMER_GROUP_SUFFIX}"
 LABOR_CONSUMER_GROUP="labor-performance-${E2E_CONSUMER_GROUP_SUFFIX}"
+# product-master's ProductClassified fan-out (product-master ADR 0003 stages
+# C and D): one per-run group per local copy, so a harness process never
+# joins the live cluster's group for warehouse.product-master.events.
+# inventory-storage reads PRODUCT_MASTER_CONSUMER_GROUP; the three readers
+# read PRODUCT_CLASSIFICATION_CONSUMER_GROUP (with
+# PRODUCT_CLASSIFICATION_MODE=kafka -- "http" is rejected at boot).
+INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP="inventory-storage-product-master-${E2E_CONSUMER_GROUP_SUFFIX}"
+WES_CLASSIFICATION_CONSUMER_GROUP="wes-work-planning-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP="fulfillment-execution-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
 
 # ---- misc -----------------------------------------------------------
 HEALTH_TIMEOUT_SECS=60

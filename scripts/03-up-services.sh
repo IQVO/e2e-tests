@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 9 bounded-context HTTP services as background processes
+# Starts all 10 bounded-context HTTP services as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -18,35 +18,53 @@
 #                           warehouse.facility.events — without that the
 #                           topic is never created and inventory-storage's
 #                           cache below has nothing to replay.
-#   3. inventory-storage — maintains a LOCAL CACHE of facility-layout's
+#   3. product-master    — no deps. Owner of SKU classification and the
+#                           physical profile (its ADR 0001/0002/0003).
+#                           EVENT_PUBLISHER=kafka so ProductClassified
+#                           reaches warehouse.product-master.events, the ONLY
+#                           way the four readers below learn a
+#                           classification. Its legacy importer
+#                           (LEGACY_IMPORT_CONSUMER_GROUP) is NOT started:
+#                           it is a one-off migration aid, and on the shared
+#                           broker it would replay the cluster's whole
+#                           inventory history into this local database.
+#   4. inventory-storage — maintains a LOCAL CACHE of facility-layout's
 #                           location classifications, fed by that topic
 #                           (LOCATION_LOOKUP_MODE=kafka, inventory-storage
 #                           ADR-0013), instead of calling facility-layout
 #                           over HTTP on every stow. FACILITY_LAYOUT_BASE_URL
 #                           is still exported so a local run can be flipped
 #                           back to LOCATION_LOOKUP_MODE=http (the rollback)
-#                           by changing one word.
-#   4. wes-work-planning — calls inventory-storage over HTTP for product
-#                           classification (PRODUCT_CLASSIFICATION_MODE=http),
-#                           consumes workforce/inventory/fulfillment/order-management Kafka topics
-#   5. fulfillment-execution — consumes WorkReleased from wes-work-planning's
-#                           Kafka topic, calls inventory-storage over HTTP for
-#                           DOT hazard segregation, publishes TaskCompleted
-#   6. labor-performance  — consumes fulfillment-execution's TaskCompleted
+#                           by changing one word. Its product classifications
+#                           are a local copy of product-master's events
+#                           (PRODUCT_MASTER_CONSUMER_GROUP, ADR 0034); its
+#                           own classification PUT answers 410.
+#   5. wes-work-planning — reads a local copy of product-master's
+#                           classifications (PRODUCT_CLASSIFICATION_MODE=kafka
+#                           + PRODUCT_CLASSIFICATION_CONSUMER_GROUP; "http"
+#                           fails at boot), consumes
+#                           workforce/inventory/fulfillment/order-management Kafka topics
+#   6. fulfillment-execution — consumes WorkReleased from wes-work-planning's
+#                           Kafka topic, reads the same kind of local
+#                           classification copy for DOT hazard segregation,
+#                           publishes TaskCompleted
+#   7. labor-performance  — consumes fulfillment-execution's TaskCompleted
 #                           (unconditional, no toggle) to compute
 #                           engineered-labor-standards performance scoring;
 #                           no HTTP calls to/from any other context.
-#   7. workforce-management — publishes ShiftPlanCommitted to Kafka, which
+#   8. workforce-management — publishes ShiftPlanCommitted to Kafka, which
 #                           wes-work-planning's labor-plan-view projects
-#   8. order-management  — calls inventory-storage over HTTP (synchronous
-#                           allocation), then publishes OrderAllocated /
+#   9. order-management  — calls inventory-storage over HTTP (synchronous
+#                           allocation), reads a local classification copy
+#                           (PRODUCT_CLASSIFICATION_MODE=kafka), then
+#                           publishes OrderAllocated /
 #                           OrderPartiallyAllocated to Kafka, which
 #                           wes-work-planning's 4th consumer subscription
 #                           turns into a work unit via EnqueueWorkUnit —
 #                           the choreographed-release path this repo's new
 #                           order_management_choreographed_release.feature
 #                           proves end-to-end.
-#   9. network-fulfillment — the anti-corruption layer to an external
+#  10. network-fulfillment — the anti-corruption layer to an external
 #                           retail network (ADR 0001). Calls
 #                           order-management over HTTP (POST /orders with
 #                           releaseOnAllocation=false, a HELD order) to ask
@@ -56,7 +74,7 @@
 #                           EVENT_PUBLISHER); its inbound demand is a
 #                           poller reading a seeded stub file, never HTTP.
 #
-# All seven publisher-capable services run with EVENT_PUBLISHER=kafka
+# All eight publisher-capable services run with EVENT_PUBLISHER=kafka
 # against the shared broker (labor-performance is the exception -- it has
 # no EVENT_PUBLISHER flag at all, being a pure consumer, though it still
 # needs KAFKA_BROKERS to build its consumer group) so the cross-context
@@ -99,6 +117,20 @@ start_service facility "${BIN_DIR}/facility" \
   LOG_LEVEL=info
 wait_for_http "${FACILITY_BASE_URL}/healthz"
 
+log "starting product-master on ${PRODUCT_MASTER_BASE_URL}"
+# product-master: cmd/api, migrations embedded in the binary (no
+# MIGRATIONS_PATH). SHUTDOWN_DRAIN_DELAY=0 so stop_service's bounded wait
+# is not spent idling on the default 5s readiness drain.
+start_service product-master "${BIN_DIR}/product-master" \
+  HTTP_ADDR=":${PRODUCT_MASTER_HTTP_PORT}" \
+  DATABASE_URL="${PRODUCT_MASTER_DB_URL}" \
+  PGPASSWORD="product_master" \
+  EVENT_PUBLISHER=kafka \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  SHUTDOWN_DRAIN_DELAY=0 \
+  LOG_LEVEL=info
+wait_for_http "${PRODUCT_MASTER_BASE_URL}/healthz"
+
 log "starting inventory-storage on ${INVENTORY_BASE_URL}"
 start_service inventory "${BIN_DIR}/inventory" \
   HTTP_ADDR=":${INVENTORY_HTTP_PORT}" \
@@ -109,6 +141,7 @@ start_service inventory "${BIN_DIR}/inventory" \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
   LOCATION_LOOKUP_MODE=kafka \
   FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" \
+  PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" \
   LOG_LEVEL=info
 wait_for_http "${INVENTORY_BASE_URL}/healthz"
 
@@ -121,8 +154,8 @@ start_service wes "${BIN_DIR}/wes" \
   EVENT_PUBLISHER=kafka \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
   KAFKA_CONSUMER_GROUP="${WES_CONSUMER_GROUP}" \
-  PRODUCT_CLASSIFICATION_MODE=http \
-  INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" \
+  PRODUCT_CLASSIFICATION_MODE=kafka \
+  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${WES_CLASSIFICATION_CONSUMER_GROUP}" \
   PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" \
   LOG_LEVEL=info
 wait_for_http "${WES_BASE_URL}/healthz"
@@ -139,8 +172,8 @@ start_service_in execution "${FULFILLMENT_REPO}" "${BIN_DIR}/execution" \
   EVENT_PUBLISHER=kafka \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
   WORK_RELEASED_CONSUMER_GROUP="${FULFILLMENT_CONSUMER_GROUP}" \
-  PRODUCT_CLASSIFICATION_MODE=http \
-  INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" \
+  PRODUCT_CLASSIFICATION_MODE=kafka \
+  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP}" \
   PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" \
   LOG_LEVEL=info
 wait_for_http "${FULFILLMENT_BASE_URL}/healthz"
@@ -196,6 +229,8 @@ start_service order "${BIN_DIR}/order" \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
   INVENTORY_STORAGE_MODE=http \
   INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" \
+  PRODUCT_CLASSIFICATION_MODE=kafka \
+  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${ORDER_CLASSIFICATION_CONSUMER_GROUP}" \
   LOG_LEVEL=info
 wait_for_http "${ORDER_BASE_URL}/healthz"
 
@@ -225,9 +260,10 @@ start_service network "${BIN_DIR}/network" \
   LOG_LEVEL=info
 wait_for_http "${NETWORK_BASE_URL}/healthz"
 
-log "all 9 services up and healthy"
+log "all 10 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
+printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
 printf '  %-24s %s\n' inventory-storage      "${INVENTORY_BASE_URL}"
 printf '  %-24s %s\n' wes-work-planning      "${WES_BASE_URL}"
 printf '  %-24s %s\n' fulfillment-execution  "${FULFILLMENT_BASE_URL}"
@@ -264,10 +300,14 @@ start_service inventory-mcp "${BIN_DIR}/inventory-mcp" \
 wait_for_tcp localhost "${INVENTORY_MCP_PORT}"
 
 log "starting wes-work-planning MCP server on :${WES_MCP_PORT}"
+# PRODUCT_CLASSIFICATION_MODE=kafka here makes the MCP server READ the
+# product_classification_copy table cmd/wes maintains (it never consumes
+# itself, so it needs no consumer group); "http" would fail its boot.
 start_service wes-mcp "${BIN_DIR}/wes-mcp" \
   MCP_ADDR=":${WES_MCP_PORT}" \
   DATABASE_URL="${WES_DB_URL}" \
   PGPASSWORD="wes" \
+  PRODUCT_CLASSIFICATION_MODE=kafka \
   MCP_READ_KEY="${WES_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${WES_MCP_PORT}"
