@@ -133,6 +133,10 @@ type world struct {
 	// xfer is the inter-warehouse transfer saga's correlation (ids minted by
 	// network-inventory-planning at approval). See transfer_test.go.
 	xfer *transferState
+
+	// inb is the inbound-receiving correlation (receipt and appointment ids
+	// by run-scoped ASN number). See inbound_test.go.
+	inb *inboundState
 }
 
 func newWorld() *world {
@@ -1819,6 +1823,7 @@ func eventually(fn func() error) error {
 func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
 	registerTransferSteps(sc, w)
+	registerInboundSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
 		return ctx, nil
