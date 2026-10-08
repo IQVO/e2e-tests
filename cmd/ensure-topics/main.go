@@ -38,6 +38,10 @@ var topics = []string{
 	// ReceiptLineReceived from it (a group on a topic that does not exist yet
 	// is never assigned a partition), and inbound_receiving.feature scans it.
 	"warehouse.inbound-receiving.events",
+	// slotting-optimization's integration topic (SlotPlanGenerated /
+	// Approved / Rejected, key = plan id): published through its outbox relay
+	// and scanned by slotting_optimization.feature.
+	"warehouse.slotting-optimization.events",
 	"warehouse.inventory.events",
 	"warehouse.inventory.analytics",
 	"warehouse.work-planning.events",

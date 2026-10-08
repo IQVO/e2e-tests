@@ -13,7 +13,7 @@ This repo is a study-project companion to the bounded-context repos
 `wes-work-planning`, `fulfillment-execution`, `workforce-management`,
 `order-management`, `process-path-management`, `labor-performance`,
 `network-fulfillment`, `network-inventory-planning`, `warehouse-planning`,
-`inbound-receiving`)
+`inbound-receiving`, `slotting-optimization`)
 plus the read-side decision-support agent `warehouse-ops-agent`, all siblings
 under the same `warehouse-systems/` workspace root — see `env.sh`'s
 `REPOS_ROOT` for the layout this harness assumes (it is overridable:
@@ -39,20 +39,44 @@ Ports and DSNs live in `env.sh` only; this table mirrors it.
 | network-inventory-planning | `network-inventory-planning` | 8099 | 5451 | — |
 | warehouse-planning | `api` | 8100 | 5452 | — |
 | **inbound-receiving** | `api` | 8108 | 5453 | ASN / dock appointment / receipt (`/asns`, `/appointments`, `/receipts`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`), dock doors permissive; publishes `warehouse.inbound-receiving.events` |
+| **slotting-optimization** | `api` | 8109 | 5454 | forward-slot planner (`/slot-plans`, `/forward-slots`, `/sku-velocity`); three local copies, all `kafka` mode: product-master's classification and physical profile (`PRODUCT_MODE`), facility-layout's zones and slots (`LAYOUT_MODE`), order-management's `SiteSkuDemandChanged` (`DEMAND_MODE`, injected by the scenarios); publishes `warehouse.slotting-optimization.events` |
 | warehouse-ops-agent | `agent` | 8096 | — | — |
 
 Every local copy uses a per-run consumer group derived from
 `E2E_CONSUMER_GROUP_SUFFIX` (never the cluster's group): that includes
-inbound-receiving's product copy (`PRODUCT_CONSUMER_GROUP`) and
+inbound-receiving's product copy (`PRODUCT_CONSUMER_GROUP`),
 inventory-storage's consumer of inbound-receiving
-(`INBOUND_RECEIPT_CONSUMER_GROUP`, which does not exist when unset).
+(`INBOUND_RECEIPT_CONSUMER_GROUP`, which does not exist when unset) and
+slotting-optimization's three copies (`DEMAND_CONSUMER_GROUP`,
+`PRODUCT_CONSUMER_GROUP`, `LAYOUT_CONSUMER_GROUP`, required in `kafka` mode).
 `PRODUCT_CLASSIFICATION_MODE=http` no longer exists: the three readers
 refuse to boot with it.
 
 ## What's covered
 
-12 feature files (the inter-warehouse transfer feature has two scenarios, the
-inbound-receiving one four):
+13 feature files (the inter-warehouse transfer feature has two scenarios, the
+inbound-receiving and slotting-optimization ones four each):
+
+- **`features/slotting_optimization.feature`** (`@slotting`) — the forward-slot
+  planner, against slotting-optimization, facility-layout and product-master
+  only. Each scenario plans its own run-scoped site (zone, slots, SKUs and
+  demand), so every assertion is exact: (1) with SKUs registered, classified
+  and measured in product-master and demand of 3 lines for one SKU and 1 for
+  another, the generated Draft gives the faster SKU the lexically first
+  forward slot (`abc-velocity-v1`), approval makes `GET /forward-slots` and the
+  `SlotPlanApproved` event carry exactly that map; (2) **stickiness** — once
+  the slower SKU outsells the faster one, a new plan still keeps both SKUs
+  where they are and has no move at all (a planner without stickiness would
+  Relocate both); (3) a hazmat SKU, the fastest one, is placed only in the
+  hazmat forward slot, a second hazmat SKU is left unassigned
+  (`NoEligibleSlot`) rather than put in the ambient slot that sorts first;
+  (4) approving an already approved plan answers `409 plan-not-draft`, leaves
+  it at version 2 and publishes exactly one `SlotPlanApproved`. **Demand is
+  injected**, not placed through order-management: that service projects every
+  line to one static site per deployment and stamps the promise date (48 h
+  ahead) as `due_at`, while a plan counts only lines due in
+  `[now - lookback, now)`; the scenarios publish the same
+  `SiteSkuDemandChanged` it would, as the transfer feature does.
 
 - **`features/inbound_receiving.feature`** (`@inbound-receiving`) — the inbound
   dock workflow and its handover, against inbound-receiving, product-master
@@ -171,12 +195,13 @@ missing).
 
 ```bash
 cd e2e-tests
-bash scripts/02-up-infra.sh      # Postgres (13 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
-bash scripts/01-build.sh         # builds all 21 binaries (13 HTTP incl. product-master, inbound-receiving, network-inventory-planning, warehouse-planning + 7 MCP + ops-agent)
-bash scripts/03-up-services.sh   # starts them as background processes (product-master and inbound-receiving before inventory-storage; NIP last)
+bash scripts/02-up-infra.sh      # Postgres (14 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
+bash scripts/01-build.sh         # builds all 22 binaries (14 HTTP incl. product-master, inbound-receiving, slotting-optimization, network-inventory-planning, warehouse-planning + 7 MCP + ops-agent)
+bash scripts/03-up-services.sh   # starts them as background processes (product-master, inbound-receiving and slotting-optimization before inventory-storage; NIP last)
 bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)
 GODOG_TAGS=@product-master bash scripts/04-run-tests.sh  # just the product-master scenario
 GODOG_TAGS=@inbound-receiving bash scripts/04-run-tests.sh  # just the inbound-receiving scenarios
+GODOG_TAGS=@slotting bash scripts/04-run-tests.sh  # just the slotting-optimization scenarios
 bash scripts/06-run-soak.sh      # OPTIONAL: the long-running @soak backlog-ramp run (see below)
 bash scripts/05-down-services.sh # stops only what this harness started
 ```
@@ -303,15 +328,16 @@ committed offsets across restarts instead of replaying the topic history.
 `.github/workflows/ci.yml` runs `gofmt`, `go build`/`go vet`, a shell
 syntax check on every `scripts/*.sh`, and `docker compose config`
 validation. The full godog suite is NOT run in CI: it is a genuinely
-multi-repo black-box harness (it builds and runs binaries from thirteen
-sibling bounded-context repos, product-master and inbound-receiving included, plus
+multi-repo black-box harness (it builds and runs binaries from fourteen
+sibling bounded-context repos, product-master, inbound-receiving and
+slotting-optimization included, plus
 `warehouse-ops-agent`, none of which are checked out in
 a single-repo GitHub Actions run) — it is run and verified locally as part
 of every change that touches it, the same pattern `e2s-tests`' equivalent
 harness follows.
 
 `.github/workflows/e2e-behaviour.yml` (weekly + manual dispatch) is the
-exception, with three jobs. The first checks out the 7 core repos
+exception, with four jobs. The first checks out the 7 core repos
 (facility-layout, product-master, inventory-storage, wes-work-planning,
 fulfillment-execution, workforce-management, order-management), starts them
 against a throwaway Kafka and per-service Postgres, and runs
@@ -319,4 +345,7 @@ against a throwaway Kafka and per-service Postgres, and runs
 network-inventory-planning and warehouse-planning (9 services in all) and
 pre-creates the topics they exchange. The third (`@inbound-receiving`) needs
 only product-master, inbound-receiving and inventory-storage (with its
-`INBOUND_RECEIPT_CONSUMER_GROUP`) and four pre-created topics.
+`INBOUND_RECEIPT_CONSUMER_GROUP`) and four pre-created topics. The fourth
+(`@slotting`) needs only facility-layout, product-master and
+slotting-optimization (all three consumers in `kafka` mode) and four
+pre-created topics.
