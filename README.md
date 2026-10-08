@@ -279,8 +279,9 @@ committed offsets across restarts instead of replaying the topic history.
 `.github/workflows/ci.yml` runs `gofmt`, `go build`/`go vet`, a shell
 syntax check on every `scripts/*.sh`, and `docker compose config`
 validation. The full godog suite is NOT run in CI: it is a genuinely
-multi-repo black-box harness (it builds and runs binaries from six
-sibling repos plus `warehouse-ops-agent`, none of which are checked out in
+multi-repo black-box harness (it builds and runs binaries from twelve
+sibling bounded-context repos, product-master included, plus
+`warehouse-ops-agent`, none of which are checked out in
 a single-repo GitHub Actions run) — it is run and verified locally as part
 of every change that touches it, the same pattern `e2s-tests`' equivalent
 harness follows.
