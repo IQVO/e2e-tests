@@ -24,10 +24,12 @@ name: E2E Behaviour
 # kafka; "http" fails at boot). The run covers @bootstrap plus the
 # @product-master scenario, which needs nothing beyond these 7 services.
 #
-# Two more jobs follow, each in its own job so one failing never masks the
-# flagship signal: the inter-warehouse transfer saga (9 services) and
+# Three more jobs follow, each in its own job so one failing never masks the
+# flagship signal: the inter-warehouse transfer saga (9 services),
 # inbound-receiving's @inbound-receiving scenarios (3 services:
-# product-master, inbound-receiving, inventory-storage).
+# product-master, inbound-receiving, inventory-storage) and
+# slotting-optimization's @slotting scenarios (3 services: facility-layout,
+# product-master, slotting-optimization).
 on:
   schedule:
     - cron: "0 7 * * 1" # weekly, Monday 7am UTC (1h after ci.yml's mutation job)
@@ -844,3 +846,206 @@ jobs:
       - name: Dump service logs on failure
         if: failure()
         run: tail -n +1 /tmp/product-master.log /tmp/inbound-receiving.log /tmp/inventory.log 2>&1 || true
+
+  # slotting-optimization (SlotPlan, abc-velocity-v1) and its three event-fed
+  # local copies: features/slotting_optimization.feature. A separate job so a
+  # failure here never masks the flagship @bootstrap signal, and it needs only
+  # the three services the feature talks to: facility-layout (zones and forward
+  # slots), product-master (classification and physical profile) and
+  # slotting-optimization itself. No order-management: the feature publishes the
+  # SiteSkuDemandChanged facts itself (see the feature header for why real
+  # orders cannot serve it). Like the other scenario jobs it has no harness:red
+  # issue steps of its own.
+  slotting-optimization-scenario:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+
+    services:
+      kafka:
+        image: apache/kafka:3.8.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+
+    steps:
+      - name: Checkout e2e-tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: e2e-tests
+
+      - name: Checkout facility-layout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/facility-layout
+          ref: develop
+          path: facility-layout
+
+      - name: Checkout product-master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/product-master
+          ref: develop
+          path: product-master
+
+      - name: Checkout slotting-optimization
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/slotting-optimization
+          ref: develop
+          path: slotting-optimization
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: e2e-tests/go.mod
+
+      - name: Wait for Kafka to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/9092) >/dev/null 2>&1; then
+              echo "kafka is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::kafka never became reachable on localhost:9092"
+          exit 1
+
+      - name: Pre-create every topic the three services publish to or consume
+        run: |
+          set -euo pipefail
+          # Same first-publish race the other jobs document. A consumer group on
+          # a topic that does not exist yet is never assigned a partition, so
+          # all four topics must exist (with a leader) before
+          # slotting-optimization subscribes; the feature scans partition 0 of
+          # warehouse.slotting-optimization.events and publishes to
+          # warehouse.order-management.events, so each has exactly one partition.
+          kafka_container="$(docker ps --filter ancestor=apache/kafka:3.8.0 --format '{{.ID}}' | head -1)"
+          if [[ -z "${kafka_container}" ]]; then
+            echo "::error::could not find the running apache/kafka container"
+            exit 1
+          fi
+          topics=(
+            warehouse.facility.events
+            warehouse.product-master.events
+            warehouse.order-management.events
+            warehouse.slotting-optimization.events
+          )
+          for t in "${topics[@]}"; do
+            docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server localhost:9092 --create --if-not-exists \
+              --topic "${t}" --partitions 1 --replication-factor 1
+          done
+          for t in "${topics[@]}"; do
+            deadline=$((SECONDS + 30))
+            while true; do
+              leader="$(docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server localhost:9092 --describe --topic "${t}" 2>/dev/null \
+                | grep -oE 'Leader: [0-9]+' | head -1 || true)"
+              [[ -n "${leader}" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${t} never got an assigned partition leader"
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+          echo "all topics ready"
+
+      - name: Start per-service Postgres instances
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          dbs="postgres-facility postgres-product-master postgres-slotting"
+          docker compose -f docker-compose.yml up -d ${dbs}
+          for svc in ${dbs}; do
+            deadline=$((SECONDS + 60))
+            while true; do
+              status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
+              [[ "${status}" == "healthy" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${svc} never became healthy"
+                docker logs "e2e-${svc}" || true
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "${svc} healthy"
+          done
+
+      - name: Build the 3 binaries the slotting scenarios need
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+          mkdir -p "${BIN_DIR}"
+
+          build_one() {
+            local name="$1" repo="$2" cmd_pkg="$3"
+            echo "==> go build ${name} (${repo}/cmd/${cmd_pkg})"
+            # GOTOOLCHAIN=auto: setup-go pins the toolchain to e2e-tests' own
+            # go.mod, but a sibling may require a newer Go.
+            ( cd "${repo}" && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
+            echo "  OK   ${name} -> ${BIN_DIR}/${name}"
+          }
+
+          # Not scripts/01-build.sh verbatim: it also builds the services and
+          # MCP servers this job does not check out.
+          build_one facility              "${FACILITY_REPO}"       facility
+          build_one product-master        "${PRODUCT_MASTER_REPO}" api
+          build_one slotting-optimization "${SLOTTING_REPO}"       api
+
+      - name: Start the 3 services and run slotting_optimization.feature
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+
+          wait_http() {
+            local url="$1" deadline=$((SECONDS + 60))
+            while true; do
+              curl -sf "${url}" >/dev/null 2>&1 && return 0
+              if (( SECONDS > deadline )); then
+                echo "::error::${url} never became healthy"
+                return 1
+              fi
+              sleep 1
+            done
+          }
+
+          # Same env as scripts/03-up-services.sh (the single source of truth
+          # for what each service needs); per-service consumer groups come from
+          # env.sh's run-scoped suffix.
+          env HTTP_ADDR=":${FACILITY_HTTP_PORT}" DATABASE_URL="${FACILITY_DB_URL}" PGPASSWORD="facility" MIGRATIONS_PATH="${FACILITY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" LOG_LEVEL=info \
+            "${BIN_DIR}/facility" > /tmp/facility.log 2>&1 &
+          wait_http "${FACILITY_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${PRODUCT_MASTER_HTTP_PORT}" DATABASE_URL="${PRODUCT_MASTER_DB_URL}" PGPASSWORD="product_master" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/product-master" > /tmp/product-master.log 2>&1 &
+          wait_http "${PRODUCT_MASTER_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${SLOTTING_HTTP_PORT}" DATABASE_URL="${SLOTTING_DB_URL}" PGPASSWORD="slotting" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" DEMAND_MODE=kafka DEMAND_CONSUMER_GROUP="${SLOTTING_DEMAND_CONSUMER_GROUP}" PRODUCT_MODE=kafka PRODUCT_CONSUMER_GROUP="${SLOTTING_PRODUCT_CONSUMER_GROUP}" LAYOUT_MODE=kafka LAYOUT_CONSUMER_GROUP="${SLOTTING_LAYOUT_CONSUMER_GROUP}" OUTBOX_RELAY_INTERVAL=500ms SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/slotting-optimization" > /tmp/slotting-optimization.log 2>&1 &
+          wait_http "${SLOTTING_BASE_URL}/healthz"
+
+          echo "all 3 services healthy"
+
+          export SLOTTING_BASE_URL FACILITY_BASE_URL PRODUCT_MASTER_BASE_URL KAFKA_BROKERS
+          export GODOG_TAGS="@slotting"
+          go test -v -run TestMain -timeout 5m .
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: tail -n +1 /tmp/facility.log /tmp/product-master.log /tmp/slotting-optimization.log 2>&1 || true
