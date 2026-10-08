@@ -8,30 +8,109 @@ their published REST APIs with a [godog](https://github.com/cucumber/godog)
 (Cucumber for Go) suite. It never imports another repo's Go packages —
 exactly like a human running curl against a live deployment.
 
-This repo is a study-project companion to eight bounded-context repos
-(`facility-layout`, `inventory-storage`, `wes-work-planning`,
-`fulfillment-execution`, `workforce-management`, `order-management`,
-`process-path-management`, `labor-performance`) plus the read-side
-decision-support agent `warehouse-ops-agent`, all siblings under the same
-`warehouse-systems/` workspace root — see `env.sh`'s `REPOS_ROOT` for the
-layout this harness assumes.
+This repo is a study-project companion to the bounded-context repos
+(`facility-layout`, `product-master`, `inventory-storage`,
+`wes-work-planning`, `fulfillment-execution`, `workforce-management`,
+`order-management`, `process-path-management`, `labor-performance`,
+`network-fulfillment`, `network-inventory-planning`, `warehouse-planning`,
+`inbound-receiving`)
+plus the read-side decision-support agent `warehouse-ops-agent`, all siblings
+under the same `warehouse-systems/` workspace root — see `env.sh`'s
+`REPOS_ROOT` for the layout this harness assumes (it is overridable:
+`REPOS_ROOT=/path/to/repos`, so a git worktree of this repo can build the
+siblings).
+
+## Services the harness runs
+
+Ports and DSNs live in `env.sh` only; this table mirrors it.
+
+| Service | Binary (`cmd/`) | HTTP | Postgres | Classification role |
+|---|---|---|---|---|
+| process-path-management | `pathmgmt` | 8087 | 5447 | — |
+| facility-layout | `facility` | 8081 | 5441 | — |
+| **product-master** | `api` | 8090 | 5450 | **owner**: `PUT /products/{sku}` + `PUT /products/{sku}/classification`, physical profile; publishes `warehouse.product-master.events` |
+| inventory-storage | `inventory` | 8082 | 5442 | local copy (`PRODUCT_MASTER_CONSUMER_GROUP`); its classification `PUT` answers `410 classification-moved`; books inbound-receiving's Good receipt lines as staged stock (`INBOUND_RECEIPT_CONSUMER_GROUP`) |
+| wes-work-planning | `wes` | 8083 | 5443 | local copy (`PRODUCT_CLASSIFICATION_MODE=kafka`) |
+| fulfillment-execution | `execution` | 8084 | 5444 | local copy (`PRODUCT_CLASSIFICATION_MODE=kafka`) |
+| labor-performance | `labor` | 8088 | 5448 | — |
+| workforce-management | `workforce` | 8085 | 5445 | — |
+| order-management | `order` | 8086 | 5446 | local copy (`PRODUCT_CLASSIFICATION_MODE=kafka`) |
+| network-fulfillment | `netfulfil` | 8089 | 5449 | — |
+| network-inventory-planning | `network-inventory-planning` | 8099 | 5451 | — |
+| warehouse-planning | `api` | 8100 | 5452 | — |
+| **inbound-receiving** | `api` | 8108 | 5453 | ASN / dock appointment / receipt (`/asns`, `/appointments`, `/receipts`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`), dock doors permissive; publishes `warehouse.inbound-receiving.events` |
+| warehouse-ops-agent | `agent` | 8096 | — | — |
+
+Every local copy uses a per-run consumer group derived from
+`E2E_CONSUMER_GROUP_SUFFIX` (never the cluster's group): that includes
+inbound-receiving's product copy (`PRODUCT_CONSUMER_GROUP`) and
+inventory-storage's consumer of inbound-receiving
+(`INBOUND_RECEIPT_CONSUMER_GROUP`, which does not exist when unset).
+`PRODUCT_CLASSIFICATION_MODE=http` no longer exists: the three readers
+refuse to boot with it.
 
 ## What's covered
 
-8 feature files, each with exactly one scenario:
+12 feature files (the inter-warehouse transfer feature has two scenarios, the
+inbound-receiving one four):
 
+- **`features/inbound_receiving.feature`** (`@inbound-receiving`) — the inbound
+  dock workflow and its handover, against inbound-receiving, product-master
+  and inventory-storage only: (1) an ASN for a product-master-registered SKU
+  is received short (expects 50, 40 Good) and closes with the exact `Short`
+  discrepancy, asserted on the REST read and on the `ReceiptClosed` event;
+  (2) the **handover**: Good units reach inventory-storage as staged stock
+  (exactly one `StockReceived` for the SKU on its analytics topic, because
+  staged stock has no REST read), usable stays 0 until `POST /stock/stow`
+  and is then the received quantity; (3) a dock appointment refuses an
+  overlapping booking on the same door with `409 door-window-overlap`
+  (while a window starting exactly when the first ends is accepted), checks
+  in, and completes when the receipt opened from it closes; (4) a `Damaged`
+  line is recorded on the receipt and is NOT booked as staged stock. Door
+  codes are accepted without a facility-layout dock slot
+  (`DOCK_DOOR_MODE` permissive); SKU existence is enforced
+  (`PRODUCT_MODE=kafka`), so ASN registration waits for `ProductRegistered`.
+
+- **`features/inter_warehouse_transfer.feature`** — the whole
+  inter-warehouse transfer saga across real service binaries and real Kafka:
+  network-inventory-planning approves a transfer, inventory-storage
+  allocates the origin stock, NIP releases the pick demand
+  (`WorkDemandReleased`), wes-work-planning enqueues and releases it,
+  fulfillment-execution's floor picks (`TransferPicked`), NIP releases the
+  dispatch demand, the floor dispatches (`TransferDispatched`), the
+  destination scans and stows through inventory-storage's REST
+  (`TransferReceiptStaged` / `TransferStockStowed`) and NIP reaches
+  `RECEIVED`. A second scenario proves the compensation: origin stock that
+  cannot cover the transfer → `TransferStockAllocationRejected` → `UNFULFILLABLE`,
+  no work released. The feature header lists exactly what is injected or
+  seeded rather than produced by a real service (`SiteCapabilityChanged`,
+  `SiteSkuDemandChanged`, site custody of stock/bins) and why. It needs
+  warehouse-planning (the real producer of `CapacityPlanPublished`) and
+  network-inventory-planning, both started by `scripts/03-up-services.sh`.
+  A short-pick scenario is not possible today: fulfillment-execution's
+  completion carries no picked quantity.
 - **`features/bootstrap.feature`** — a single work unit flowing through
   every bounded context: facility-layout's physical map, inventory-storage
   stock, workforce-management's committed shift plan (Kafka →
   wes-work-planning's labor-plan-view), wes-work-planning's release (Kafka →
   fulfillment-execution's task creation), and fulfillment-execution's task
   completion (Kafka → wes-work-planning's completion read model).
+- **`features/product_master.feature`** (`@product-master`) — product-master
+  owns classification and the physical profile: a SKU is registered and
+  classified `Hazmat` there, inventory-storage eventually knows it as
+  `Hazmat` through `warehouse.product-master.events` alone, declared then
+  measured dimensions flip the profile to `effectiveSource=measured` with
+  the discrepancy flag set, and inventory-storage's retired
+  `PUT /products/{sku}/classification` answers `410 classification-moved`
+  without writing anything.
 - **`features/facility_layout_propagation.feature`** — proves
   facility-layout's warehouse-map events (zone hazmat/temperature
   attributes, newly-registered and decommissioned slots) reach
   inventory-storage's local placement-rules read model purely over Kafka,
   picked up live without a restart — the only proof these two contexts
-  actually agree over the wire.
+  actually agree over the wire. Its hazmat SKU is classified in
+  product-master and the scenario waits until inventory-storage's copy
+  knows it before the stow assertions (the real proof) run.
 - **`features/flow_balance_exception.feature`** (T5) — proves
   `warehouse-ops-agent`, the agentic read-side decision-support layer, end
   -to-end against the real MCP servers of all five contexts: three
@@ -85,15 +164,19 @@ layout this harness assumes.
 ## Running locally
 
 Prerequisites: Docker (for Postgres + the shared Kafka broker), Go
-(matching `go.mod`), and all seven sibling repos checked out alongside this
-one under the same parent directory.
+(matching `go.mod`), and every sibling repo in the table above
+(including `product-master`) checked out alongside this one under the same
+parent directory (`scripts/01-build.sh` stops with a clone hint when one is
+missing).
 
 ```bash
 cd e2e-tests
-bash scripts/02-up-infra.sh      # Postgres (this repo) + shared Kafka
-bash scripts/01-build.sh         # builds all 12 binaries (6 HTTP + 5 MCP + ops-agent)
-bash scripts/03-up-services.sh   # starts all 12 as background processes
+bash scripts/02-up-infra.sh      # Postgres (13 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
+bash scripts/01-build.sh         # builds all 21 binaries (13 HTTP incl. product-master, inbound-receiving, network-inventory-planning, warehouse-planning + 7 MCP + ops-agent)
+bash scripts/03-up-services.sh   # starts them as background processes (product-master and inbound-receiving before inventory-storage; NIP last)
 bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)
+GODOG_TAGS=@product-master bash scripts/04-run-tests.sh  # just the product-master scenario
+GODOG_TAGS=@inbound-receiving bash scripts/04-run-tests.sh  # just the inbound-receiving scenarios
 bash scripts/06-run-soak.sh      # OPTIONAL: the long-running @soak backlog-ramp run (see below)
 bash scripts/05-down-services.sh # stops only what this harness started
 ```
@@ -149,8 +232,8 @@ The day, hour by hour:
 
 | Sim time | Persona | APIs driven |
 |---|---|---|
-| 05:30 | control tower | facility-layout `POST /location-types` + `POST /locations/import` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}` + `PUT /products/{sku}/classification`; process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule`; labor-performance `POST /standards` |
-| 05:30 | receiving | inventory-storage `POST /stock/receive` + `POST /stock/stow` into registered bins |
+| 05:30 | control tower | facility-layout `POST /location-types` + `POST /locations/import` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}`; product-master `PUT /products/{sku}` (every SKU) + `PUT /products/{sku}/classification` (fragile SKUs; inventory-storage and the readers learn it from `warehouse.product-master.events`); process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule`; labor-performance `POST /standards` |
+| 05:30 | receiving | inventory-storage `POST /stock/receive` + `POST /stock/stow` into registered bins (the ASN-driven path, inbound-receiving `POST /asns` → `/receipts` → `/receipts/{id}/lines` → `/close`, whose Good lines inventory-storage books as staged stock, is covered by `@inbound-receiving` and is not part of this simulated day) |
 | 06:00 | supervisor | workforce-management start-shift, `POST /shift-plans`, assignments; WES charge/plan; fulfillment station registration + check-in |
 | 06:00-20:00 | customers | order-management `POST /orders` on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
 | all day | pickers / flex | `claim-next PICK`, `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `confirm-pick`, complete, `POST /rebin/arrivals` |
@@ -192,14 +275,48 @@ committed offsets across restarts instead of replaying the topic history.
   exception and needed a `02b-migrate-wes.sh` workaround; it now migrates
   itself like the rest (wes-work-planning PR #52), and that script has
   been removed.
+- `KAFKA_BROKERS` (default `localhost:9092`, the warehouse-infra kind
+  cluster's broker) and `REPOS_ROOT` are overridable. Run the transfer
+  feature against a throwaway broker, not the shared cluster: the saga
+  publishes AND consumes commands (`TransferAllocationRequested`) on shared
+  topics, so a live in-cluster inventory-storage could answer the same
+  command with a different reservation. E.g.
+  `docker run -d -p 29092:29092 -e KAFKA_NODE_ID=1 ... apache/kafka:3.8.0`
+  (the CI job's single-node KRaft config with the listener on `:29092`) and
+  `export KAFKA_BROKERS=localhost:29092` before the `scripts/*.sh`. Create
+  the topics up front (CI does) so no first publish races topic creation.
+- `fixtures/process-paths/sortable-fc.yaml` is this harness's own copy of
+  warehouse-infra's process-path catalogue plus a `DISPATCH` family
+  (`dispatch-*`), which the transfer saga's dispatch leg needs
+  (fulfillment-execution ADR-0036) and warehouse-infra's frozen file lacks.
+  NIP's pick leg is `pick-transfer` (inside the existing `PICK` family) and
+  its dispatch leg `dispatch-transfer`.
+- `PLANNING_MAX_STALENESS` for NIP is `720h` here (`NIP_PLANNING_MAX_STALENESS`):
+  NIP refuses to plan from ANY stale fact in its read models, and this
+  harness's Postgres volumes persist across runs.
+- `NIP_TRANSFER_READ_MODE=rest` switches the transfer feature's state
+  assertion from NIP's own table (default, `db`) to `GET /v1/transfers/{id}`
+  once that endpoint is on NIP's develop.
 
 ## CI
 
 `.github/workflows/ci.yml` runs `gofmt`, `go build`/`go vet`, a shell
 syntax check on every `scripts/*.sh`, and `docker compose config`
 validation. The full godog suite is NOT run in CI: it is a genuinely
-multi-repo black-box harness (it builds and runs binaries from six
-sibling repos plus `warehouse-ops-agent`, none of which are checked out in
+multi-repo black-box harness (it builds and runs binaries from thirteen
+sibling bounded-context repos, product-master and inbound-receiving included, plus
+`warehouse-ops-agent`, none of which are checked out in
 a single-repo GitHub Actions run) — it is run and verified locally as part
 of every change that touches it, the same pattern `e2s-tests`' equivalent
 harness follows.
+
+`.github/workflows/e2e-behaviour.yml` (weekly + manual dispatch) is the
+exception, with three jobs. The first checks out the 7 core repos
+(facility-layout, product-master, inventory-storage, wes-work-planning,
+fulfillment-execution, workforce-management, order-management), starts them
+against a throwaway Kafka and per-service Postgres, and runs
+`@bootstrap,@product-master`. The second (`@inter-warehouse-transfer`) adds
+network-inventory-planning and warehouse-planning (9 services in all) and
+pre-creates the topics they exchange. The third (`@inbound-receiving`) needs
+only product-master, inbound-receiving and inventory-storage (with its
+`INBOUND_RECEIPT_CONSUMER_GROUP`) and four pre-created topics.

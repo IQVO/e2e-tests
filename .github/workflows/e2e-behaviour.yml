@@ -13,9 +13,21 @@ name: E2E Behaviour
 # safer rollout.
 #
 # This is a SEPARATE workflow file from ci.yml (not a new job in it)
-# because it needs a materially different topology (6 sibling-repo
-# checkouts, a live Kafka broker, 6 live Postgres instances, ~16 built
+# because it needs a materially different topology (7 sibling-repo
+# checkouts, a live Kafka broker, 7 live Postgres instances, 7 built
 # binaries) that every other job in ci.yml deliberately does not carry.
+#
+# product-master (classification owner, its ADR 0003) is the 7th service:
+# inventory-storage's classification PUT answers 410, and inventory-storage,
+# order-management, wes-work-planning and fulfillment-execution read local
+# copies of warehouse.product-master.events (PRODUCT_CLASSIFICATION_MODE=
+# kafka; "http" fails at boot). The run covers @bootstrap plus the
+# @product-master scenario, which needs nothing beyond these 7 services.
+#
+# Two more jobs follow, each in its own job so one failing never masks the
+# flagship signal: the inter-warehouse transfer saga (9 services) and
+# inbound-receiving's @inbound-receiving scenarios (3 services:
+# product-master, inbound-receiving, inventory-storage).
 on:
   schedule:
     - cron: "0 7 * * 1" # weekly, Monday 7am UTC (1h after ci.yml's mutation job)
@@ -112,6 +124,13 @@ jobs:
           ref: develop
           path: order-management
 
+      - name: Checkout product-master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/product-master
+          ref: develop
+          path: product-master
+
       - name: Checkout warehouse-infra (config only -- process-path catalogue)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -138,7 +157,7 @@ jobs:
           echo "::error::kafka never became reachable on localhost:9092"
           exit 1
 
-      - name: Pre-create every topic the 6 core services publish to
+      - name: Pre-create every topic the 7 core services publish to
         run: |
           set -euo pipefail
           # KAFKA_AUTO_CREATE_TOPICS_ENABLE=true is not reliable enough on
@@ -149,7 +168,7 @@ jobs:
           # workflow's first genuinely-past-startup run). Creating every
           # topic explicitly up front, then confirming each one has an
           # assigned partition leader, removes that race entirely. Topic
-          # list is the real, complete set every one of the 6 checked-out
+          # list is the real, complete set every one of the 7 checked-out
           # services' own source publishes to (grepped from each repo's
           # internal/ for the literal "warehouse.*" topic-name strings),
           # not a guess.
@@ -161,6 +180,7 @@ jobs:
           topics=(
             warehouse.facility.events
             warehouse.facility.analytics
+            warehouse.product-master.events
             warehouse.inventory.events
             warehouse.inventory.analytics
             warehouse.work-planning.events
@@ -171,6 +191,12 @@ jobs:
             warehouse.workforce.analytics
             warehouse.order-management.events
             warehouse.order-management.analytics
+            # Consumed (not published) by wes-work-planning's integration
+            # consumer group (NIP WorkDemandReleased, wes-work-planning #150).
+            # No service here publishes it, but a kafka-go group subscribed
+            # to a topic that does not exist never gets an assignment, so
+            # ShiftPlanCommitted etc. would stall with it.
+            warehouse.network-inventory-planning.events
           )
           for t in "${topics[@]}"; do
             docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
@@ -199,8 +225,9 @@ jobs:
         run: |
           docker compose -f docker-compose.yml up -d \
             postgres-facility postgres-inventory postgres-wes \
-            postgres-fulfillment postgres-workforce postgres-order
-          for svc in postgres-facility postgres-inventory postgres-wes postgres-fulfillment postgres-workforce postgres-order; do
+            postgres-fulfillment postgres-workforce postgres-order \
+            postgres-product-master
+          for svc in postgres-facility postgres-inventory postgres-wes postgres-fulfillment postgres-workforce postgres-order postgres-product-master; do
             deadline=$((SECONDS + 60))
             while true; do
               status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
@@ -215,7 +242,7 @@ jobs:
             echo "${svc} healthy"
           done
 
-      - name: Build the 6 core service binaries
+      - name: Build the 7 core service binaries
         working-directory: e2e-tests
         run: |
           set -euo pipefail
@@ -225,11 +252,15 @@ jobs:
           build_one() {
             local name="$1" repo="$2" cmd_pkg="$3"
             echo "==> go build ${name} (${repo}/cmd/${cmd_pkg})"
-            ( cd "${repo}" && CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
+            # setup-go pins GOTOOLCHAIN=local to e2e-tests' own go.mod, but a
+            # sibling may require a newer Go (product-master needs >= 1.27.1).
+            # auto lets each repo's go.mod pick its toolchain, as it does on
+            # a developer machine (GOTOOLCHAIN's default).
+            ( cd "${repo}" && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
             echo "  OK   ${name} -> ${BIN_DIR}/${name}"
           }
 
-          # Deliberately only the 6 services bootstrap.feature needs (see
+          # Deliberately only the 7 services the CI scenarios need (see
           # allServicesAreHealthy in e2e_test.go) -- NOT scripts/01-build.sh
           # verbatim, since that script unconditionally also builds
           # process-path-management/labor-performance/warehouse-ops-agent
@@ -240,9 +271,10 @@ jobs:
           build_one execution  "${FULFILLMENT_REPO}" execution
           build_one workforce  "${WORKFORCE_REPO}"   workforce
           build_one order      "${ORDER_REPO}"       order
+          build_one product-master "${PRODUCT_MASTER_REPO}" api
         continue-on-error: false
 
-      - name: Start the 6 core services and run bootstrap.feature
+      - name: Start the 7 core services and run bootstrap.feature + product_master.feature
         working-directory: e2e-tests
         run: |
           set -euo pipefail
@@ -270,15 +302,19 @@ jobs:
             "${BIN_DIR}/facility" > /tmp/facility.log 2>&1 &
           wait_http "${FACILITY_BASE_URL}/healthz"
 
-          env HTTP_ADDR=":${INVENTORY_HTTP_PORT}" DATABASE_URL="${INVENTORY_DB_URL}" PGPASSWORD="inventory" MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" LOCATION_LOOKUP_MODE=kafka FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" LOG_LEVEL=info \
+          env HTTP_ADDR=":${PRODUCT_MASTER_HTTP_PORT}" DATABASE_URL="${PRODUCT_MASTER_DB_URL}" PGPASSWORD="product_master" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/product-master" > /tmp/product-master.log 2>&1 &
+          wait_http "${PRODUCT_MASTER_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${INVENTORY_HTTP_PORT}" DATABASE_URL="${INVENTORY_DB_URL}" PGPASSWORD="inventory" MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" LOCATION_LOOKUP_MODE=kafka FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" LOG_LEVEL=info \
             "${BIN_DIR}/inventory" > /tmp/inventory.log 2>&1 &
           wait_http "${INVENTORY_BASE_URL}/healthz"
 
-          env HTTP_ADDR=":${WES_HTTP_PORT}" DATABASE_URL="${WES_DB_URL}" PGPASSWORD="wes" MIGRATIONS_PATH="${WES_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" KAFKA_CONSUMER_GROUP="${WES_CONSUMER_GROUP}" PRODUCT_CLASSIFICATION_MODE=http INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" LOG_LEVEL=info \
+          env HTTP_ADDR=":${WES_HTTP_PORT}" DATABASE_URL="${WES_DB_URL}" PGPASSWORD="wes" MIGRATIONS_PATH="${WES_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" KAFKA_CONSUMER_GROUP="${WES_CONSUMER_GROUP}" PRODUCT_CLASSIFICATION_MODE=kafka PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${WES_CLASSIFICATION_CONSUMER_GROUP}" PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" LOG_LEVEL=info \
             "${BIN_DIR}/wes" > /tmp/wes.log 2>&1 &
           wait_http "${WES_BASE_URL}/healthz"
 
-          ( cd "${FULFILLMENT_REPO}" && env HTTP_ADDR=":${FULFILLMENT_HTTP_PORT}" DATABASE_URL="${FULFILLMENT_DB_URL}" PGPASSWORD="fulfillment" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" WORK_RELEASED_CONSUMER_GROUP="${FULFILLMENT_CONSUMER_GROUP}" PRODUCT_CLASSIFICATION_MODE=http INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" LOG_LEVEL=info \
+          ( cd "${FULFILLMENT_REPO}" && env HTTP_ADDR=":${FULFILLMENT_HTTP_PORT}" DATABASE_URL="${FULFILLMENT_DB_URL}" PGPASSWORD="fulfillment" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" WORK_RELEASED_CONSUMER_GROUP="${FULFILLMENT_CONSUMER_GROUP}" PRODUCT_CLASSIFICATION_MODE=kafka PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP}" PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" LOG_LEVEL=info \
             "${BIN_DIR}/execution" > /tmp/execution.log 2>&1 & )
           wait_http "${FULFILLMENT_BASE_URL}/healthz"
 
@@ -286,19 +322,20 @@ jobs:
             "${BIN_DIR}/workforce" > /tmp/workforce.log 2>&1 &
           wait_http "${WORKFORCE_BASE_URL}/healthz"
 
-          env HTTP_ADDR=":${ORDER_HTTP_PORT}" DATABASE_URL="${ORDER_DB_URL}" PGPASSWORD="order" MIGRATIONS_PATH="${ORDER_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" LOG_LEVEL=info \
+          env HTTP_ADDR=":${ORDER_HTTP_PORT}" DATABASE_URL="${ORDER_DB_URL}" PGPASSWORD="order" MIGRATIONS_PATH="${ORDER_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" PRODUCT_CLASSIFICATION_MODE=kafka PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${ORDER_CLASSIFICATION_CONSUMER_GROUP}" LOG_LEVEL=info \
             "${BIN_DIR}/order" > /tmp/order.log 2>&1 &
           wait_http "${ORDER_BASE_URL}/healthz"
 
-          echo "all 6 core services healthy"
+          echo "all 7 core services healthy"
 
-          export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WORKFORCE_BASE_URL ORDER_BASE_URL
-          export GODOG_TAGS="@bootstrap"
+          export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WORKFORCE_BASE_URL ORDER_BASE_URL PRODUCT_MASTER_BASE_URL
+          # godog tag expression: a comma is OR.
+          export GODOG_TAGS="@bootstrap,@product-master"
           go test -v -run TestMain -timeout 5m .
 
       - name: Dump service logs on failure
         if: failure()
-        run: tail -n +1 /tmp/facility.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log 2>&1 || true
+        run: tail -n +1 /tmp/facility.log /tmp/product-master.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log 2>&1 || true
       # This job checks the repo out into ./e2e-tests next to the service repos, so repo scripts (and the git remote
       # `gh` needs) are only found from that directory. A scheduled run is what the weekly sensor reads; a manual run
       # on develop counts as proof too (harness-health), so both trigger these steps. They must run for real on a
@@ -315,3 +352,495 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/harness/red_issue.py bootstrap-scenario --close
+
+
+  # The inter-warehouse transfer saga (features/inter_warehouse_transfer.feature)
+  # across the 6 core services PLUS product-master (classification owner, the
+  # readers refuse to boot without it), network-inventory-planning and
+  # warehouse-planning, over the same single-node Kafka. Separate job (not
+  # extra steps in the bootstrap one) so a transfer-saga failure never masks
+  # the flagship @bootstrap signal. It has no harness:red issue steps of its
+  # own: red_issue.py is keyed to the bootstrap job. NOTE: this job is the
+  # only place the scenario runs in CI; locally run it per README.md.
+  inter-warehouse-transfer-scenario:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 25
+
+    services:
+      kafka:
+        image: apache/kafka:3.8.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+
+    steps:
+      - name: Checkout e2e-tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: e2e-tests
+
+      - name: Checkout facility-layout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/facility-layout
+          ref: develop
+          path: facility-layout
+
+      - name: Checkout inventory-storage
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/inventory-storage
+          ref: develop
+          path: inventory-storage
+
+      - name: Checkout wes-work-planning
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/wes-work-planning
+          ref: develop
+          path: wes-work-planning
+
+      - name: Checkout fulfillment-execution
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/fulfillment-execution
+          ref: develop
+          path: fulfillment-execution
+
+      - name: Checkout workforce-management
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/workforce-management
+          ref: develop
+          path: workforce-management
+
+      - name: Checkout order-management
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/order-management
+          ref: develop
+          path: order-management
+
+      - name: Checkout product-master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/product-master
+          ref: develop
+          path: product-master
+
+      - name: Checkout network-inventory-planning
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/network-inventory-planning
+          ref: develop
+          path: network-inventory-planning
+
+      - name: Checkout warehouse-planning
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/warehouse-planning
+          ref: develop
+          path: warehouse-planning
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: e2e-tests/go.mod
+
+      - name: Wait for Kafka to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/9092) >/dev/null 2>&1; then
+              echo "kafka is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::kafka never became reachable on localhost:9092"
+          exit 1
+
+      - name: Pre-create every topic the saga's services publish to
+        run: |
+          set -euo pipefail
+          # Same race the bootstrap job documents (a first publish can beat
+          # the broker's metadata propagation); the transfer saga adds the
+          # NIP and warehouse-planning topics.
+          kafka_container="$(docker ps --filter ancestor=apache/kafka:3.8.0 --format '{{.ID}}' | head -1)"
+          if [[ -z "${kafka_container}" ]]; then
+            echo "::error::could not find the running apache/kafka container"
+            exit 1
+          fi
+          topics=(
+            warehouse.facility.events
+            warehouse.facility.analytics
+            warehouse.product-master.events
+            warehouse.inventory.events
+            warehouse.inventory.analytics
+            warehouse.work-planning.events
+            warehouse.wes.analytics
+            warehouse.fulfillment.events
+            warehouse.fulfillment.analytics
+            warehouse.workforce.events
+            warehouse.workforce.analytics
+            warehouse.order-management.events
+            warehouse.order-management.analytics
+            warehouse.network-inventory-planning.events
+            warehouse.warehouse-planning.events
+            warehouse.warehouse-planning.analytics
+          )
+          for t in "${topics[@]}"; do
+            docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server localhost:9092 --create --if-not-exists \
+              --topic "${t}" --partitions 1 --replication-factor 1
+          done
+          for t in "${topics[@]}"; do
+            deadline=$((SECONDS + 30))
+            while true; do
+              leader="$(docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server localhost:9092 --describe --topic "${t}" 2>/dev/null \
+                | grep -oE 'Leader: [0-9]+' | head -1 || true)"
+              [[ -n "${leader}" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${t} never got an assigned partition leader"
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+          echo "all topics ready"
+
+      - name: Start per-service Postgres instances
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          dbs="postgres-facility postgres-inventory postgres-wes postgres-fulfillment postgres-workforce postgres-order postgres-product-master postgres-nip postgres-planning"
+          docker compose -f docker-compose.yml up -d ${dbs}
+          for svc in ${dbs}; do
+            deadline=$((SECONDS + 60))
+            while true; do
+              status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
+              [[ "${status}" == "healthy" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${svc} never became healthy"
+                docker logs "e2e-${svc}" || true
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "${svc} healthy"
+          done
+
+      - name: Build the 9 binaries the transfer saga needs
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+          mkdir -p "${BIN_DIR}"
+
+          build_one() {
+            local name="$1" repo="$2" cmd_pkg="$3"
+            echo "==> go build ${name} (${repo}/cmd/${cmd_pkg})"
+            # GOTOOLCHAIN=auto: setup-go pins the toolchain to e2e-tests' own
+            # go.mod, but a sibling may require a newer Go (product-master
+            # needs >= 1.27.1).
+            ( cd "${repo}" && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
+            echo "  OK   ${name} -> ${BIN_DIR}/${name}"
+          }
+
+          # Not scripts/01-build.sh verbatim: it also builds the services
+          # and MCP servers this job does not check out.
+          build_one facility   "${FACILITY_REPO}"           facility
+          build_one inventory  "${INVENTORY_REPO}"          inventory
+          build_one wes        "${WES_REPO}"                wes
+          build_one execution  "${FULFILLMENT_REPO}"        execution
+          build_one workforce  "${WORKFORCE_REPO}"          workforce
+          build_one order      "${ORDER_REPO}"              order
+          build_one product-master "${PRODUCT_MASTER_REPO}" api
+          build_one nip        "${NIP_REPO}"                network-inventory-planning
+          build_one planning   "${WAREHOUSE_PLANNING_REPO}" api
+
+      - name: Start the 9 services and run inter_warehouse_transfer.feature
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+
+          wait_http() {
+            local url="$1" deadline=$((SECONDS + 60))
+            while true; do
+              curl -sf "${url}" >/dev/null 2>&1 && return 0
+              if (( SECONDS > deadline )); then
+                echo "::error::${url} never became healthy"
+                return 1
+              fi
+              sleep 1
+            done
+          }
+
+          # Same env as scripts/03-up-services.sh (the single source of
+          # truth for what each service needs); per-service consumer
+          # groups come from env.sh's run-scoped suffix.
+          env HTTP_ADDR=":${FACILITY_HTTP_PORT}" DATABASE_URL="${FACILITY_DB_URL}" PGPASSWORD="facility" MIGRATIONS_PATH="${FACILITY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" LOG_LEVEL=info \
+            "${BIN_DIR}/facility" > /tmp/facility.log 2>&1 &
+          wait_http "${FACILITY_BASE_URL}/healthz"
+
+          # product-master owns SKU classification; the readers below keep a
+          # local copy of its events and refuse to boot in any other mode.
+          env HTTP_ADDR=":${PRODUCT_MASTER_HTTP_PORT}" DATABASE_URL="${PRODUCT_MASTER_DB_URL}" PGPASSWORD="product_master" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/product-master" > /tmp/product-master.log 2>&1 &
+          wait_http "${PRODUCT_MASTER_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${INVENTORY_HTTP_PORT}" DATABASE_URL="${INVENTORY_DB_URL}" PGPASSWORD="inventory" MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" LOCATION_LOOKUP_MODE=kafka FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" TRANSFER_ALLOCATION_CONSUMER_MODE=kafka TRANSFER_ALLOCATION_CONSUMER_GROUP="${INVENTORY_TRANSFER_CONSUMER_GROUP}" PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" LOG_LEVEL=info \
+            "${BIN_DIR}/inventory" > /tmp/inventory.log 2>&1 &
+          wait_http "${INVENTORY_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${WES_HTTP_PORT}" DATABASE_URL="${WES_DB_URL}" PGPASSWORD="wes" MIGRATIONS_PATH="${WES_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" KAFKA_CONSUMER_GROUP="${WES_CONSUMER_GROUP}" PRODUCT_CLASSIFICATION_MODE=kafka PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${WES_CLASSIFICATION_CONSUMER_GROUP}" PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" LOG_LEVEL=info \
+            "${BIN_DIR}/wes" > /tmp/wes.log 2>&1 &
+          wait_http "${WES_BASE_URL}/healthz"
+
+          ( cd "${FULFILLMENT_REPO}" && env HTTP_ADDR=":${FULFILLMENT_HTTP_PORT}" DATABASE_URL="${FULFILLMENT_DB_URL}" PGPASSWORD="fulfillment" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" WORK_RELEASED_CONSUMER_GROUP="${FULFILLMENT_CONSUMER_GROUP}" PRODUCT_CLASSIFICATION_MODE=kafka PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP}" PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" LOG_LEVEL=info \
+            "${BIN_DIR}/execution" > /tmp/execution.log 2>&1 & )
+          wait_http "${FULFILLMENT_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${WORKFORCE_HTTP_PORT}" DATABASE_URL="${WORKFORCE_DB_URL}" PGPASSWORD="workforce" MIGRATIONS_PATH="${WORKFORCE_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" INSTALLED_CAPACITY_MODE=http FULFILLMENT_EXECUTION_BASE_URL="${FULFILLMENT_BASE_URL}" LOG_LEVEL=info \
+            "${BIN_DIR}/workforce" > /tmp/workforce.log 2>&1 &
+          wait_http "${WORKFORCE_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${ORDER_HTTP_PORT}" DATABASE_URL="${ORDER_DB_URL}" PGPASSWORD="order" MIGRATIONS_PATH="${ORDER_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" PRODUCT_CLASSIFICATION_MODE=kafka PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${ORDER_CLASSIFICATION_CONSUMER_GROUP}" LOG_LEVEL=info \
+            "${BIN_DIR}/order" > /tmp/order.log 2>&1 &
+          wait_http "${ORDER_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${WAREHOUSE_PLANNING_HTTP_PORT}" DATABASE_URL="${WAREHOUSE_PLANNING_DB_URL}" PGPASSWORD="planning" MIGRATIONS_PATH="${WAREHOUSE_PLANNING_REPO}/internal/adapters/outbound/postgres/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" LABOR_CAPACITY_CONSUMER_GROUP="${WAREHOUSE_PLANNING_LABOR_CONSUMER_GROUP}" STORAGE_CAPACITY_CONSUMER_GROUP="${WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP}" OUTBOX_RELAY_INTERVAL=500ms LOG_LEVEL=info \
+            "${BIN_DIR}/planning" > /tmp/planning.log 2>&1 &
+          wait_http "${WAREHOUSE_PLANNING_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${NIP_HTTP_PORT}" DATABASE_URL="${NIP_DB_URL}" PGPASSWORD="nip" MIGRATIONS_PATH="${NIP_REPO}/internal/adapters/outbound/postgres/migrations" KAFKA_BROKERS="${KAFKA_BROKERS}" SITE_CAPABILITY_CONSUMER_GROUP="${NIP_CAPABILITY_CONSUMER_GROUP}" SITE_SKU_DEMAND_CONSUMER_GROUP="${NIP_DEMAND_CONSUMER_GROUP}" CAPACITY_PLAN_CONSUMER_GROUP="${NIP_CAPACITY_PLAN_CONSUMER_GROUP}" TRANSFER_REPLY_CONSUMER_GROUP="${NIP_TRANSFER_REPLY_CONSUMER_GROUP}" TRANSFER_FACT_CONSUMER_GROUP="${NIP_TRANSFER_FACT_CONSUMER_GROUP}" OUTBOX_RELAY_ENABLED=true TRANSFER_PICK_PATH_ID="${NIP_TRANSFER_PICK_PATH_ID}" TRANSFER_DISPATCH_PATH_ID="${NIP_TRANSFER_DISPATCH_PATH_ID}" PLANNING_MAX_STALENESS="${NIP_PLANNING_MAX_STALENESS}" LOG_LEVEL=info \
+            "${BIN_DIR}/nip" > /tmp/nip.log 2>&1 &
+          wait_http "${NIP_BASE_URL}/healthz"
+
+          echo "all 9 services healthy"
+
+          export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WORKFORCE_BASE_URL ORDER_BASE_URL
+          export NIP_BASE_URL WAREHOUSE_PLANNING_BASE_URL NIP_DB_URL KAFKA_BROKERS NIP_TRANSFER_PICK_PATH_ID NIP_TRANSFER_DISPATCH_PATH_ID
+          export GODOG_TAGS="@inter-warehouse-transfer"
+          go test -v -run TestMain -timeout 10m .
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: tail -n +1 /tmp/facility.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log /tmp/product-master.log /tmp/planning.log /tmp/nip.log 2>&1 || true
+
+  # inbound-receiving (ASN, dock appointment, receipt) and its event-driven
+  # handover to inventory-storage (inbound-receiving ADR 0003, inventory-storage
+  # ADR 0037): features/inbound_receiving.feature. A separate job so a failure
+  # here never masks the flagship @bootstrap signal, and it needs only the three
+  # services the feature talks to: product-master (inbound-receiving runs
+  # PRODUCT_MODE=kafka, so an ASN line for a SKU product-master has not announced
+  # is refused), inbound-receiving, and inventory-storage with
+  # INBOUND_RECEIPT_CONSUMER_GROUP set. No facility-layout: inbound-receiving's
+  # dock-door copy stays permissive and the feature stows an unclassified SKU, so
+  # inventory-storage keeps the permissive location lookup here. Like the
+  # transfer job it has no harness:red issue steps of its own.
+  inbound-receiving-scenario:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+
+    services:
+      kafka:
+        image: apache/kafka:3.8.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+
+    steps:
+      - name: Checkout e2e-tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: e2e-tests
+
+      - name: Checkout inventory-storage
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/inventory-storage
+          ref: develop
+          path: inventory-storage
+
+      - name: Checkout product-master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/product-master
+          ref: develop
+          path: product-master
+
+      - name: Checkout inbound-receiving
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/inbound-receiving
+          ref: develop
+          path: inbound-receiving
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: e2e-tests/go.mod
+
+      - name: Wait for Kafka to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/9092) >/dev/null 2>&1; then
+              echo "kafka is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::kafka never became reachable on localhost:9092"
+          exit 1
+
+      - name: Pre-create every topic the three services publish to or consume
+        run: |
+          set -euo pipefail
+          # Same first-publish race the other jobs document. A consumer group on
+          # a topic that does not exist yet is never assigned a partition, so
+          # warehouse.inbound-receiving.events must exist before inventory-storage
+          # subscribes; the feature scans partition 0 of the topics below, so
+          # each has exactly one partition.
+          kafka_container="$(docker ps --filter ancestor=apache/kafka:3.8.0 --format '{{.ID}}' | head -1)"
+          if [[ -z "${kafka_container}" ]]; then
+            echo "::error::could not find the running apache/kafka container"
+            exit 1
+          fi
+          topics=(
+            warehouse.product-master.events
+            warehouse.inbound-receiving.events
+            warehouse.inventory.events
+            warehouse.inventory.analytics
+          )
+          for t in "${topics[@]}"; do
+            docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server localhost:9092 --create --if-not-exists \
+              --topic "${t}" --partitions 1 --replication-factor 1
+          done
+          for t in "${topics[@]}"; do
+            deadline=$((SECONDS + 30))
+            while true; do
+              leader="$(docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server localhost:9092 --describe --topic "${t}" 2>/dev/null \
+                | grep -oE 'Leader: [0-9]+' | head -1 || true)"
+              [[ -n "${leader}" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${t} never got an assigned partition leader"
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+          echo "all topics ready"
+
+      - name: Start per-service Postgres instances
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          dbs="postgres-inventory postgres-product-master postgres-inbound-receiving"
+          docker compose -f docker-compose.yml up -d ${dbs}
+          for svc in ${dbs}; do
+            deadline=$((SECONDS + 60))
+            while true; do
+              status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
+              [[ "${status}" == "healthy" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${svc} never became healthy"
+                docker logs "e2e-${svc}" || true
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "${svc} healthy"
+          done
+
+      - name: Build the 3 binaries the inbound scenarios need
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+          mkdir -p "${BIN_DIR}"
+
+          build_one() {
+            local name="$1" repo="$2" cmd_pkg="$3"
+            echo "==> go build ${name} (${repo}/cmd/${cmd_pkg})"
+            # GOTOOLCHAIN=auto: setup-go pins the toolchain to e2e-tests' own
+            # go.mod, but a sibling may require a newer Go.
+            ( cd "${repo}" && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
+            echo "  OK   ${name} -> ${BIN_DIR}/${name}"
+          }
+
+          # Not scripts/01-build.sh verbatim: it also builds the services and
+          # MCP servers this job does not check out.
+          build_one inventory         "${INVENTORY_REPO}"      inventory
+          build_one product-master    "${PRODUCT_MASTER_REPO}" api
+          build_one inbound-receiving "${INBOUND_REPO}"        api
+
+      - name: Start the 3 services and run inbound_receiving.feature
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+
+          wait_http() {
+            local url="$1" deadline=$((SECONDS + 60))
+            while true; do
+              curl -sf "${url}" >/dev/null 2>&1 && return 0
+              if (( SECONDS > deadline )); then
+                echo "::error::${url} never became healthy"
+                return 1
+              fi
+              sleep 1
+            done
+          }
+
+          # Same env as scripts/03-up-services.sh (the single source of truth
+          # for what each service needs); per-service consumer groups come from
+          # env.sh's run-scoped suffix.
+          env HTTP_ADDR=":${PRODUCT_MASTER_HTTP_PORT}" DATABASE_URL="${PRODUCT_MASTER_DB_URL}" PGPASSWORD="product_master" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/product-master" > /tmp/product-master.log 2>&1 &
+          wait_http "${PRODUCT_MASTER_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${INBOUND_HTTP_PORT}" DATABASE_URL="${INBOUND_DB_URL}" PGPASSWORD="inbound_receiving" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" PRODUCT_MODE=kafka PRODUCT_CONSUMER_GROUP="${INBOUND_PRODUCT_CONSUMER_GROUP}" OUTBOX_RELAY_INTERVAL=500ms SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/inbound-receiving" > /tmp/inbound-receiving.log 2>&1 &
+          wait_http "${INBOUND_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${INVENTORY_HTTP_PORT}" DATABASE_URL="${INVENTORY_DB_URL}" PGPASSWORD="inventory" MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" INBOUND_RECEIPT_CONSUMER_GROUP="${INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP}" LOG_LEVEL=info \
+            "${BIN_DIR}/inventory" > /tmp/inventory.log 2>&1 &
+          wait_http "${INVENTORY_BASE_URL}/healthz"
+
+          echo "all 3 services healthy"
+
+          export INBOUND_BASE_URL PRODUCT_MASTER_BASE_URL INVENTORY_BASE_URL INVENTORY_DB_URL KAFKA_BROKERS
+          export GODOG_TAGS="@inbound-receiving"
+          go test -v -run TestMain -timeout 5m .
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: tail -n +1 /tmp/product-master.log /tmp/inbound-receiving.log /tmp/inventory.log 2>&1 || true

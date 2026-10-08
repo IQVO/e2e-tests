@@ -198,6 +198,89 @@ services:
       timeout: 3s
       retries: 20
 
+  # product-master (10th bounded context — owner of SKU classification and
+  # the physical profile, see env.sh's own comment). Own user/db name
+  # "product_master", on host port 5450 (past this harness's own
+  # 5441-5449 range). Migrations are embedded in its binary.
+  postgres-product-master:
+    image: postgres:16
+    container_name: e2e-postgres-product-master
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: product_master
+      POSTGRES_PASSWORD: product_master
+      POSTGRES_DB: product_master
+    ports:
+      - "5450:5432"
+    volumes:
+      - e2e_product_master_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U product_master -d product_master"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # network-inventory-planning (inter-warehouse transfer saga). Own
+  # user/db name "nip" on host port 5451 (it ships no compose file).
+  postgres-nip:
+    image: postgres:16
+    container_name: e2e-postgres-nip
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nip
+      POSTGRES_PASSWORD: nip
+      POSTGRES_DB: nip
+    ports:
+      - "5451:5432"
+    volumes:
+      - e2e_nip_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nip -d nip"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # warehouse-planning (producer of CapacityPlanPublished). Own user/db name
+  # "planning" on host port 5452.
+  postgres-planning:
+    image: postgres:16
+    container_name: e2e-postgres-planning
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: planning
+      POSTGRES_PASSWORD: planning
+      POSTGRES_DB: planning
+    ports:
+      - "5452:5432"
+    volumes:
+      - e2e_planning_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planning -d planning"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # inbound-receiving (ASN / dock appointment / receipt, its ADR 0001). Own
+  # user/db name "inbound_receiving" on host port 5453 (it ships no compose
+  # file). Migrations are embedded in its binary.
+  postgres-inbound-receiving:
+    image: postgres:16
+    container_name: e2e-postgres-inbound-receiving
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: inbound_receiving
+      POSTGRES_PASSWORD: inbound_receiving
+      POSTGRES_DB: inbound_receiving
+    ports:
+      - "5453:5432"
+    volumes:
+      - e2e_inbound_receiving_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inbound_receiving -d inbound_receiving"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -208,3 +291,7 @@ volumes:
   e2e_process_path_pg_data:
   e2e_labor_pg_data:
   e2e_network_pg_data:
+  e2e_product_master_pg_data:
+  e2e_nip_pg_data:
+  e2e_planning_pg_data:
+  e2e_inbound_receiving_pg_data:
