@@ -1660,10 +1660,17 @@ func (w *world) resolvePathID(pathID string) string {
 	return w.rs("E2E-PROCESS-PATH-<run>")
 }
 
+// processPathCycleTimeP95 is the operator-declared p95 cycle time the scenarios
+// give every path they define or revise. process-path-management requires it
+// (positive Go duration, its ADR 0010; POST and PUT answer 422
+// invalid-cycle-time-p95 without it), so the steps below must always send one.
+const processPathCycleTimeP95 = "2h"
+
 func (w *world) definePath(pathID, matchPrefix, capabilities string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPost, processPathBaseURL+"/process-paths", map[string]any{
 		"pathId": pathID, "matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"cycleTimeP95": processPathCycleTimeP95,
 	}))
 }
 
@@ -1699,6 +1706,7 @@ func (w *world) revisePath(pathID, matchPrefix, capabilities string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/process-paths/%s", processPathBaseURL, pathID), map[string]any{
 		"matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"cycleTimeP95": processPathCycleTimeP95,
 	}))
 }
 
