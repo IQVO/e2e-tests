@@ -137,6 +137,10 @@ type world struct {
 	// inb is the inbound-receiving correlation (receipt and appointment ids
 	// by run-scoped ASN number). See inbound_test.go.
 	inb *inboundState
+
+	// slot is the slotting-optimization correlation (plans, injected demand
+	// and placement guards by run-scoped site). See slotting_test.go.
+	slot *slottingState
 }
 
 func newWorld() *world {
@@ -1824,6 +1828,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
+	registerSlottingSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
 		return ctx, nil
