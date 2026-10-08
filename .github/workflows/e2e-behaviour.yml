@@ -23,6 +23,11 @@ name: E2E Behaviour
 # copies of warehouse.product-master.events (PRODUCT_CLASSIFICATION_MODE=
 # kafka; "http" fails at boot). The run covers @bootstrap plus the
 # @product-master scenario, which needs nothing beyond these 7 services.
+#
+# Two more jobs follow, each in its own job so one failing never masks the
+# flagship signal: the inter-warehouse transfer saga (9 services) and
+# inbound-receiving's @inbound-receiving scenarios (3 services:
+# product-master, inbound-receiving, inventory-storage).
 on:
   schedule:
     - cron: "0 7 * * 1" # weekly, Monday 7am UTC (1h after ci.yml's mutation job)
@@ -635,3 +640,207 @@ jobs:
       - name: Dump service logs on failure
         if: failure()
         run: tail -n +1 /tmp/facility.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log /tmp/product-master.log /tmp/planning.log /tmp/nip.log 2>&1 || true
+
+  # inbound-receiving (ASN, dock appointment, receipt) and its event-driven
+  # handover to inventory-storage (inbound-receiving ADR 0003, inventory-storage
+  # ADR 0037): features/inbound_receiving.feature. A separate job so a failure
+  # here never masks the flagship @bootstrap signal, and it needs only the three
+  # services the feature talks to: product-master (inbound-receiving runs
+  # PRODUCT_MODE=kafka, so an ASN line for a SKU product-master has not announced
+  # is refused), inbound-receiving, and inventory-storage with
+  # INBOUND_RECEIPT_CONSUMER_GROUP set. No facility-layout: inbound-receiving's
+  # dock-door copy stays permissive and the feature stows an unclassified SKU, so
+  # inventory-storage keeps the permissive location lookup here. Like the
+  # transfer job it has no harness:red issue steps of its own.
+  inbound-receiving-scenario:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+
+    services:
+      kafka:
+        image: apache/kafka:3.8.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+
+    steps:
+      - name: Checkout e2e-tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: e2e-tests
+
+      - name: Checkout inventory-storage
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/inventory-storage
+          ref: develop
+          path: inventory-storage
+
+      - name: Checkout product-master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/product-master
+          ref: develop
+          path: product-master
+
+      - name: Checkout inbound-receiving
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/inbound-receiving
+          ref: develop
+          path: inbound-receiving
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: e2e-tests/go.mod
+
+      - name: Wait for Kafka to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/9092) >/dev/null 2>&1; then
+              echo "kafka is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::kafka never became reachable on localhost:9092"
+          exit 1
+
+      - name: Pre-create every topic the three services publish to or consume
+        run: |
+          set -euo pipefail
+          # Same first-publish race the other jobs document. A consumer group on
+          # a topic that does not exist yet is never assigned a partition, so
+          # warehouse.inbound-receiving.events must exist before inventory-storage
+          # subscribes; the feature scans partition 0 of the topics below, so
+          # each has exactly one partition.
+          kafka_container="$(docker ps --filter ancestor=apache/kafka:3.8.0 --format '{{.ID}}' | head -1)"
+          if [[ -z "${kafka_container}" ]]; then
+            echo "::error::could not find the running apache/kafka container"
+            exit 1
+          fi
+          topics=(
+            warehouse.product-master.events
+            warehouse.inbound-receiving.events
+            warehouse.inventory.events
+            warehouse.inventory.analytics
+          )
+          for t in "${topics[@]}"; do
+            docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server localhost:9092 --create --if-not-exists \
+              --topic "${t}" --partitions 1 --replication-factor 1
+          done
+          for t in "${topics[@]}"; do
+            deadline=$((SECONDS + 30))
+            while true; do
+              leader="$(docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server localhost:9092 --describe --topic "${t}" 2>/dev/null \
+                | grep -oE 'Leader: [0-9]+' | head -1 || true)"
+              [[ -n "${leader}" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${t} never got an assigned partition leader"
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+          echo "all topics ready"
+
+      - name: Start per-service Postgres instances
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          dbs="postgres-inventory postgres-product-master postgres-inbound-receiving"
+          docker compose -f docker-compose.yml up -d ${dbs}
+          for svc in ${dbs}; do
+            deadline=$((SECONDS + 60))
+            while true; do
+              status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
+              [[ "${status}" == "healthy" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${svc} never became healthy"
+                docker logs "e2e-${svc}" || true
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "${svc} healthy"
+          done
+
+      - name: Build the 3 binaries the inbound scenarios need
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+          mkdir -p "${BIN_DIR}"
+
+          build_one() {
+            local name="$1" repo="$2" cmd_pkg="$3"
+            echo "==> go build ${name} (${repo}/cmd/${cmd_pkg})"
+            # GOTOOLCHAIN=auto: setup-go pins the toolchain to e2e-tests' own
+            # go.mod, but a sibling may require a newer Go.
+            ( cd "${repo}" && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
+            echo "  OK   ${name} -> ${BIN_DIR}/${name}"
+          }
+
+          # Not scripts/01-build.sh verbatim: it also builds the services and
+          # MCP servers this job does not check out.
+          build_one inventory         "${INVENTORY_REPO}"      inventory
+          build_one product-master    "${PRODUCT_MASTER_REPO}" api
+          build_one inbound-receiving "${INBOUND_REPO}"        api
+
+      - name: Start the 3 services and run inbound_receiving.feature
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+
+          wait_http() {
+            local url="$1" deadline=$((SECONDS + 60))
+            while true; do
+              curl -sf "${url}" >/dev/null 2>&1 && return 0
+              if (( SECONDS > deadline )); then
+                echo "::error::${url} never became healthy"
+                return 1
+              fi
+              sleep 1
+            done
+          }
+
+          # Same env as scripts/03-up-services.sh (the single source of truth
+          # for what each service needs); per-service consumer groups come from
+          # env.sh's run-scoped suffix.
+          env HTTP_ADDR=":${PRODUCT_MASTER_HTTP_PORT}" DATABASE_URL="${PRODUCT_MASTER_DB_URL}" PGPASSWORD="product_master" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/product-master" > /tmp/product-master.log 2>&1 &
+          wait_http "${PRODUCT_MASTER_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${INBOUND_HTTP_PORT}" DATABASE_URL="${INBOUND_DB_URL}" PGPASSWORD="inbound_receiving" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" PRODUCT_MODE=kafka PRODUCT_CONSUMER_GROUP="${INBOUND_PRODUCT_CONSUMER_GROUP}" OUTBOX_RELAY_INTERVAL=500ms SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
+            "${BIN_DIR}/inbound-receiving" > /tmp/inbound-receiving.log 2>&1 &
+          wait_http "${INBOUND_BASE_URL}/healthz"
+
+          env HTTP_ADDR=":${INVENTORY_HTTP_PORT}" DATABASE_URL="${INVENTORY_DB_URL}" PGPASSWORD="inventory" MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" INBOUND_RECEIPT_CONSUMER_GROUP="${INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP}" LOG_LEVEL=info \
+            "${BIN_DIR}/inventory" > /tmp/inventory.log 2>&1 &
+          wait_http "${INVENTORY_BASE_URL}/healthz"
+
+          echo "all 3 services healthy"
+
+          export INBOUND_BASE_URL PRODUCT_MASTER_BASE_URL INVENTORY_BASE_URL INVENTORY_DB_URL KAFKA_BROKERS
+          export GODOG_TAGS="@inbound-receiving"
+          go test -v -run TestMain -timeout 5m .
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: tail -n +1 /tmp/product-master.log /tmp/inbound-receiving.log /tmp/inventory.log 2>&1 || true
