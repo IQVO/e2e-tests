@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib.sh"
 
-log "building 12 service binaries into ${BIN_DIR}"
+log "building 13 service binaries into ${BIN_DIR}"
 
 build_one() {
   local name="$1" repo="$2" cmd_pkg="$3"
@@ -46,6 +46,10 @@ build_one network       "${NETWORK_REPO}"       netfulfil
 # API + outbox relay + the optional legacy importer, its ADR 0003). No
 # cmd/mcp, so no *-mcp binary below.
 build_one product-master "${PRODUCT_MASTER_REPO}" api
+# inbound-receiving: cmd/api is its only binary today (HTTP API, the two
+# local-copy consumers and the outbox relay; migrations embedded). It has no
+# cmd/mcp yet, so no *-mcp binary below.
+build_one inbound-receiving "${INBOUND_REPO}" api
 # network-inventory-planning: cmd/network-inventory-planning is its only
 # binary (HTTP :8080 + five Kafka consumers + the outbox relay, all in one
 # process, env-gated).
@@ -67,5 +71,5 @@ build_one order-mcp        "${ORDER_REPO}"        mcp
 log "building warehouse-ops-agent (cmd/agent — the agentic analyze/act layer, T5)"
 build_one ops-agent "${OPS_AGENT_REPO}" agent
 
-log "all 20 binaries built"
+log "all 21 binaries built"
 ls -la "${BIN_DIR}"

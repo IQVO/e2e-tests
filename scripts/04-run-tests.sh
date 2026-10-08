@@ -11,6 +11,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WORKFORCE_BASE_URL OPS_AGENT_BASE_URL ORDER_BASE_URL PRODUCT_MASTER_BASE_URL INVENTORY_DB_URL WES_DB_URL FULFILLMENT_DB_URL ORDER_DB_URL
+# inbound_receiving.feature: inbound-receiving's URL, and the broker it scans
+# for ReceiptClosed / DockAppointmentCompleted / inventory-storage's
+# StockReceived (KAFKA_BROKERS is exported below with the transfer vars).
+export INBOUND_BASE_URL
 # inter_warehouse_transfer.feature: the two services it adds, NIP's own
 # Postgres (read as a fallback until NIP ships GET /v1/transfers/{id}), the
 # broker it publishes injected facts to and reads published facts from, and

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 12 bounded-context HTTP services as background processes
+# Starts all 13 bounded-context HTTP services as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -28,6 +28,18 @@
 #                           it is a one-off migration aid, and on the shared
 #                           broker it would replay the cluster's whole
 #                           inventory history into this local database.
+#   3b. inbound-receiving — the WMS-tier inbound dock workflow (ASN, dock
+#                           appointment, receipt; its ADR 0001/0002).
+#                           EVENT_PUBLISHER=kafka so ReceiptLineReceived
+#                           reaches warehouse.inbound-receiving.events, the
+#                           ONLY way inventory-storage (below, its ADR 0037)
+#                           learns of a received Good line. It keeps a local
+#                           copy of product-master's ProductRegistered
+#                           (PRODUCT_MODE=kafka + a per-run
+#                           PRODUCT_CONSUMER_GROUP), so it is started right
+#                           after product-master. Its dock-door copy stays
+#                           permissive (DOCK_DOOR_MODE unset): no scenario
+#                           here needs a facility-layout dock slot.
 #   4. inventory-storage — maintains a LOCAL CACHE of facility-layout's
 #                           location classifications, fed by that topic
 #                           (LOCATION_LOOKUP_MODE=kafka, inventory-storage
@@ -38,7 +50,10 @@
 #                           by changing one word. Its product classifications
 #                           are a local copy of product-master's events
 #                           (PRODUCT_MASTER_CONSUMER_GROUP, ADR 0034); its
-#                           own classification PUT answers 410.
+#                           own classification PUT answers 410. It also
+#                           consumes inbound-receiving's ReceiptLineReceived
+#                           (INBOUND_RECEIPT_CONSUMER_GROUP, ADR 0037): Good
+#                           lines become staged stock, Damaged ones do not.
 #   5. wes-work-planning — reads a local copy of product-master's
 #                           classifications (PRODUCT_CLASSIFICATION_MODE=kafka
 #                           + PRODUCT_CLASSIFICATION_CONSUMER_GROUP; "http"
@@ -144,6 +159,25 @@ start_service product-master "${BIN_DIR}/product-master" \
   LOG_LEVEL=info
 wait_for_http "${PRODUCT_MASTER_BASE_URL}/healthz"
 
+log "starting inbound-receiving on ${INBOUND_BASE_URL}"
+# inbound-receiving: cmd/api, migrations embedded (no MIGRATIONS_PATH).
+# PRODUCT_MODE=kafka makes it refuse an ASN line whose SKU product-master has
+# not announced yet (422 unknown-sku), fed by a per-run consumer group.
+# OUTBOX_RELAY_INTERVAL keeps the handover fast. SHUTDOWN_DRAIN_DELAY=0 for the
+# same reason as product-master above.
+start_service inbound-receiving "${BIN_DIR}/inbound-receiving" \
+  HTTP_ADDR=":${INBOUND_HTTP_PORT}" \
+  DATABASE_URL="${INBOUND_DB_URL}" \
+  PGPASSWORD="inbound_receiving" \
+  EVENT_PUBLISHER=kafka \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  PRODUCT_MODE=kafka \
+  PRODUCT_CONSUMER_GROUP="${INBOUND_PRODUCT_CONSUMER_GROUP}" \
+  OUTBOX_RELAY_INTERVAL="500ms" \
+  SHUTDOWN_DRAIN_DELAY=0 \
+  LOG_LEVEL=info
+wait_for_http "${INBOUND_BASE_URL}/healthz"
+
 log "starting inventory-storage on ${INVENTORY_BASE_URL}"
 start_service inventory "${BIN_DIR}/inventory" \
   HTTP_ADDR=":${INVENTORY_HTTP_PORT}" \
@@ -155,6 +189,7 @@ start_service inventory "${BIN_DIR}/inventory" \
   LOCATION_LOOKUP_MODE=kafka \
   FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" \
   PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" \
+  INBOUND_RECEIPT_CONSUMER_GROUP="${INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP}" \
   TRANSFER_ALLOCATION_CONSUMER_MODE=kafka \
   TRANSFER_ALLOCATION_CONSUMER_GROUP="${INVENTORY_TRANSFER_CONSUMER_GROUP}" \
   LOG_LEVEL=info
@@ -325,10 +360,11 @@ start_service nip "${BIN_DIR}/nip" \
   LOG_LEVEL=info
 wait_for_http "${NIP_BASE_URL}/healthz"
 
-log "all 12 services up and healthy"
+log "all 13 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
+printf '  %-24s %s\n' inbound-receiving      "${INBOUND_BASE_URL}"
 printf '  %-24s %s\n' inventory-storage      "${INVENTORY_BASE_URL}"
 printf '  %-24s %s\n' wes-work-planning      "${WES_BASE_URL}"
 printf '  %-24s %s\n' fulfillment-execution  "${FULFILLMENT_BASE_URL}"
