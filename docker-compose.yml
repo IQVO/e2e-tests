@@ -260,6 +260,27 @@ services:
       timeout: 3s
       retries: 20
 
+  # inbound-receiving (ASN / dock appointment / receipt, its ADR 0001). Own
+  # user/db name "inbound_receiving" on host port 5453 (it ships no compose
+  # file). Migrations are embedded in its binary.
+  postgres-inbound-receiving:
+    image: postgres:16
+    container_name: e2e-postgres-inbound-receiving
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: inbound_receiving
+      POSTGRES_PASSWORD: inbound_receiving
+      POSTGRES_DB: inbound_receiving
+    ports:
+      - "5453:5432"
+    volumes:
+      - e2e_inbound_receiving_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inbound_receiving -d inbound_receiving"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -273,3 +294,4 @@ volumes:
   e2e_product_master_pg_data:
   e2e_nip_pg_data:
   e2e_planning_pg_data:
+  e2e_inbound_receiving_pg_data:

@@ -34,6 +34,10 @@ var topics = []string{
 	"warehouse.facility.events",
 	"warehouse.facility.analytics",
 	"warehouse.product-master.events",
+	// inbound-receiving's integration topic: inventory-storage consumes
+	// ReceiptLineReceived from it (a group on a topic that does not exist yet
+	// is never assigned a partition), and inbound_receiving.feature scans it.
+	"warehouse.inbound-receiving.events",
 	"warehouse.inventory.events",
 	"warehouse.inventory.analytics",
 	"warehouse.work-planning.events",

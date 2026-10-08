@@ -66,6 +66,14 @@ NETWORK_REPO="${REPOS_ROOT}/network-fulfillment"
 # facility-layout and BEFORE inventory-storage, so its topic exists by the
 # time the consumers subscribe.
 PRODUCT_MASTER_REPO="${REPOS_ROOT}/product-master"
+# inbound-receiving (WMS-tier inbound dock workflow: ASN, dock appointment,
+# receipt -- its ADR 0001/0002). Its Good receipt lines are handed to
+# inventory-storage as ReceiptLineReceived events (inbound-receiving ADR 0003,
+# inventory-storage ADR 0037); it keeps local copies of product-master's
+# ProductRegistered (known SKUs) and facility-layout's dock doors. Started
+# after product-master and BEFORE inventory-storage, so
+# warehouse.inbound-receiving.events exists when inventory-storage subscribes.
+INBOUND_REPO="${REPOS_ROOT}/inbound-receiving"
 # network-inventory-planning (NIP): plans and drives the inter-warehouse
 # transfer saga (approve -> allocate at origin -> pick -> dispatch ->
 # destination receipt). Started AFTER every service it exchanges events
@@ -111,6 +119,9 @@ PRODUCT_MASTER_HTTP_PORT=8090
 # 8101-8107 analytics reports range below.
 NIP_HTTP_PORT=8099
 WAREHOUSE_PLANNING_HTTP_PORT=8100
+# inbound-receiving -- 8108 is the next free slot after the 8101-8107
+# analytics *-reports range below (8091-8100 are taken above).
+INBOUND_HTTP_PORT=8108
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -124,6 +135,7 @@ NETWORK_BASE_URL="http://localhost:${NETWORK_HTTP_PORT}"
 PRODUCT_MASTER_BASE_URL="http://localhost:${PRODUCT_MASTER_HTTP_PORT}"
 NIP_BASE_URL="http://localhost:${NIP_HTTP_PORT}"
 WAREHOUSE_PLANNING_BASE_URL="http://localhost:${WAREHOUSE_PLANNING_HTTP_PORT}"
+INBOUND_BASE_URL="http://localhost:${INBOUND_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -252,6 +264,10 @@ PRODUCT_MASTER_DB_URL="postgres://product_master@localhost:5450/product_master?s
 NIP_DB_URL="postgres://nip@localhost:5451/nip?sslmode=disable"
 # warehouse-planning -- next free slot after NIP's :5451.
 WAREHOUSE_PLANNING_DB_URL="postgres://planning@localhost:5452/planning?sslmode=disable"
+# inbound-receiving -- next free slot after warehouse-planning's :5452. It
+# ships no docker-compose of its own; user/db "inbound_receiving" follows the
+# fleet's <context> naming (like product_master). Migrations are embedded.
+INBOUND_DB_URL="postgres://inbound_receiving@localhost:5453/inbound_receiving?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
@@ -302,6 +318,16 @@ INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP="inventory-storage-product-master-${E2E_
 WES_CLASSIFICATION_CONSUMER_GROUP="wes-work-planning-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
 FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP="fulfillment-execution-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
 ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# inbound-receiving <-> inventory-storage handover. inbound-receiving keeps a
+# local copy of product-master's ProductRegistered (PRODUCT_MODE=kafka +
+# PRODUCT_CONSUMER_GROUP; its dock-door copy stays PERMISSIVE here, so no
+# DOCK_DOOR_CONSUMER_GROUP). inventory-storage's consumer of
+# ReceiptLineReceived (its ADR 0037) does not exist unless
+# INBOUND_RECEIPT_CONSUMER_GROUP is set. Both are per-run groups, never the
+# live cluster's: a first start under a new group reads from the first offset.
+INBOUND_PRODUCT_CONSUMER_GROUP="inbound-receiving-product-${E2E_CONSUMER_GROUP_SUFFIX}"
+INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP="inventory-storage-inbound-receipt-${E2E_CONSUMER_GROUP_SUFFIX}"
 
 # inventory-storage's transfer allocation command consumer (ADR-0030; dark
 # unless TRANSFER_ALLOCATION_CONSUMER_MODE=kafka, set in 03-up-services.sh)
