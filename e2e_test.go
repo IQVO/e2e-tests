@@ -137,6 +137,10 @@ type world struct {
 	// inb is the inbound-receiving correlation (receipt and appointment ids
 	// by run-scoped ASN number). See inbound_test.go.
 	inb *inboundState
+
+	// slot is the slotting-optimization correlation (plans, injected demand
+	// and placement guards by run-scoped site). See slotting_test.go.
+	slot *slottingState
 }
 
 func newWorld() *world {
@@ -1660,10 +1664,17 @@ func (w *world) resolvePathID(pathID string) string {
 	return w.rs("E2E-PROCESS-PATH-<run>")
 }
 
+// processPathCycleTimeP95 is the operator-declared p95 cycle time the scenarios
+// give every path they define or revise. process-path-management requires it
+// (positive Go duration, its ADR 0010; POST and PUT answer 422
+// invalid-cycle-time-p95 without it), so the steps below must always send one.
+const processPathCycleTimeP95 = "2h"
+
 func (w *world) definePath(pathID, matchPrefix, capabilities string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPost, processPathBaseURL+"/process-paths", map[string]any{
 		"pathId": pathID, "matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"cycleTimeP95": processPathCycleTimeP95,
 	}))
 }
 
@@ -1699,6 +1710,7 @@ func (w *world) revisePath(pathID, matchPrefix, capabilities string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/process-paths/%s", processPathBaseURL, pathID), map[string]any{
 		"matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"cycleTimeP95": processPathCycleTimeP95,
 	}))
 }
 
@@ -1824,6 +1836,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
+	registerSlottingSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
 		return ctx, nil

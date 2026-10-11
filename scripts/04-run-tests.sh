@@ -15,6 +15,9 @@ export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WO
 # for ReceiptClosed / DockAppointmentCompleted / inventory-storage's
 # StockReceived (KAFKA_BROKERS is exported below with the transfer vars).
 export INBOUND_BASE_URL
+# slotting_optimization.feature: slotting-optimization's URL, and the broker it
+# scans for SlotPlanApproved and publishes the SiteSkuDemandChanged facts to.
+export SLOTTING_BASE_URL
 # inter_warehouse_transfer.feature: the two services it adds, NIP's own
 # Postgres (read as a fallback until NIP ships GET /v1/transfers/{id}), the
 # broker it publishes injected facts to and reads published facts from, and

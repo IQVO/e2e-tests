@@ -281,6 +281,27 @@ services:
       timeout: 3s
       retries: 20
 
+  # slotting-optimization (SlotPlan, its ADR 0001/0002). Own user/db name
+  # "slotting" on host port 5454 (it ships no compose file). Migrations are
+  # embedded in its binary.
+  postgres-slotting:
+    image: postgres:16
+    container_name: e2e-postgres-slotting
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slotting
+      POSTGRES_PASSWORD: slotting
+      POSTGRES_DB: slotting
+    ports:
+      - "5454:5432"
+    volumes:
+      - e2e_slotting_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slotting -d slotting"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -295,3 +316,4 @@ volumes:
   e2e_nip_pg_data:
   e2e_planning_pg_data:
   e2e_inbound_receiving_pg_data:
+  e2e_slotting_pg_data:

@@ -74,6 +74,14 @@ PRODUCT_MASTER_REPO="${REPOS_ROOT}/product-master"
 # after product-master and BEFORE inventory-storage, so
 # warehouse.inbound-receiving.events exists when inventory-storage subscribes.
 INBOUND_REPO="${REPOS_ROOT}/inbound-receiving"
+# slotting-optimization (WMS-tier planner of forward pick slots, its ADR
+# 0001/0002): a SlotPlan is computed from event-fed local copies of
+# order-management's SiteSkuDemandChanged, product-master's classification and
+# physical profile, and facility-layout's zones and slots (its ADR 0003). It
+# is started after product-master and facility-layout, whose events feed its
+# product and layout copies. Its demand copy is fed by SiteSkuDemandChanged
+# facts the scenarios publish themselves (see features/slotting_optimization.feature).
+SLOTTING_REPO="${REPOS_ROOT}/slotting-optimization"
 # network-inventory-planning (NIP): plans and drives the inter-warehouse
 # transfer saga (approve -> allocate at origin -> pick -> dispatch ->
 # destination receipt). Started AFTER every service it exchanges events
@@ -122,6 +130,8 @@ WAREHOUSE_PLANNING_HTTP_PORT=8100
 # inbound-receiving -- 8108 is the next free slot after the 8101-8107
 # analytics *-reports range below (8091-8100 are taken above).
 INBOUND_HTTP_PORT=8108
+# slotting-optimization -- the next free slot after inbound-receiving's :8108.
+SLOTTING_HTTP_PORT=8109
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -136,6 +146,7 @@ PRODUCT_MASTER_BASE_URL="http://localhost:${PRODUCT_MASTER_HTTP_PORT}"
 NIP_BASE_URL="http://localhost:${NIP_HTTP_PORT}"
 WAREHOUSE_PLANNING_BASE_URL="http://localhost:${WAREHOUSE_PLANNING_HTTP_PORT}"
 INBOUND_BASE_URL="http://localhost:${INBOUND_HTTP_PORT}"
+SLOTTING_BASE_URL="http://localhost:${SLOTTING_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -268,6 +279,10 @@ WAREHOUSE_PLANNING_DB_URL="postgres://planning@localhost:5452/planning?sslmode=d
 # ships no docker-compose of its own; user/db "inbound_receiving" follows the
 # fleet's <context> naming (like product_master). Migrations are embedded.
 INBOUND_DB_URL="postgres://inbound_receiving@localhost:5453/inbound_receiving?sslmode=disable"
+# slotting-optimization -- next free slot after :5453.
+# It ships no docker-compose of its own; user/db "slotting" follow the
+# fleet's <context> naming. Migrations are embedded.
+SLOTTING_DB_URL="postgres://slotting@localhost:5454/slotting?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
@@ -328,6 +343,13 @@ ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E
 # live cluster's: a first start under a new group reads from the first offset.
 INBOUND_PRODUCT_CONSUMER_GROUP="inbound-receiving-product-${E2E_CONSUMER_GROUP_SUFFIX}"
 INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP="inventory-storage-inbound-receipt-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# slotting-optimization's three local-copy consumers (DEMAND_MODE,
+# PRODUCT_MODE, LAYOUT_MODE=kafka; each needs its group and has no default),
+# all per-run groups so a harness process never joins the live cluster's.
+SLOTTING_DEMAND_CONSUMER_GROUP="slotting-optimization-demand-${E2E_CONSUMER_GROUP_SUFFIX}"
+SLOTTING_PRODUCT_CONSUMER_GROUP="slotting-optimization-product-${E2E_CONSUMER_GROUP_SUFFIX}"
+SLOTTING_LAYOUT_CONSUMER_GROUP="slotting-optimization-layout-${E2E_CONSUMER_GROUP_SUFFIX}"
 
 # inventory-storage's transfer allocation command consumer (ADR-0030; dark
 # unless TRANSFER_ALLOCATION_CONSUMER_MODE=kafka, set in 03-up-services.sh)

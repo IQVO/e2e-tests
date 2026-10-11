@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 13 bounded-context HTTP services as background processes
+# Starts all 14 bounded-context HTTP services as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -40,6 +40,20 @@
 #                           after product-master. Its dock-door copy stays
 #                           permissive (DOCK_DOOR_MODE unset): no scenario
 #                           here needs a facility-layout dock slot.
+#   3c. slotting-optimization — the WMS-tier planner of forward pick slots
+#                           (SlotPlan, its ADR 0001/0002). Three event-fed
+#                           local copies (ADR 0003), each a kafka-mode
+#                           consumer with its own per-run group:
+#                           LAYOUT_MODE (facility-layout zones and slots),
+#                           PRODUCT_MODE (product-master classification and
+#                           physical profile) and DEMAND_MODE
+#                           (order-management's SiteSkuDemandChanged -- the
+#                           scenarios publish those facts themselves, see
+#                           slotting_optimization.feature). No DEMAND_SITE_ID:
+#                           it would drop demand of any other site, and every
+#                           scenario plans its own run-scoped site. Started
+#                           after facility-layout and product-master so the
+#                           topics it reads exist.
 #   4. inventory-storage — maintains a LOCAL CACHE of facility-layout's
 #                           location classifications, fed by that topic
 #                           (LOCATION_LOOKUP_MODE=kafka, inventory-storage
@@ -177,6 +191,27 @@ start_service inbound-receiving "${BIN_DIR}/inbound-receiving" \
   SHUTDOWN_DRAIN_DELAY=0 \
   LOG_LEVEL=info
 wait_for_http "${INBOUND_BASE_URL}/healthz"
+
+log "starting slotting-optimization on ${SLOTTING_BASE_URL}"
+# slotting-optimization: cmd/api, migrations embedded (no MIGRATIONS_PATH).
+# FORWARD_ZONE_CODES is left at its default (FWD). OUTBOX_RELAY_INTERVAL keeps
+# SlotPlanApproved prompt; SHUTDOWN_DRAIN_DELAY=0 as for product-master above.
+start_service slotting-optimization "${BIN_DIR}/slotting-optimization" \
+  HTTP_ADDR=":${SLOTTING_HTTP_PORT}" \
+  DATABASE_URL="${SLOTTING_DB_URL}" \
+  PGPASSWORD="slotting" \
+  EVENT_PUBLISHER=kafka \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  DEMAND_MODE=kafka \
+  DEMAND_CONSUMER_GROUP="${SLOTTING_DEMAND_CONSUMER_GROUP}" \
+  PRODUCT_MODE=kafka \
+  PRODUCT_CONSUMER_GROUP="${SLOTTING_PRODUCT_CONSUMER_GROUP}" \
+  LAYOUT_MODE=kafka \
+  LAYOUT_CONSUMER_GROUP="${SLOTTING_LAYOUT_CONSUMER_GROUP}" \
+  OUTBOX_RELAY_INTERVAL="500ms" \
+  SHUTDOWN_DRAIN_DELAY=0 \
+  LOG_LEVEL=info
+wait_for_http "${SLOTTING_BASE_URL}/healthz"
 
 log "starting inventory-storage on ${INVENTORY_BASE_URL}"
 start_service inventory "${BIN_DIR}/inventory" \
@@ -360,11 +395,12 @@ start_service nip "${BIN_DIR}/nip" \
   LOG_LEVEL=info
 wait_for_http "${NIP_BASE_URL}/healthz"
 
-log "all 13 services up and healthy"
+log "all 14 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
 printf '  %-24s %s\n' inbound-receiving      "${INBOUND_BASE_URL}"
+printf '  %-24s %s\n' slotting-optimization   "${SLOTTING_BASE_URL}"
 printf '  %-24s %s\n' inventory-storage      "${INVENTORY_BASE_URL}"
 printf '  %-24s %s\n' wes-work-planning      "${WES_BASE_URL}"
 printf '  %-24s %s\n' fulfillment-execution  "${FULFILLMENT_BASE_URL}"

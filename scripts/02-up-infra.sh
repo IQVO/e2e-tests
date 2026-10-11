@@ -2,7 +2,7 @@
 # e2e-tests/scripts/02-up-infra.sh
 #
 # Verifies the shared Kafka broker is reachable and brings up this
-# harness's thirteen dedicated Postgres instances (docker-compose.yml in this
+# harness's fourteen dedicated Postgres instances (docker-compose.yml in this
 # directory), then waits for all of them to report healthy.
 #
 # Kafka itself is NOT started by this script (see below) -- it is owned by
@@ -41,9 +41,9 @@ log "ensuring every harness topic exists with a leader"
 log "starting per-service Postgres instances (docker compose, project warehouse-e2e)"
 docker compose -f "${WORKSPACE_ROOT}/docker-compose.yml" up -d
 
-log "waiting for all 13 Postgres instances to report healthy"
+log "waiting for all 14 Postgres instances to report healthy"
 deadline=$((SECONDS + 60))
-for svc in postgres-facility postgres-inventory postgres-wes postgres-fulfillment postgres-workforce postgres-order postgres-process-path postgres-labor postgres-network postgres-product-master postgres-nip postgres-planning postgres-inbound-receiving; do
+for svc in postgres-facility postgres-inventory postgres-wes postgres-fulfillment postgres-workforce postgres-order postgres-process-path postgres-labor postgres-network postgres-product-master postgres-nip postgres-planning postgres-inbound-receiving postgres-slotting; do
   while true; do
     status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
     if [[ "${status}" == "healthy" ]]; then
@@ -57,4 +57,4 @@ for svc in postgres-facility postgres-inventory postgres-wes postgres-fulfillmen
   done
 done
 
-log "infra up: Kafka on ${KAFKA_BROKERS}, Postgres on :5441-:5453"
+log "infra up: Kafka on ${KAFKA_BROKERS}, Postgres on :5441-:5454"
