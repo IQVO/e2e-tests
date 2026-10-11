@@ -276,6 +276,38 @@ Pin `E2E_CONSUMER_GROUP_SUFFIX` (e.g. `warehouse-day`) before `make up` when
 running against a long-lived shared broker, so services resume their
 committed offsets across restarts instead of replaying the topic history.
 
+## Real product catalogue (`cmd/seed-products`)
+
+Registers **at least 2,000 real retail products** in product-master through
+its published REST contract, then reads the whole catalogue back with
+`GET /products` and fails on any missing or different product.
+
+```sh
+make seed-products                                                    # local harness (:8090)
+PRODUCT_MASTER_BASE_URL=http://localhost:8000/api/product-master \
+  bash scripts/08-seed-products.sh                                    # kind cluster via Kong
+SEED_LIMIT=2000 SEED_WORKERS=16 make seed-products                    # tunables
+```
+
+- **Data:** `fixtures/products/openfoodfacts-products.json`, harvested from
+  [Open Food Facts](https://world.openfoodfacts.org) (ODbL 1.0, see
+  `fixtures/products/README.md`). Every SKU is the product's GS1 GTIN with a
+  verified check digit; every description is its real brand, name and net
+  quantity (≤ 200 runes, product-master's limit).
+- **API calls:** `PUT /products/{sku}` for every product, and
+  `PUT /products/{sku}/classification` with `TemperatureSensitive` +
+  `Frozen`/`Chilled` only where the product's own category tags say so. No
+  invented Hazmat/Fragile tags and no invented dimensions; the source has
+  neither.
+- **Idempotent:** every write is an idempotent PUT, so a re-run against a dirty
+  database reports the products as already present and changes nothing (no
+  version bump, no event). The GTINs are shared reference data and are not
+  run-scoped.
+- **Offline:** the run never touches the internet. Refresh the fixture with
+  `go run ./cmd/seed-products -fetch` (slow on purpose: Open Food Facts allows
+  about 10 searches a minute and answers 503 when busy; the fetch is paced and
+  retried).
+
 ## Service lifecycle notes
 
 - `scripts/lib.sh`'s `start_service_in`/`start_service` launch each binary
