@@ -327,7 +327,10 @@ func (w *world) ensureAisle(aisleCode, zoneID string, sequenceHint int, directio
 // final decommission step would otherwise poison every later run.
 func (w *world) ensureLocationSlot(locationCode, locationType string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost, facilityBaseURL+"/locations", map[string]any{
-		"locationCode": w.resolveSlot(locationCode), "locationType": locationType,
+		// w.rs FIRST (the <run> token can wrap the whole code, e.g.
+		// "WH2<run>-STOR-HAZ-A01-01-01-A"), then the <disposable>
+		// resolution for the scenario's throwaway ambient slot.
+		"locationCode": w.resolveSlot(w.rs(locationCode)), "locationType": locationType,
 	}))
 }
 
@@ -592,7 +595,7 @@ func (w *world) stowIsRejected(qty int, sku, binID string) error {
 // stowable only once that event has been consumed. An immediate one-shot
 // assertion would be testing the propagation delay, not the behaviour.
 func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
-	binID = w.resolveSlot(binID)
+	binID = w.resolveSlot(w.rs(binID))
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -611,7 +614,7 @@ func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
 // the placement rule, used after registering a hazmat zone (the cache must
 // LEARN the zone's attributes) or after a decommission.
 func (w *world) stowEventuallyRejected(qty int, sku, binID string) error {
-	binID = w.resolveSlot(binID)
+	binID = w.resolveSlot(w.rs(binID))
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
