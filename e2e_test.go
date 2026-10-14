@@ -276,9 +276,16 @@ func (w *world) expectOKOr409(err error) error {
 	return nil
 }
 
+// ensureSite/ensureZone/ensureAisle expand w.rs() on their id args: the
+// propagation scenario's site/zones/aisles are RUN-SCOPED (its inventory-
+// storage consumer is event-sourced and must see fresh ZoneRegistered
+// events every run — see facility_layout_propagation.feature), and w.rs
+// lazily mints the suffix, so calls for the fleet's shared reference data
+// (no <run> token) cost nothing.
+
 func (w *world) ensureSite(code, name string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost, facilityBaseURL+"/sites", map[string]any{
-		"siteCode": code, "name": name,
+		"siteCode": w.rs(code), "name": name,
 	}))
 }
 
@@ -293,7 +300,7 @@ func (w *world) ensureLocationType(name string, weightKg, volumeM3 float64) erro
 
 func (w *world) ensureZone(areaCode, zoneCode, siteCode, temperatureClass string, hazmat bool) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/sites/%s/zones", facilityBaseURL, siteCode), map[string]any{
+		fmt.Sprintf("%s/sites/%s/zones", facilityBaseURL, w.rs(siteCode)), map[string]any{
 			"areaCode": areaCode, "zoneCode": zoneCode,
 			"temperatureClass": temperatureClass, "hazmat": hazmat,
 		}))
@@ -309,7 +316,7 @@ func (w *world) ensureHazmatZone(areaCode, zoneCode, siteCode, temperatureClass 
 
 func (w *world) ensureAisle(aisleCode, zoneID string, sequenceHint int, direction string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/zones/%s/aisles", facilityBaseURL, zoneID), map[string]any{
+		fmt.Sprintf("%s/zones/%s/aisles", facilityBaseURL, w.rs(zoneID)), map[string]any{
 			"aisleCode": aisleCode, "sequenceHint": sequenceHint, "direction": direction,
 		}))
 }
@@ -333,7 +340,9 @@ func (w *world) resolveSlot(code string) string {
 		return code
 	}
 	if w.disposableSlot == "" {
-		w.disposableSlot = runScopedSlot("WH2-STOR-AMB", "A01")
+		// Run-scoped ambient zone id, matching the site/zones this scenario
+		// registers via "WH2<run>" (see facility_layout_propagation.feature).
+		w.disposableSlot = runScopedSlot(w.rs("WH2<run>-STOR-AMB"), "A01")
 	}
 	return w.disposableSlot
 }
