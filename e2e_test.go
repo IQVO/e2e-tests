@@ -276,9 +276,16 @@ func (w *world) expectOKOr409(err error) error {
 	return nil
 }
 
+// ensureSite/ensureZone/ensureAisle expand w.rs() on their id args: the
+// propagation scenario's site/zones/aisles are RUN-SCOPED (its inventory-
+// storage consumer is event-sourced and must see fresh ZoneRegistered
+// events every run — see facility_layout_propagation.feature), and w.rs
+// lazily mints the suffix, so calls for the fleet's shared reference data
+// (no <run> token) cost nothing.
+
 func (w *world) ensureSite(code, name string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost, facilityBaseURL+"/sites", map[string]any{
-		"siteCode": code, "name": name,
+		"siteCode": w.rs(code), "name": name,
 	}))
 }
 
@@ -293,7 +300,7 @@ func (w *world) ensureLocationType(name string, weightKg, volumeM3 float64) erro
 
 func (w *world) ensureZone(areaCode, zoneCode, siteCode, temperatureClass string, hazmat bool) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/sites/%s/zones", facilityBaseURL, siteCode), map[string]any{
+		fmt.Sprintf("%s/sites/%s/zones", facilityBaseURL, w.rs(siteCode)), map[string]any{
 			"areaCode": areaCode, "zoneCode": zoneCode,
 			"temperatureClass": temperatureClass, "hazmat": hazmat,
 		}))
@@ -309,7 +316,7 @@ func (w *world) ensureHazmatZone(areaCode, zoneCode, siteCode, temperatureClass 
 
 func (w *world) ensureAisle(aisleCode, zoneID string, sequenceHint int, direction string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/zones/%s/aisles", facilityBaseURL, zoneID), map[string]any{
+		fmt.Sprintf("%s/zones/%s/aisles", facilityBaseURL, w.rs(zoneID)), map[string]any{
 			"aisleCode": aisleCode, "sequenceHint": sequenceHint, "direction": direction,
 		}))
 }
@@ -320,7 +327,10 @@ func (w *world) ensureAisle(aisleCode, zoneID string, sequenceHint int, directio
 // final decommission step would otherwise poison every later run.
 func (w *world) ensureLocationSlot(locationCode, locationType string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost, facilityBaseURL+"/locations", map[string]any{
-		"locationCode": w.resolveSlot(locationCode), "locationType": locationType,
+		// w.rs FIRST (the <run> token can wrap the whole code, e.g.
+		// "WH2<run>-STOR-HAZ-A01-01-01-A"), then the <disposable>
+		// resolution for the scenario's throwaway ambient slot.
+		"locationCode": w.resolveSlot(w.rs(locationCode)), "locationType": locationType,
 	}))
 }
 
@@ -333,7 +343,9 @@ func (w *world) resolveSlot(code string) string {
 		return code
 	}
 	if w.disposableSlot == "" {
-		w.disposableSlot = runScopedSlot("WH2-STOR-AMB", "A01")
+		// Run-scoped ambient zone id, matching the site/zones this scenario
+		// registers via "WH2<run>" (see facility_layout_propagation.feature).
+		w.disposableSlot = runScopedSlot(w.rs("WH2<run>-STOR-AMB"), "A01")
 	}
 	return w.disposableSlot
 }
@@ -583,7 +595,7 @@ func (w *world) stowIsRejected(qty int, sku, binID string) error {
 // stowable only once that event has been consumed. An immediate one-shot
 // assertion would be testing the propagation delay, not the behaviour.
 func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
-	binID = w.resolveSlot(binID)
+	binID = w.resolveSlot(w.rs(binID))
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -602,7 +614,7 @@ func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
 // the placement rule, used after registering a hazmat zone (the cache must
 // LEARN the zone's attributes) or after a decommission.
 func (w *world) stowEventuallyRejected(qty int, sku, binID string) error {
-	binID = w.resolveSlot(binID)
+	binID = w.resolveSlot(w.rs(binID))
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
