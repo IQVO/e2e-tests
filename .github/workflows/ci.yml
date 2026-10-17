@@ -63,6 +63,20 @@ jobs:
           go vet ./...
           go test -c -o /dev/null ./...
 
+  # The product seeder is a real binary with its own tests: fixture validation, the whole
+  # committed catalogue through the client against a contract fake of product-master, and the
+  # derivation rules of the fulfilment harvester. All offline.
+  seed-products-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test ./cmd/seed-products/...
+      - run: python3 scripts/test_harvest_fulfilment_products.py
+
   scripts-sanity:
     runs-on: ubuntu-latest
     timeout-minutes: 10

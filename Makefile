@@ -37,7 +37,7 @@ help:
 	@echo "  run             scripts/04-run-tests.sh — the default godog suite (excludes @soak)"
 	@echo "  soak            scripts/06-run-soak.sh — the long-running @soak backlog-ramp scenario"
 	@echo "  warehouse-day   scripts/07-run-warehouse-day.sh — simulate a full operating day, KPI + cross-context audit"
-	@echo "  seed-products   scripts/08-seed-products.sh — register >= 2,000 real products (Open Food Facts GTINs) in product-master, verified"
+	@echo "  seed-products   scripts/08-seed-products.sh — register >= 10,000 real products (real dimensions, weight, handling classes) in product-master, verified"
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:
