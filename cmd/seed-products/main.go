@@ -36,10 +36,11 @@ import (
 func main() {
 	log.SetFlags(0)
 	var (
-		fixture     = flag.String("fixture", "fixtures/products/openfoodfacts-products.json", "fixture file (read in register mode, written by -fetch)")
+		fixture     = flag.String("fixture", "fixtures/products/openfoodfacts-products.json", "Open Food Facts fixture (read in register mode, written by -fetch)")
+		extra       = flag.String("extra-fixture", "fixtures/products/fulfilment-products.json", "comma-separated extra fixtures registered with it (real dimensions + handling classes; \"\" = none)")
 		baseURL     = flag.String("base-url", envOr("PRODUCT_MASTER_BASE_URL", "http://localhost:8090"), "product-master base URL")
 		workers     = flag.Int("workers", 8, "concurrent registration workers")
-		minProducts = flag.Int("min", 2000, "fail unless at least this many products are registered")
+		minProducts = flag.Int("min", 10000, "fail unless at least this many products are registered")
 		limit       = flag.Int("limit", 0, "register only the first N fixture products (0 = all; must still be >= -min)")
 		classify    = flag.Bool("classify", true, "also PUT the temperature classification the fixture derives")
 		doVerify    = flag.Bool("verify", true, "read the catalogue back with GET /products and check every product")
@@ -56,7 +57,13 @@ func main() {
 		runFetch(ctx, *fixture, *minProducts, *fetchPause, *fetchCache)
 		return
 	}
-	runRegister(ctx, *fixture, strings.TrimRight(*baseURL, "/"), *workers, *minProducts, *limit, *classify, *doVerify)
+	paths := []string{*fixture}
+	for _, p := range strings.Split(*extra, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	runRegister(ctx, paths, strings.TrimRight(*baseURL, "/"), *workers, *minProducts, *limit, *classify, *doVerify)
 }
 
 func runFetch(ctx context.Context, path string, minProducts int, pause time.Duration, cacheDir string) {
@@ -78,12 +85,11 @@ func runFetch(ctx context.Context, path string, minProducts int, pause time.Dura
 	log.Printf("wrote %s: %d products (%d frozen, %d chilled, %d unclassified)", path, len(products), frozen, chilled, len(products)-frozen-chilled)
 }
 
-func runRegister(ctx context.Context, path, base string, workers, minProducts, limit int, classify, doVerify bool) {
-	f, err := loadFixture(path)
+func runRegister(ctx context.Context, paths []string, base string, workers, minProducts, limit int, classify, doVerify bool) {
+	products, err := loadFixtures(paths)
 	if err != nil {
 		log.Fatalf("fixture: %v", err)
 	}
-	products := f.Products
 	if limit > 0 && limit < len(products) {
 		products = products[:limit]
 	}
@@ -97,7 +103,9 @@ func runRegister(ctx context.Context, path, base string, workers, minProducts, l
 	}
 
 	frozen, chilled := countTemps(products)
-	log.Printf("registering %d real products in product-master at %s (%d workers; %d frozen, %d chilled to classify)", len(products), base, workers, frozen, chilled)
+	dims, tagged, hazmat := countFulfilment(products)
+	log.Printf("registering %d real products in product-master at %s (%d workers; %d with real dimensions+weight, %d with handling tags, %d hazmat, %d frozen, %d chilled)",
+		len(products), base, workers, dims, tagged, hazmat, frozen, chilled)
 	start := time.Now()
 	step := len(products) / 10
 	rep := c.register(ctx, products, workers, classify, func(done int) {
@@ -109,6 +117,7 @@ func runRegister(ctx context.Context, path, base string, workers, minProducts, l
 
 	log.Printf("registered in %s (%.0f products/s): %d created, %d already present (description now identical)",
 		elapsed.Round(time.Millisecond), float64(len(products))/elapsed.Seconds(), rep.created.Load(), rep.updated.Load())
+	log.Printf("dimensions declared: %d", rep.dimensioned.Load())
 	if classify {
 		log.Printf("classified: %d newly, %d already identical", rep.classified.Load(), rep.classUnchanged.Load())
 	}
@@ -167,6 +176,23 @@ func health(ctx context.Context, c *pmClient) error {
 		}
 	}
 	return nil
+}
+
+// countFulfilment counts products with real declared dimensions, with at
+// least one handling tag (a temperature class counts), and with Hazmat.
+func countFulfilment(ps []FixtureProduct) (dims, tagged, hazmat int) {
+	for _, p := range ps {
+		if p.Dimensions != nil {
+			dims++
+		}
+		if _, _, _, ok := p.classification(); ok {
+			tagged++
+		}
+		if contains(p.HandlingTags, "Hazmat") {
+			hazmat++
+		}
+	}
+	return dims, tagged, hazmat
 }
 
 func countTemps(ps []FixtureProduct) (frozen, chilled int) {

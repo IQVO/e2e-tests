@@ -39,6 +39,63 @@ type FixtureProduct struct {
 	// Categories is the evidence for TemperatureClass: the source category
 	// tags that drove it (empty when unclassified).
 	Categories []string `json:"categories,omitempty"`
+
+	// The fields below carry the fulfilment profile of the fulfilment
+	// fixture (scripts/harvest-fulfilment-products.py). Open Food Facts
+	// products leave them empty.
+
+	// Source names the dataset the product came from ("abo", "wands").
+	// Empty means an Open Food Facts product whose SKU is a GTIN; any other
+	// source uses its own product id as the SKU.
+	Source string `json:"source,omitempty"`
+	// Category is the source's own category path.
+	Category string `json:"category,omitempty"`
+	// Dimensions are the real unit dimensions and weight from the source,
+	// converted to whole millimetres and grams.
+	Dimensions *Dimensions `json:"dimensions,omitempty"`
+	// HandlingTags are product-master's handling tags, derived from the
+	// category and name; Evidence records what triggered each one.
+	HandlingTags []string `json:"handlingTags,omitempty"`
+	// DotHazardClass is the top-level US DOT hazard class (1..9); only with Hazmat.
+	DotHazardClass int      `json:"dotHazardClass,omitempty"`
+	Evidence       []string `json:"evidence,omitempty"`
+}
+
+// Dimensions is one unit's size and weight, in the units product-master stores.
+type Dimensions struct {
+	LengthMm int64 `json:"lengthMm"`
+	WidthMm  int64 `json:"widthMm"`
+	HeightMm int64 `json:"heightMm"`
+	WeightG  int64 `json:"weightG"`
+}
+
+// product-master's published dimension limits (apis/openapi.yaml).
+const (
+	maxDimensionMm = 20000
+	maxWeightG     = 2000000
+)
+
+// handlingTagOrder is the closed HandlingTag enum in product-master's stable order.
+var handlingTagOrder = []string{"Hazmat", "Fragile", "TemperatureSensitive", "Oversized", "HighValue"}
+
+// classification returns the handling classification to PUT: the fixture's
+// handling tags, plus TemperatureSensitive when a temperature class is set
+// (Open Food Facts products carry only the class). ok is false when the
+// product has nothing to classify.
+func (p FixtureProduct) classification() (tags []string, temperatureClass string, dotHazardClass int, ok bool) {
+	have := map[string]bool{}
+	for _, tg := range p.HandlingTags {
+		have[tg] = true
+	}
+	if p.TemperatureClass != "" {
+		have["TemperatureSensitive"] = true
+	}
+	for _, tg := range handlingTagOrder {
+		if have[tg] {
+			tags = append(tags, tg)
+		}
+	}
+	return tags, p.TemperatureClass, p.DotHazardClass, len(tags) > 0
 }
 
 // product-master's limits (apis/openapi.yaml; internal/domain/product/sku.go:
@@ -210,8 +267,12 @@ func intersect(have, want []string) []string {
 func (f Fixture) validate() error {
 	seen := make(map[string]bool, len(f.Products))
 	for i, p := range f.Products {
-		if !validGTIN(p.SKU) || len(p.SKU) > maxSKULength {
-			return fmt.Errorf("product %d: sku %q is not a valid GTIN", i, p.SKU)
+		if p.Source == "" {
+			if !validGTIN(p.SKU) || len(p.SKU) > maxSKULength {
+				return fmt.Errorf("product %d: sku %q is not a valid GTIN", i, p.SKU)
+			}
+		} else if !validSKU(p.SKU) {
+			return fmt.Errorf("product %d: sku %q breaks product-master's SKU rules (1..%d chars, no whitespace, control characters or '/')", i, p.SKU, maxSKULength)
 		}
 		if seen[p.SKU] {
 			return fmt.Errorf("product %d: duplicate sku %q", i, p.SKU)
@@ -228,8 +289,61 @@ func (f Fixture) validate() error {
 		default:
 			return fmt.Errorf("product %d (%s): unknown temperature class %q", i, p.SKU, p.TemperatureClass)
 		}
+		if err := p.validateFulfilment(); err != nil {
+			return fmt.Errorf("product %d (%s): %w", i, p.SKU, err)
+		}
 	}
 	return nil
+}
+
+// validateFulfilment checks the dimensions and handling classification
+// against product-master's rules: each dimension 1..20000 mm, weight
+// 1..2000000 g, tags from the closed enum without duplicates, a temperature
+// class whenever TemperatureSensitive is present, a DOT class 1..9 only
+// with Hazmat.
+func (p FixtureProduct) validateFulfilment() error {
+	if d := p.Dimensions; d != nil {
+		for name, v := range map[string]int64{"lengthMm": d.LengthMm, "widthMm": d.WidthMm, "heightMm": d.HeightMm} {
+			if v < 1 || v > maxDimensionMm {
+				return fmt.Errorf("%s %d outside 1..%d", name, v, maxDimensionMm)
+			}
+		}
+		if d.WeightG < 1 || d.WeightG > maxWeightG {
+			return fmt.Errorf("weightG %d outside 1..%d", d.WeightG, maxWeightG)
+		}
+	}
+	seen := map[string]bool{}
+	for _, tg := range p.HandlingTags {
+		if !contains(handlingTagOrder, tg) {
+			return fmt.Errorf("unknown handling tag %q", tg)
+		}
+		if seen[tg] {
+			return fmt.Errorf("duplicate handling tag %q", tg)
+		}
+		seen[tg] = true
+	}
+	// A temperature class implies TemperatureSensitive (Open Food Facts entries carry only the
+	// class); the tag without a class is invalid.
+	if seen["TemperatureSensitive"] && p.TemperatureClass == "" {
+		return fmt.Errorf("handling tag TemperatureSensitive needs a temperatureClass")
+	}
+	if p.DotHazardClass != 0 && (p.DotHazardClass < 1 || p.DotHazardClass > 9 || !seen["Hazmat"]) {
+		return fmt.Errorf("dotHazardClass %d must be 1..9 and only with Hazmat", p.DotHazardClass)
+	}
+	return nil
+}
+
+// validSKU applies product-master's SKU rule to non-GTIN identifiers.
+func validSKU(s string) bool {
+	if s == "" || utf8.RuneCountInString(s) > maxSKULength {
+		return false
+	}
+	for _, r := range s {
+		if r == '/' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func loadFixture(path string) (Fixture, error) {
@@ -242,6 +356,27 @@ func loadFixture(path string) (Fixture, error) {
 		return f, fmt.Errorf("parse fixture %s: %w", path, err)
 	}
 	return f, f.validate()
+}
+
+// loadFixtures loads and validates every fixture file and merges their
+// products. A SKU may appear in only one file.
+func loadFixtures(paths []string) ([]FixtureProduct, error) {
+	var all []FixtureProduct
+	seen := map[string]string{}
+	for _, path := range paths {
+		f, err := loadFixture(path)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range f.Products {
+			if prev, dup := seen[p.SKU]; dup {
+				return nil, fmt.Errorf("sku %q is in both %s and %s", p.SKU, prev, path)
+			}
+			seen[p.SKU] = path
+		}
+		all = append(all, f.Products...)
+	}
+	return all, nil
 }
 
 func writeFixture(path string, f Fixture) error {

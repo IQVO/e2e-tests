@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -123,4 +124,140 @@ func TestToFixtureProductPrefersEnglishName(t *testing.T) {
 	if _, ok := toFixtureProduct(offProduct{Code: "4006381333931", ProductName: "  "}); ok {
 		t.Fatal("nameless product kept")
 	}
+}
+
+func TestValidateFulfilmentFields(t *testing.T) {
+	dims := &Dimensions{LengthMm: 300, WidthMm: 200, HeightMm: 100, WeightG: 1500}
+	ok := FixtureProduct{SKU: "ABO-B07QDZN8VR", Description: "Wall mount", Source: "abo", Dimensions: dims}
+	tests := []struct {
+		name string
+		mut  func(p *FixtureProduct)
+	}{
+		{"sku with slash", func(p *FixtureProduct) { p.SKU = "ABO/1" }},
+		{"sku with space", func(p *FixtureProduct) { p.SKU = "ABO 1" }},
+		{"dimension zero", func(p *FixtureProduct) { p.Dimensions = &Dimensions{0, 1, 1, 1} }},
+		{"dimension over limit", func(p *FixtureProduct) { p.Dimensions = &Dimensions{20001, 1, 1, 1} }},
+		{"weight over limit", func(p *FixtureProduct) { p.Dimensions = &Dimensions{1, 1, 1, 2000001} }},
+		{"unknown tag", func(p *FixtureProduct) { p.HandlingTags = []string{"Shiny"} }},
+		{"duplicate tag", func(p *FixtureProduct) { p.HandlingTags = []string{"Fragile", "Fragile"} }},
+		{"temperature tag without class", func(p *FixtureProduct) { p.HandlingTags = []string{"TemperatureSensitive"} }},
+		{"dot class without hazmat", func(p *FixtureProduct) { p.DotHazardClass = 3 }},
+		{"dot class out of range", func(p *FixtureProduct) { p.HandlingTags = []string{"Hazmat"}; p.DotHazardClass = 10 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := ok
+			tt.mut(&p)
+			if err := (Fixture{Products: []FixtureProduct{p}}).validate(); err == nil {
+				t.Fatal("validate accepted an invalid fulfilment product")
+			}
+		})
+	}
+	good := ok
+	good.HandlingTags = []string{"Hazmat", "TemperatureSensitive"}
+	good.TemperatureClass = "Chilled"
+	good.DotHazardClass = 3
+	if err := (Fixture{Products: []FixtureProduct{good}}).validate(); err != nil {
+		t.Fatalf("valid fulfilment product rejected: %v", err)
+	}
+}
+
+func TestClassificationAddsTemperatureSensitiveForOpenFoodFacts(t *testing.T) {
+	// An Open Food Facts fixture entry carries only the class.
+	tags, temp, dot, ok := FixtureProduct{SKU: "4006381333931", TemperatureClass: "Frozen"}.classification()
+	if !ok || temp != "Frozen" || dot != 0 || !sameSet(tags, []string{"TemperatureSensitive"}) {
+		t.Fatalf("got %v %q %d %v", tags, temp, dot, ok)
+	}
+	// Tags come back in product-master's enum order whatever the fixture order.
+	tags, _, _, _ = FixtureProduct{HandlingTags: []string{"HighValue", "Fragile", "Hazmat"}}.classification()
+	if want := []string{"Hazmat", "Fragile", "HighValue"}; !equal(tags, want) {
+		t.Fatalf("tags %v, want %v", tags, want)
+	}
+	if _, _, _, ok := (FixtureProduct{}).classification(); ok {
+		t.Fatal("an unclassified product must not be classified")
+	}
+}
+
+func TestLoadFixturesRejectsASkuInTwoFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, ps ...FixtureProduct) string {
+		path := filepath.Join(dir, name)
+		if err := writeFixture(path, Fixture{Products: ps}); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	a := write("a.json", FixtureProduct{SKU: "WANDS-1", Description: "Bed", Source: "wands"})
+	b := write("b.json", FixtureProduct{SKU: "WANDS-1", Description: "Bed again", Source: "wands"})
+	c := write("c.json", FixtureProduct{SKU: "WANDS-2", Description: "Chair", Source: "wands"})
+	if _, err := loadFixtures([]string{a, b}); err == nil {
+		t.Fatal("a SKU in two files was accepted")
+	}
+	got, err := loadFixtures([]string{a, c})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %d products, err %v", len(got), err)
+	}
+}
+
+func TestVerifyChecksDimensionsAndClassification(t *testing.T) {
+	p := FixtureProduct{
+		SKU: "WANDS-9", Description: "Sofa", Source: "wands",
+		Dimensions:   &Dimensions{LengthMm: 2000, WidthMm: 900, HeightMm: 850, WeightG: 60000},
+		HandlingTags: []string{"Oversized"},
+	}
+	listed := listedProduct{SKU: p.SKU, Description: p.Description}
+	listed.PhysicalProfile.Declared = &struct {
+		LengthMm int64 `json:"lengthMm"`
+		WidthMm  int64 `json:"widthMm"`
+		HeightMm int64 `json:"heightMm"`
+		WeightG  int64 `json:"weightG"`
+	}{2000, 900, 850, 60000}
+	listed.Classification = &struct {
+		HandlingTags     []string `json:"handlingTags"`
+		TemperatureClass string   `json:"temperatureClass"`
+		DotHazardClass   *int     `json:"dotHazardClass"`
+	}{HandlingTags: []string{"Oversized"}}
+	if probs := verify([]FixtureProduct{p}, map[string]listedProduct{p.SKU: listed}, true); len(probs) != 0 {
+		t.Fatalf("matching product reported: %v", probs)
+	}
+	listed.PhysicalProfile.Declared.WeightG = 1
+	if probs := verify([]FixtureProduct{p}, map[string]listedProduct{p.SKU: listed}, true); len(probs) != 1 {
+		t.Fatalf("wrong weight not caught: %v", probs)
+	}
+}
+
+// The committed fixtures are the contract: at least 10,000 products carry real
+// dimensions and weight, every one validates, and no SKU repeats.
+func TestCommittedFixturesMeetTheCatalogueContract(t *testing.T) {
+	products, err := loadFixtures([]string{
+		"../../fixtures/products/openfoodfacts-products.json",
+		"../../fixtures/products/fulfilment-products.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dims, tagged, hazmat := countFulfilment(products)
+	if dims < 10000 {
+		t.Fatalf("only %d products have real dimensions, want >= 10000", dims)
+	}
+	if hazmat == 0 || tagged == 0 {
+		t.Fatalf("no handling coverage: %d tagged, %d hazmat", tagged, hazmat)
+	}
+	for _, p := range products {
+		if strings.Contains(strings.ToLower(p.Description), "amazon") {
+			t.Errorf("%s: description carries the retailer name: %q", p.SKU, p.Description)
+		}
+	}
+}
+
+func equal(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

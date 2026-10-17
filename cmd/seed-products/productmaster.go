@@ -82,9 +82,9 @@ func (c *pmClient) put(ctx context.Context, path string, body any, wantStatus ..
 }
 
 type registerReport struct {
-	created, updated, classified, classUnchanged atomic.Int64
-	mu                                           sync.Mutex
-	failures                                     []string
+	created, updated, classified, classUnchanged, dimensioned atomic.Int64
+	mu                                                        sync.Mutex
+	failures                                                  []string
 }
 
 func (r *registerReport) fail(format string, args ...any) {
@@ -132,10 +132,26 @@ func (c *pmClient) registerOne(ctx context.Context, p FixtureProduct, classify b
 	} else {
 		rep.updated.Add(1)
 	}
-	if !classify || p.TemperatureClass == "" {
+	if p.Dimensions != nil {
+		d := p.Dimensions
+		body := map[string]int64{"lengthMm": d.LengthMm, "widthMm": d.WidthMm, "heightMm": d.HeightMm, "weightG": d.WeightG}
+		if _, err = c.put(ctx, "/products/"+sku+"/dimensions/declared", body, http.StatusOK, http.StatusCreated); err != nil {
+			rep.fail("dimensions %s: %v", p.SKU, err)
+			return
+		}
+		rep.dimensioned.Add(1)
+	}
+	tags, temp, dot, ok := p.classification()
+	if !classify || !ok {
 		return
 	}
-	body := map[string]any{"handlingTags": []string{"TemperatureSensitive"}, "temperatureClass": p.TemperatureClass}
+	body := map[string]any{"handlingTags": tags}
+	if temp != "" {
+		body["temperatureClass"] = temp
+	}
+	if dot != 0 {
+		body["dotHazardClass"] = dot
+	}
 	status, err = c.put(ctx, "/products/"+sku+"/classification", body, http.StatusCreated, http.StatusOK)
 	if err != nil {
 		rep.fail("classify %s: %v", p.SKU, err)
@@ -154,7 +170,16 @@ type listedProduct struct {
 	Classification *struct {
 		HandlingTags     []string `json:"handlingTags"`
 		TemperatureClass string   `json:"temperatureClass"`
+		DotHazardClass   *int     `json:"dotHazardClass"`
 	} `json:"classification"`
+	PhysicalProfile struct {
+		Declared *struct {
+			LengthMm int64 `json:"lengthMm"`
+			WidthMm  int64 `json:"widthMm"`
+			HeightMm int64 `json:"heightMm"`
+			WeightG  int64 `json:"weightG"`
+		} `json:"declared"`
+	} `json:"physicalProfile"`
 }
 
 // listAll pages through GET /products (max page size 500).
@@ -213,14 +238,34 @@ func verify(products []FixtureProduct, listed map[string]listedProduct, classify
 		if got.Description != p.Description {
 			problems = append(problems, fmt.Sprintf("%s: description %q, want %q", p.SKU, got.Description, p.Description))
 		}
-		if !classify || p.TemperatureClass == "" {
+		if d := p.Dimensions; d != nil {
+			g := got.PhysicalProfile.Declared
+			if g == nil || g.LengthMm != d.LengthMm || g.WidthMm != d.WidthMm || g.HeightMm != d.HeightMm || g.WeightG != d.WeightG {
+				problems = append(problems, fmt.Sprintf("%s: declared dimensions %+v, want %+v", p.SKU, g, *d))
+			}
+		}
+		tags, temp, dot, ok := p.classification()
+		if !classify || !ok {
 			continue
 		}
-		if got.Classification == nil || got.Classification.TemperatureClass != p.TemperatureClass || !contains(got.Classification.HandlingTags, "TemperatureSensitive") {
-			problems = append(problems, fmt.Sprintf("%s: classification %+v, want TemperatureSensitive/%s", p.SKU, got.Classification, p.TemperatureClass))
+		c := got.Classification
+		if c == nil || c.TemperatureClass != temp || !sameSet(c.HandlingTags, tags) || (dot != 0 && (c.DotHazardClass == nil || *c.DotHazardClass != dot)) {
+			problems = append(problems, fmt.Sprintf("%s: classification %+v, want %v/%s/dot %d", p.SKU, c, tags, temp, dot))
 		}
 	}
 	return problems
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, x := range a {
+		if !contains(b, x) {
+			return false
+		}
+	}
+	return true
 }
 
 func contains(xs []string, x string) bool {
