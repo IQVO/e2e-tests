@@ -16,7 +16,7 @@
 
 GO ?= go
 
-.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products down
+.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products seed-inventory down
 
 help:
 	@echo "e2e-tests — local quality gate (targets mirror .github/workflows/ci.yml)"
@@ -38,6 +38,7 @@ help:
 	@echo "  soak            scripts/06-run-soak.sh — the long-running @soak backlog-ramp scenario"
 	@echo "  warehouse-day   scripts/07-run-warehouse-day.sh — simulate a full operating day, KPI + cross-context audit"
 	@echo "  seed-products   scripts/08-seed-products.sh — register >= 10,000 real products (real dimensions, weight, handling classes) in product-master, verified"
+	@echo "  seed-inventory  scripts/09-seed-inventory.sh — stock the pilot sites with >= 100,000 units of the registered products (bins + stow), verified"
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:
@@ -90,6 +91,9 @@ warehouse-day:
 	bash scripts/07-run-warehouse-day.sh
 seed-products:
 	bash scripts/08-seed-products.sh
+
+seed-inventory:
+	bash scripts/09-seed-inventory.sh
 
 down:
 	bash scripts/05-down-services.sh

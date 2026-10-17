@@ -317,6 +317,40 @@ SEED_LIMIT=2000 SEED_WORKERS=16 make seed-products                    # tunables
   contract fake of product-master and verifies the read-back;
   `python3 scripts/test_harvest_fulfilment_products.py` covers the derivation rules.
 
+## Inventory (`cmd/seed-inventory`)
+
+Stocks inventory-storage with **at least 100,000 units** of the products that are *registered*
+in product-master, through the services' published REST APIs only, then reads every bin back.
+
+```sh
+bash scripts/09-seed-inventory.sh --dry-run                         # check + plan, write nothing
+PRODUCT_MASTER_BASE_URL=http://localhost:8000/api/product-master \
+FACILITY_LAYOUT_BASE_URL=http://localhost:8000/api/facility-layout \
+INVENTORY_STORAGE_BASE_URL=http://localhost:8000/api/inventory-storage \
+  bash scripts/09-seed-inventory.sh                                 # kind cluster via Kong
+```
+
+- **Check:** lists every registered product (`GET /products`: dimensions, handling tags,
+  temperature class, DOT class) and every Active storage slot of the pilot sites in
+  facility-layout (zone temperature and hazmat rating, real volume and weight limits). A registered
+  product with no dimensions that is not a GTIN grocery is reported and skipped.
+- **Plan** (deterministic, `plan.go`): sortable FCs stock small and medium items, non-sortable and XL
+  FCs the oversized, fresh-grocery and micro-FCs the groceries and the whole cold chain (chilled and
+  frozen zones). Hazmat goes only to hazmat-rated zones, one SKU per bin (same-bin DOT segregation,
+  inventory-storage ADR 0010). Quantities are case-pack scale by unit volume; bins are filled to 80 %
+  of their volume and weight limits, chaotic storage (no fixed product-to-bin mapping); a bin's
+  capacity in units is the placed units divided by the fill factor. Groceries without dimensions use an
+  assumed 1.5 L / 0.6 kg unit for the fill arithmetic only; nothing is written back to product-master.
+- **Stock:** `PUT /bins/{binId}` then `POST /stock/stow` (item scan + location scan). It does not call
+  `/stock/receive`: stow does not consume staged receipts, so receiving as well would only inflate the
+  staged quantity.
+- **Idempotent:** a bin already holding its planned units is skipped, `PUT /bins` converges, and every
+  stow carries a deterministic `Idempotency-Key` (bin, SKU, quantity), so a retry or an interrupted run
+  does not stow twice.
+- **Tests:** `go test ./cmd/seed-inventory/...` runs the planner rules and the whole stocking path
+  against a contract fake of inventory-storage that enforces its invariants (capacity, hazmat zone,
+  temperature class, DOT segregation, idempotency keys).
+
 ## Service lifecycle notes
 
 - `scripts/lib.sh`'s `start_service_in`/`start_service` launch each binary
