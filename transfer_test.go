@@ -101,19 +101,31 @@ func (m ceMessage) payload() map[string]any {
 	return d
 }
 
-// scanTopic reads partition 0 of topic from its first offset (no consumer
-// group, so it never perturbs any service's offsets) and returns the first
-// CloudEvent for which match is true. It returns (nil, nil) when window
-// elapsed without a match; seen counts the messages read.
+// scanTopic reads the WHOLE topic from its first offset and returns the
+// first CloudEvent for which match is true. It returns (nil, nil) when
+// window elapsed without a match; seen counts the messages read.
+//
+// The shared kind-cluster broker creates these topics with 8 partitions,
+// and every event's key (ASN/transfer UUID) hashes away from partition 0,
+// so a single-partition reader silently misses the events under test.
+// kafka-go has no multi-partition reader without a group, so this mints a
+// FRESH, unique consumer group per call (the same idiom as
+// inventory-storage's facilitycache consumer and cmd/ensure-topics): a
+// brand-new group is assigned every partition of the topic and starts at
+// FirstOffset, so the scan observes the full topic. A throwaway group's
+// offsets are never resumed by anyone, so this never perturbs any
+// service's committed offsets — the same guarantee the old partition-0
+// reader documented. CommitInterval keeps the group's offset commits
+// asynchronous; the sync default costs one round trip per message.
 func scanTopic(topic string, window time.Duration, match func(ceMessage) bool) (found *ceMessage, seen int, err error) {
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: kafkaBrokerList(), Topic: topic, Partition: 0,
-		MinBytes: 1, MaxBytes: 10 << 20, MaxWait: 250 * time.Millisecond,
+		Brokers: kafkaBrokerList(), Topic: topic,
+		GroupID:        scanGroupID(topic),
+		StartOffset:    kafka.FirstOffset,
+		CommitInterval: time.Second,
+		MinBytes:       1, MaxBytes: 10 << 20, MaxWait: 250 * time.Millisecond,
 	})
 	defer func() { _ = r.Close() }()
-	if err := r.SetOffset(kafka.FirstOffset); err != nil {
-		return nil, 0, fmt.Errorf("kafka set offset on %s: %w", topic, err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), window)
 	defer cancel()
 	for {
@@ -133,6 +145,23 @@ func scanTopic(topic string, window time.Duration, match func(ceMessage) bool) (
 			return &m, seen, nil
 		}
 	}
+}
+
+// scanGroupID mints a consumer group id unique to this scan call. The
+// topic token keeps group names legible in Kafka tooling; the nanosecond
+// timestamp guarantees uniqueness even for back-to-back polls by the same
+// process (scanTopic runs inside polling loops). Cheap by design: no
+// allocation beyond the id itself.
+func scanGroupID(topic string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		default:
+			return '-'
+		}
+	}, topic)
+	return fmt.Sprintf("e2e-scan-%s-%d", safe, time.Now().UnixNano())
 }
 
 // expectKafkaEvent waits (up to kafkaScanWindow) for a CloudEvent of exactly

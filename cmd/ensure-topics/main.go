@@ -34,10 +34,17 @@ var topics = []string{
 	"warehouse.facility.events",
 	"warehouse.facility.analytics",
 	"warehouse.product-master.events",
+	// product-master's analytics stream: the outbox relay publishes BOTH
+	// topics (integration + analytics) per event; a missing analytics
+	// topic fails the whole relay batch with Unknown Topic Or Partition
+	// (observed live: 32 attempt-capped outbox rows starving the events
+	// topic past every scenario's 30s window on a fresh broker).
+	"warehouse.product-master.analytics",
 	// inbound-receiving's integration topic: inventory-storage consumes
 	// ReceiptLineReceived from it (a group on a topic that does not exist yet
 	// is never assigned a partition), and inbound_receiving.feature scans it.
 	"warehouse.inbound-receiving.events",
+	"warehouse.inbound-receiving.analytics",
 	// slotting-optimization's integration topic (SlotPlanGenerated /
 	// Approved / Rejected, key = plan id): published through its outbox relay
 	// and scanned by slotting_optimization.feature.
@@ -53,6 +60,7 @@ var topics = []string{
 	"warehouse.order-management.events",
 	"warehouse.order-management.analytics",
 	"warehouse.process-path-management.events",
+	"warehouse.process-path-management.analytics",
 	"warehouse.labor-performance.events",
 	"warehouse.network-inventory-planning.events",
 	"warehouse.network-inventory-planning.analytics",
