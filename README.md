@@ -278,9 +278,10 @@ committed offsets across restarts instead of replaying the topic history.
 
 ## Real product catalogue (`cmd/seed-products`)
 
-Registers **at least 2,000 real retail products** in product-master through
-its published REST contract, then reads the whole catalogue back with
-`GET /products` and fails on any missing or different product.
+Registers **at least 10,000 real products** in product-master through its
+published REST contract, **with their fulfilment data** (real unit dimensions and
+weight, handling tags, temperature class, DOT hazard class), then reads the whole
+catalogue back with `GET /products` and fails on any missing or different product.
 
 ```sh
 make seed-products                                                    # local harness (:8090)
@@ -289,24 +290,66 @@ PRODUCT_MASTER_BASE_URL=http://localhost:8000/api/product-master \
 SEED_LIMIT=2000 SEED_WORKERS=16 make seed-products                    # tunables
 ```
 
-- **Data:** `fixtures/products/openfoodfacts-products.json`, harvested from
-  [Open Food Facts](https://world.openfoodfacts.org) (ODbL 1.0, see
-  `fixtures/products/README.md`). Every SKU is the product's GS1 GTIN with a
-  verified check digit; every description is its real brand, name and net
-  quantity (≤ 200 runes, product-master's limit).
-- **API calls:** `PUT /products/{sku}` for every product, and
-  `PUT /products/{sku}/classification` with `TemperatureSensitive` +
-  `Frozen`/`Chilled` only where the product's own category tags say so. No
-  invented Hazmat/Fragile tags and no invented dimensions; the source has
-  neither.
+- **Data (two fixtures, see `fixtures/products/README.md`):**
+  `openfoodfacts-products.json` - ~2,370 grocery products from
+  [Open Food Facts](https://world.openfoodfacts.org) (ODbL 1.0), SKU = GS1 GTIN,
+  and `fulfilment-products.json` - ~11,300 products with **real unit dimensions
+  and weight** from the Berkeley ABO listings (CC BY 4.0) and the Wayfair WANDS
+  catalogue (MIT), harvested by `scripts/harvest-fulfilment-products.py`.
+- **API calls:** `PUT /products/{sku}` for every product,
+  `PUT /products/{sku}/dimensions/declared` where the source has dimensions and
+  weight, and `PUT /products/{sku}/classification` where a handling tag applies
+  (Hazmat + DOT class, Fragile, TemperatureSensitive + Frozen/Chilled, Oversized,
+  HighValue). The tags are *derived* from the category and name by explicit rules
+  and every product records its evidence; dimensions and weight are the source's
+  own, converted to mm and g, and implausible ones are dropped, not repaired.
 - **Idempotent:** every write is an idempotent PUT, so a re-run against a dirty
   database reports the products as already present and changes nothing (no
   version bump, no event). The GTINs are shared reference data and are not
   run-scoped.
-- **Offline:** the run never touches the internet. Refresh the fixture with
-  `go run ./cmd/seed-products -fetch` (slow on purpose: Open Food Facts allows
-  about 10 searches a minute and answers 503 when busy; the fetch is paced and
-  retried).
+- **Offline:** the run never touches the internet. Refresh the Open Food Facts
+  fixture with `go run ./cmd/seed-products -fetch` (slow on purpose: about 10
+  searches a minute, 503 when busy; paced and retried) and the fulfilment fixture
+  with `python3 scripts/harvest-fulfilment-products.py` (downloads ~180 MB once,
+  cached under `~/.cache/warehouse-e2e`; deterministic).
+- **Tests:** `go test ./cmd/seed-products/...` pushes the whole committed
+  catalogue (twice, to prove idempotence) through the real client against a
+  contract fake of product-master and verifies the read-back;
+  `python3 scripts/test_harvest_fulfilment_products.py` covers the derivation rules.
+
+## Inventory (`cmd/seed-inventory`)
+
+Stocks inventory-storage with **at least 100,000 units** of the products that are *registered*
+in product-master, through the services' published REST APIs only, then reads every bin back.
+
+```sh
+bash scripts/09-seed-inventory.sh --dry-run                         # check + plan, write nothing
+PRODUCT_MASTER_BASE_URL=http://localhost:8000/api/product-master \
+FACILITY_LAYOUT_BASE_URL=http://localhost:8000/api/facility-layout \
+INVENTORY_STORAGE_BASE_URL=http://localhost:8000/api/inventory-storage \
+  bash scripts/09-seed-inventory.sh                                 # kind cluster via Kong
+```
+
+- **Check:** lists every registered product (`GET /products`: dimensions, handling tags,
+  temperature class, DOT class) and every Active storage slot of the pilot sites in
+  facility-layout (zone temperature and hazmat rating, real volume and weight limits). A registered
+  product with no dimensions that is not a GTIN grocery is reported and skipped.
+- **Plan** (deterministic, `plan.go`): sortable FCs stock small and medium items, non-sortable and XL
+  FCs the oversized, fresh-grocery and micro-FCs the groceries and the whole cold chain (chilled and
+  frozen zones). Hazmat goes only to hazmat-rated zones, one SKU per bin (same-bin DOT segregation,
+  inventory-storage ADR 0010). Quantities are case-pack scale by unit volume; bins are filled to 80 %
+  of their volume and weight limits, chaotic storage (no fixed product-to-bin mapping); a bin's
+  capacity in units is the placed units divided by the fill factor. Groceries without dimensions use an
+  assumed 1.5 L / 0.6 kg unit for the fill arithmetic only; nothing is written back to product-master.
+- **Stock:** `PUT /bins/{binId}` then `POST /stock/stow` (item scan + location scan). It does not call
+  `/stock/receive`: stow does not consume staged receipts, so receiving as well would only inflate the
+  staged quantity.
+- **Idempotent:** a bin already holding its planned units is skipped, `PUT /bins` converges, and every
+  stow carries a deterministic `Idempotency-Key` (bin, SKU, quantity), so a retry or an interrupted run
+  does not stow twice.
+- **Tests:** `go test ./cmd/seed-inventory/...` runs the planner rules and the whole stocking path
+  against a contract fake of inventory-storage that enforces its invariants (capacity, hazmat zone,
+  temperature class, DOT segregation, idempotency keys).
 
 ## Service lifecycle notes
 

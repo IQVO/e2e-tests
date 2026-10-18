@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/08-seed-products.sh
 #
-# Registers a catalogue of REAL products (>= 2,000) in product-master through
-# its published REST API (PUT /products/{sku}, PUT /products/{sku}/classification),
-# then reads every one back with GET /products and fails on any gap.
+# Registers a catalogue of REAL products (>= 10,000) in product-master through
+# its published REST API (PUT /products/{sku}, PUT /products/{sku}/classification,
+# PUT /products/{sku}/dimensions/declared), then reads every one back with
+# GET /products and fails on any gap.
 #
-# Products: fixtures/products/openfoodfacts-products.json, harvested from
-# Open Food Facts (ODbL 1.0). Each SKU is the product's GS1 GTIN (check digit
-# verified), each description its real brand + name + net quantity. Frozen /
-# chilled items are classified TemperatureSensitive from their own category
-# tags; everything else is left unclassified (no invented Hazmat/Fragile, no
-# invented dimensions: the source has none).
+# Products, two fixtures (see fixtures/products/README.md):
+#   openfoodfacts-products.json  ~2,370 grocery products from Open Food Facts
+#                                (ODbL 1.0): SKU = GS1 GTIN, real brand + name +
+#                                net quantity; Frozen / Chilled from the product's
+#                                own category tags. No dimensions (the source has none).
+#   fulfilment-products.json     ~11,300 products with REAL unit dimensions and weight
+#                                (Berkeley ABO listings CC BY 4.0 + Wayfair WANDS MIT)
+#                                and derived handling tags / temperature class / DOT
+#                                hazard class, each with recorded evidence.
+#                                Refresh: python3 scripts/harvest-fulfilment-products.py
 #
 # Idempotent: every write is an idempotent PUT, so re-running against a dirty
 # database reports "already present" and changes nothing. GTINs are shared
@@ -24,7 +29,7 @@
 #
 # Tunables (env, passed as flags; see cmd/seed-products/main.go):
 #   SEED_WORKERS   concurrent workers            (default 8)
-#   SEED_MIN       fail below this many products (default 2000)
+#   SEED_MIN       fail below this many products (default 10000)
 #   SEED_LIMIT     register only the first N     (default 0 = all)
 #
 # Refresh the fixture from the internet (slow: Open Food Facts allows ~10
@@ -47,8 +52,9 @@ ok "seed-products -> ${BIN_DIR}/seed-products"
 log "seeding product-master at ${PRODUCT_MASTER_BASE_URL}"
 "${BIN_DIR}/seed-products" \
   -fixture "${WORKSPACE_ROOT}/fixtures/products/openfoodfacts-products.json" \
+  -extra-fixture "${WORKSPACE_ROOT}/fixtures/products/fulfilment-products.json" \
   -base-url "${PRODUCT_MASTER_BASE_URL}" \
   -workers "${SEED_WORKERS:-8}" \
-  -min "${SEED_MIN:-2000}" \
+  -min "${SEED_MIN:-10000}" \
   -limit "${SEED_LIMIT:-0}"
 ok "product catalogue seeded and verified"
