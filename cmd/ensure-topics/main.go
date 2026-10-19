@@ -62,10 +62,27 @@ var topics = []string{
 	"warehouse.process-path-management.events",
 	"warehouse.process-path-management.analytics",
 	"warehouse.labor-performance.events",
+	"warehouse.labor-performance.analytics",
 	"warehouse.network-inventory-planning.events",
 	"warehouse.network-inventory-planning.analytics",
 	"warehouse.warehouse-planning.events",
 	"warehouse.warehouse-planning.analytics",
+	// slotting-optimization's analytics stream: its relay publishes BOTH
+	// topics per event; a missing analytics topic fails the relay batch
+	// (same Unknown Topic Or Partition class as product-master above).
+	"warehouse.slotting-optimization.analytics",
+	// pick-face-replenishment and task-interleaving: wes-work-planning's
+	// integration consumer group subscribes to their events topics (the
+	// REPLENISH consumer and the interleaving hint consumer); a group with
+	// a missing topic in its subscription NEVER gets a partition assigned,
+	// which silently stalls workforce/inventory/work-planning consumption
+	// with it. Their analytics topics cover their own relays.
+	"warehouse.pick-face-replenishment.events",
+	"warehouse.pick-face-replenishment.analytics",
+	"warehouse.task-interleaving.events",
+	"warehouse.task-interleaving.analytics",
+	"warehouse.network-fulfillment.events",
+	"warehouse.network-fulfillment.analytics",
 }
 
 const leaderWait = 30 * time.Second
