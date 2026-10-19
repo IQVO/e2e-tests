@@ -183,6 +183,11 @@ jobs:
             warehouse.facility.events
             warehouse.facility.analytics
             warehouse.product-master.events
+            warehouse.product-master.analytics
+            warehouse.inbound-receiving.events
+            warehouse.inbound-receiving.analytics
+            warehouse.slotting-optimization.events
+            warehouse.slotting-optimization.analytics
             warehouse.inventory.events
             warehouse.inventory.analytics
             warehouse.work-planning.events
@@ -191,14 +196,30 @@ jobs:
             warehouse.fulfillment.analytics
             warehouse.workforce.events
             warehouse.workforce.analytics
+            warehouse.labor-performance.events
+            warehouse.labor-performance.analytics
             warehouse.order-management.events
             warehouse.order-management.analytics
-            # Consumed (not published) by wes-work-planning's integration
-            # consumer group (NIP WorkDemandReleased, wes-work-planning #150).
-            # No service here publishes it, but a kafka-go group subscribed
-            # to a topic that does not exist never gets an assignment, so
-            # ShiftPlanCommitted etc. would stall with it.
+            warehouse.process-path-management.events
+            warehouse.process-path-management.analytics
             warehouse.network-inventory-planning.events
+            warehouse.network-inventory-planning.analytics
+            warehouse.warehouse-planning.events
+            warehouse.warehouse-planning.analytics
+            # Consumed (not published) by wes-work-planning's integration
+            # consumer group (NIP WorkDemandReleased, wes-work-planning #150;
+            # REPLENISH from pick-face-replenishment #203; interleaving hints;
+            # slotting SlotPlanApproved). No service here publishes some of
+            # these, but a kafka-go group subscribed to a topic that does not
+            # exist never gets an assignment, so ShiftPlanCommitted etc.
+            # would stall with it -- exactly the deterministic 2/2 failure
+            # seen on runs 39228137019 before this list was completed.
+            warehouse.pick-face-replenishment.events
+            warehouse.pick-face-replenishment.analytics
+            warehouse.task-interleaving.events
+            warehouse.task-interleaving.analytics
+            warehouse.network-fulfillment.events
+            warehouse.network-fulfillment.analytics
           )
           for t in "${topics[@]}"; do
             docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
