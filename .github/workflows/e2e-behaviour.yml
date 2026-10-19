@@ -358,7 +358,7 @@ jobs:
 
       - name: Dump service logs on failure
         if: failure()
-        run: tail -n +1 /tmp/facility.log /tmp/product-master.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log 2>&1 || true
+        run: tail -n 400 /tmp/facility.log /tmp/product-master.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log 2>&1 || true
       # This job checks the repo out into ./e2e-tests next to the service repos, so repo scripts (and the git remote
       # `gh` needs) are only found from that directory. A scheduled run is what the weekly sensor reads; a manual run
       # on develop counts as proof too (harness-health), so both trigger these steps. They must run for real on a
@@ -662,7 +662,7 @@ jobs:
 
       - name: Dump service logs on failure
         if: failure()
-        run: tail -n +1 /tmp/facility.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log /tmp/product-master.log /tmp/planning.log /tmp/nip.log 2>&1 || true
+        run: tail -n 400 /tmp/facility.log /tmp/inventory.log /tmp/wes.log /tmp/execution.log /tmp/workforce.log /tmp/order.log /tmp/product-master.log /tmp/planning.log /tmp/nip.log 2>&1 || true
 
   # inbound-receiving (ASN, dock appointment, receipt) and its event-driven
   # handover to inventory-storage (inbound-receiving ADR 0003, inventory-storage
@@ -866,7 +866,7 @@ jobs:
 
       - name: Dump service logs on failure
         if: failure()
-        run: tail -n +1 /tmp/product-master.log /tmp/inbound-receiving.log /tmp/inventory.log 2>&1 || true
+        run: tail -n 400 /tmp/product-master.log /tmp/inbound-receiving.log /tmp/inventory.log 2>&1 || true
 
   # slotting-optimization (SlotPlan, abc-velocity-v1) and its three event-fed
   # local copies: features/slotting_optimization.feature. A separate job so a
@@ -1069,4 +1069,4 @@ jobs:
 
       - name: Dump service logs on failure
         if: failure()
-        run: tail -n +1 /tmp/facility.log /tmp/product-master.log /tmp/slotting-optimization.log 2>&1 || true
+        run: tail -n 400 /tmp/facility.log /tmp/product-master.log /tmp/slotting-optimization.log 2>&1 || true
