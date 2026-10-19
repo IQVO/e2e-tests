@@ -509,6 +509,11 @@ jobs:
             warehouse.facility.events
             warehouse.facility.analytics
             warehouse.product-master.events
+            warehouse.product-master.analytics
+            warehouse.inbound-receiving.events
+            warehouse.inbound-receiving.analytics
+            warehouse.slotting-optimization.events
+            warehouse.slotting-optimization.analytics
             warehouse.inventory.events
             warehouse.inventory.analytics
             warehouse.work-planning.events
@@ -517,11 +522,30 @@ jobs:
             warehouse.fulfillment.analytics
             warehouse.workforce.events
             warehouse.workforce.analytics
+            warehouse.labor-performance.events
+            warehouse.labor-performance.analytics
             warehouse.order-management.events
             warehouse.order-management.analytics
+            warehouse.process-path-management.events
+            warehouse.process-path-management.analytics
             warehouse.network-inventory-planning.events
+            warehouse.network-inventory-planning.analytics
             warehouse.warehouse-planning.events
             warehouse.warehouse-planning.analytics
+            # Full fleet union, not just this job's nine services: WP's
+            # integration consumer group subscribes to pick-face-
+            # replenishment and slotting-optimization events too (a group
+            # with a missing topic never gets an assignment), and every
+            # relay publishes BOTH its events and analytics topics (one
+            # missing analytics row sticks the whole relay pass -- seen
+            # live on run 39242681912: NIP row 3, WorkDemandReleased
+            # never published, pick demand 0).
+            warehouse.pick-face-replenishment.events
+            warehouse.pick-face-replenishment.analytics
+            warehouse.task-interleaving.events
+            warehouse.task-interleaving.analytics
+            warehouse.network-fulfillment.events
+            warehouse.network-fulfillment.analytics
           )
           for t in "${topics[@]}"; do
             docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
@@ -757,9 +781,15 @@ jobs:
           fi
           topics=(
             warehouse.product-master.events
+            warehouse.product-master.analytics
             warehouse.inbound-receiving.events
+            warehouse.inbound-receiving.analytics
             warehouse.inventory.events
             warehouse.inventory.analytics
+            warehouse.facility.events
+            warehouse.facility.analytics
+            warehouse.slotting-optimization.events
+            warehouse.slotting-optimization.analytics
           )
           for t in "${topics[@]}"; do
             docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
@@ -960,9 +990,15 @@ jobs:
           fi
           topics=(
             warehouse.facility.events
+            warehouse.facility.analytics
             warehouse.product-master.events
+            warehouse.product-master.analytics
             warehouse.order-management.events
+            warehouse.order-management.analytics
             warehouse.slotting-optimization.events
+            warehouse.slotting-optimization.analytics
+            warehouse.inventory.events
+            warehouse.inventory.analytics
           )
           for t in "${topics[@]}"; do
             docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
