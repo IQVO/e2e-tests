@@ -440,36 +440,33 @@ func sameTags(raw any, want []string) bool {
 	return len(have) == len(want)
 }
 
-// inventoryKnowsSKUAs is one read of inventory-storage's local copy
-// (GET /products/{sku}/classification, deprecated but still served until
-// product-master ADR 0003 stage E) compared EXACTLY with want.
-func (w *world) inventoryKnowsSKUAs(sku string, want []string) error {
-	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/products/%s/classification", inventoryBaseURL, sku), nil); err != nil {
+// productMasterClassificationHasTags reads product-master's authoritative
+// classification (GET /products/{sku}/classification, product-master ADR
+// 0001) and compares handling tags EXACTLY with want. inventory-storage's
+// local copy has no REST surface since K21 stage E retired its read
+// (inventory-storage ADR 0034): the copy's effect is asserted by
+// stow-time placement in facility_layout_propagation.feature instead.
+func (w *world) productMasterClassificationHasTags(sku string, want []string) error {
+	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/products/%s/classification", productMasterBaseURL, sku), nil); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK {
-		return fmt.Errorf("inventory-storage GET classification of %s: status %d (body: %s)", sku, w.last.status, w.last.body)
+		return fmt.Errorf("product-master GET classification of %s: status %d (body: %s)", sku, w.last.status, w.last.body)
 	}
 	if got := w.last.json()["handlingTags"]; !sameTags(got, want) {
-		return fmt.Errorf("inventory-storage knows %s as %v, want %v (body: %s)", sku, got, want, w.last.body)
+		return fmt.Errorf("product-master knows %s as %v, want %v (body: %s)", sku, got, want, w.last.body)
 	}
 	return nil
 }
 
-// inventoryEventuallyKnowsSKUAs polls inventory-storage until its local
-// copy (fed by warehouse.product-master.events through the consumer group
-// in PRODUCT_MASTER_CONSUMER_GROUP) holds exactly the expected tags. A 404
-// while the event is in flight is the expected transient.
-func (w *world) inventoryEventuallyKnowsSKUAs(sku, handlingTags string) error {
+// productMasterEventuallyClassificationHasTags polls product-master until
+// its classification holds exactly the expected tags. The write itself is
+// a synchronous idempotent PUT, so this is a short-tail wait; it exists so
+// feature files can express the post-write state uniformly.
+func (w *world) productMasterEventuallyClassificationHasTags(sku, handlingTags string) error {
 	sku = w.rs(sku)
 	want := splitTags(handlingTags)
-	return eventually(func() error { return w.inventoryKnowsSKUAs(sku, want) })
-}
-
-// inventoryStillKnowsSKUAs is the one-shot variant, used right after the
-// retired inventory-storage PUT to prove that call wrote nothing.
-func (w *world) inventoryStillKnowsSKUAs(sku, handlingTags string) error {
-	return w.inventoryKnowsSKUAs(w.rs(sku), splitTags(handlingTags))
+	return eventually(func() error { return w.productMasterClassificationHasTags(sku, want) })
 }
 
 // inventoryClassificationPutIsGone calls inventory-storage's retired
@@ -1882,8 +1879,8 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^location slot "([^"]*)" of type "([^"]*)" exists in facility-layout$`, w.ensureLocationSlot)
 
 	sc.Step(`^a Bin "([^"]*)" with capacity (\d+) exists in inventory-storage$`, w.binExists)
-	sc.Step(`^inventory-storage eventually knows SKU "([^"]*)" as "([^"]*)"$`, w.inventoryEventuallyKnowsSKUAs)
-	sc.Step(`^inventory-storage still knows SKU "([^"]*)" as "([^"]*)"$`, w.inventoryStillKnowsSKUAs)
+	sc.Step(`^product-master eventually knows SKU "([^"]*)" as "([^"]*)"$`, w.productMasterEventuallyClassificationHasTags)
+	sc.Step(`^product-master still knows SKU "([^"]*)" as "([^"]*)"$`, w.productMasterEventuallyClassificationHasTags)
 	sc.Step(`^classifying SKU "([^"]*)" with handling tags "([^"]*)" in inventory-storage is refused with 410 "([^"]*)"$`, w.inventoryClassificationPutIsGone)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage is rejected$`, w.stowIsRejected)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage eventually succeeds$`, w.stowEventuallySucceeds)

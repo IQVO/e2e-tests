@@ -8,8 +8,10 @@ Feature: product-master owns classification and the physical profile; inventory-
   wes-work-planning and fulfillment-execution consume into local copies.
 
   What makes each assertion discriminating:
-  - inventory-storage only learns "Hazmat" through the Kafka hop: its own
-    write endpoint is retired, so nothing else can put the tag there.
+  - product-master's read-back proves the authoritative copy; the Kafka hop
+    into inventory-storage (its own write endpoint is retired) is asserted
+    end-to-end by facility_layout_propagation.feature's stow-time placement,
+    since K21 stage E retired inventory-storage's classification read.
   - The retired inventory-storage PUT is sent with a DIFFERENT tag set
     ("Fragile"); the 410 must name classification-moved AND the local copy
     must still say "Hazmat", so a PUT that silently wrote would fail.
@@ -28,7 +30,7 @@ Feature: product-master owns classification and the physical profile; inventory-
   Scenario: Classify and dimension a SKU in product-master; inventory-storage follows and refuses writes
     Given SKU "SKU-PM-<run>" is registered in product-master
     When SKU "SKU-PM-<run>" is classified with handling tags "Hazmat" in product-master
-    Then inventory-storage eventually knows SKU "SKU-PM-<run>" as "Hazmat"
+    Then product-master eventually knows SKU "SKU-PM-<run>" as "Hazmat"
 
     When SKU "SKU-PM-<run>" is declared in product-master as 200x120x80 mm and 1500 g
     Then product-master's physical profile of SKU "SKU-PM-<run>" has effective source "declared" and discrepancy false
@@ -38,4 +40,4 @@ Feature: product-master owns classification and the physical profile; inventory-
     And product-master's effective dimensions of SKU "SKU-PM-<run>" are 205x121x82 mm and 1720 g
 
     Then classifying SKU "SKU-PM-<run>" with handling tags "Fragile" in inventory-storage is refused with 410 "classification-moved"
-    And inventory-storage still knows SKU "SKU-PM-<run>" as "Hazmat"
+    And product-master still knows SKU "SKU-PM-<run>" as "Hazmat"
