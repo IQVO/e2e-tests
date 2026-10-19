@@ -470,9 +470,12 @@ func (w *world) productMasterEventuallyClassificationHasTags(sku, handlingTags s
 }
 
 // inventoryClassificationPutIsGone calls inventory-storage's retired
-// PUT /products/{sku}/classification and requires 410 with the RFC 7807
-// problem type ending in "/<slug>" (classification-moved, inventory-storage
-// ADR 0034). The status alone is not enough: any 410 would pass.
+// PUT /products/{sku}/classification. K21 stage E (inventory-storage ADR
+// 0034, executed 2026-10-17) DELETED the route outright -- the 410-with-
+// problem-type phase was the interim contract while the write moved to
+// product-master; the final contract is Go chi's plain 404 "page not
+// found", matching inventory-storage's own BDD suite ("The retired
+// classification surface is gone ... response status is 404").
 func (w *world) inventoryClassificationPutIsGone(sku, handlingTags, slug string) error {
 	sku = w.rs(sku)
 	if err := w.doJSON(http.MethodPut,
@@ -480,12 +483,8 @@ func (w *world) inventoryClassificationPutIsGone(sku, handlingTags, slug string)
 		map[string]any{"handlingTags": splitTags(handlingTags)}); err != nil {
 		return err
 	}
-	if w.last.status != http.StatusGone {
-		return fmt.Errorf("inventory-storage PUT classification of %s: status %d, want 410 (body: %s)", sku, w.last.status, w.last.body)
-	}
-	typ, _ := w.last.json()["type"].(string)
-	if !strings.HasSuffix(typ, "/"+slug) {
-		return fmt.Errorf("inventory-storage PUT classification of %s: problem type %q, want .../%s (body: %s)", sku, typ, slug, w.last.body)
+	if w.last.status != http.StatusNotFound {
+		return fmt.Errorf("inventory-storage PUT classification of %s: status %d, want 404 (route deleted at K21 stage E; body: %s)", sku, w.last.status, w.last.body)
 	}
 	return nil
 }
@@ -1881,7 +1880,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^a Bin "([^"]*)" with capacity (\d+) exists in inventory-storage$`, w.binExists)
 	sc.Step(`^product-master eventually knows SKU "([^"]*)" as "([^"]*)"$`, w.productMasterEventuallyClassificationHasTags)
 	sc.Step(`^product-master still knows SKU "([^"]*)" as "([^"]*)"$`, w.productMasterEventuallyClassificationHasTags)
-	sc.Step(`^classifying SKU "([^"]*)" with handling tags "([^"]*)" in inventory-storage is refused with 410 "([^"]*)"$`, w.inventoryClassificationPutIsGone)
+	sc.Step(`^classifying SKU "([^"]*)" with handling tags "([^"]*)" in inventory-storage is refused with 404 "([^"]*)"$`, w.inventoryClassificationPutIsGone)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage is rejected$`, w.stowIsRejected)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage eventually succeeds$`, w.stowEventuallySucceeds)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage is eventually rejected$`, w.stowEventuallyRejected)

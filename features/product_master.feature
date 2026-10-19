@@ -13,8 +13,8 @@ Feature: product-master owns classification and the physical profile; inventory-
     end-to-end by facility_layout_propagation.feature's stow-time placement,
     since K21 stage E retired inventory-storage's classification read.
   - The retired inventory-storage PUT is sent with a DIFFERENT tag set
-    ("Fragile"); the 410 must name classification-moved AND the local copy
-    must still say "Hazmat", so a PUT that silently wrote would fail.
+    ("Fragile"); the route is gone (404, K21 stage E) AND product-master
+    must still say "Hazmat", so a PUT that somehow wrote would fail.
   - The physical profile is read twice: declared only (effective source
     declared, no discrepancy), then after a measurement whose weight differs
     by more than 10 % (effective source measured, discrepancy true). The
@@ -39,5 +39,5 @@ Feature: product-master owns classification and the physical profile; inventory-
     Then product-master's physical profile of SKU "SKU-PM-<run>" has effective source "measured" and discrepancy true
     And product-master's effective dimensions of SKU "SKU-PM-<run>" are 205x121x82 mm and 1720 g
 
-    Then classifying SKU "SKU-PM-<run>" with handling tags "Fragile" in inventory-storage is refused with 410 "classification-moved"
+    Then classifying SKU "SKU-PM-<run>" with handling tags "Fragile" in inventory-storage is refused with 404 "route-gone"
     And product-master still knows SKU "SKU-PM-<run>" as "Hazmat"
