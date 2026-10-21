@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib.sh"
 
-log "building 14 service binaries into ${BIN_DIR}"
+log "building 16 service binaries into ${BIN_DIR}"
 
 build_one() {
   local name="$1" repo="$2" cmd_pkg="$3"
@@ -54,6 +54,14 @@ build_one inbound-receiving "${INBOUND_REPO}" api
 # local-copy consumers and the outbox relay; migrations embedded). It has no
 # cmd/mcp yet, so no *-mcp binary below.
 build_one slotting-optimization "${SLOTTING_REPO}" api
+# returns-processing: cmd/api is its only binary the harness runs (HTTP API,
+# the three local-copy consumers and the outbox relay; migrations embedded).
+# Its cmd/mcp (read-only ops surface) is not started by this harness.
+build_one returns "${RETURNS_REPO}" api
+# exception-management: cmd/api is its only binary the harness runs (HTTP
+# API, the six fact consumers, the SLA sweep and the outbox relay;
+# migrations embedded). Its cmd/mcp is not started by this harness.
+build_one exceptions "${EXCEPTIONS_REPO}" api
 # network-inventory-planning: cmd/network-inventory-planning is its only
 # binary (HTTP :8080 + five Kafka consumers + the outbox relay, all in one
 # process, env-gated).
@@ -75,5 +83,5 @@ build_one order-mcp        "${ORDER_REPO}"        mcp
 log "building warehouse-ops-agent (cmd/agent — the agentic analyze/act layer, T5)"
 build_one ops-agent "${OPS_AGENT_REPO}" agent
 
-log "all 22 binaries built"
+log "all 24 binaries built"
 ls -la "${BIN_DIR}"

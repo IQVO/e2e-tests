@@ -49,6 +49,18 @@ var topics = []string{
 	// Approved / Rejected, key = plan id): published through its outbox relay
 	// and scanned by slotting_optimization.feature.
 	"warehouse.slotting-optimization.events",
+	// returns-processing's integration topic: ReturnAuthorized /
+	// ReturnLineStaged etc. leave through its outbox relay (which also
+	// publishes the analytics topic below), inventory-storage's RETURN_LINE
+	// consumer subscribes to the events topic (a group on a missing topic is
+	// never assigned a partition), and returns_exceptions.feature scans it.
+	"warehouse.returns-processing.events",
+	"warehouse.returns-processing.analytics",
+	// exception-management's integration topic: ExceptionOpened /
+	// ExceptionAutoResolved etc. through its outbox relay (plus its
+	// analytics topic), and returns_exceptions.feature scans it.
+	"warehouse.exception-management.events",
+	"warehouse.exception-management.analytics",
 	"warehouse.inventory.events",
 	"warehouse.inventory.analytics",
 	"warehouse.work-planning.events",
