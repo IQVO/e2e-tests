@@ -54,8 +54,9 @@ refuse to boot with it.
 
 ## What's covered
 
-13 feature files (the inter-warehouse transfer feature has two scenarios, the
-inbound-receiving and slotting-optimization ones four each):
+14 feature files (the inter-warehouse transfer feature has two scenarios,
+the inbound-receiving and slotting-optimization ones four each,
+returns/exceptions three):
 
 - **`features/slotting_optimization.feature`** (`@slotting`) — the forward-slot
   planner, against slotting-optimization, facility-layout and product-master
@@ -177,6 +178,22 @@ inbound-receiving and slotting-optimization ones four each):
   execution's CPT-miss sweep publishing `TaskCPTMissed`, and
   order-management's `RepromiseConsumer` (ADR 0018) re-running its promise
   policy and publishing `OrderRepromised` — with zero manual intervention.
+- **`features/returns_exceptions.feature`** (`@returns-exceptions`) — the
+  two returns/exceptions contexts end to end against returns-processing,
+  exception-management and inventory-storage: (1) a graded-A return line
+  restocks — the injected `OrderAllocated`/`PackageManifested` facts make the
+  line authorizable, the RMA authorization keeps refusing (404/409) until
+  BOTH local copies catch up, the grade-A inspection decides RESTOCK and
+  publishes `DispositionDecided` + `ReturnLineStaged`, which
+  inventory-storage's RETURN_LINE consumer books as staged stock (exactly one
+  `StockReceived`, usable 0) until a stow makes the units usable; (2) a
+  re-fired `TaskCPTMissed` (two different CloudEvents ids) folds into ONE
+  case at occurrence 2 and walks the operator lifecycle
+  (triage → assign → resolve, `ExceptionResolved` on the topic, second
+  resolve 409); (3) a correlated `OrderRepromised` (same order, injected)
+  auto-resolves the case with the full derived rule id
+  `...TaskCPTMissed->...OrderRepromised`, and a second repromise leaves
+  exactly one `ExceptionAutoResolved` on the topic.
 - **`features/soak_backlog_ramp.feature`** (`@soak`, excluded from the
   default run) — ramps injected backlog into both the PICK and PACK
   process paths over a sustained, configurable duration while a pool of
@@ -202,6 +219,7 @@ bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)
 GODOG_TAGS=@product-master bash scripts/04-run-tests.sh  # just the product-master scenario
 GODOG_TAGS=@inbound-receiving bash scripts/04-run-tests.sh  # just the inbound-receiving scenarios
 GODOG_TAGS=@slotting bash scripts/04-run-tests.sh  # just the slotting-optimization scenarios
+GODOG_TAGS=@returns-exceptions bash scripts/04-run-tests.sh  # just the returns/exceptions scenarios
 bash scripts/06-run-soak.sh      # OPTIONAL: the long-running @soak backlog-ramp run (see below)
 bash scripts/05-down-services.sh # stops only what this harness started
 ```
@@ -412,7 +430,7 @@ of every change that touches it, the same pattern `e2s-tests`' equivalent
 harness follows.
 
 `.github/workflows/e2e-behaviour.yml` (weekly + manual dispatch) is the
-exception, with four jobs. The first checks out the 7 core repos
+exception, with five jobs. The first checks out the 7 core repos
 (facility-layout, product-master, inventory-storage, wes-work-planning,
 fulfillment-execution, workforce-management, order-management), starts them
 against a throwaway Kafka and per-service Postgres, and runs
@@ -423,4 +441,8 @@ only product-master, inbound-receiving and inventory-storage (with its
 `INBOUND_RECEIPT_CONSUMER_GROUP`) and four pre-created topics. The fourth
 (`@slotting`) needs only facility-layout, product-master and
 slotting-optimization (all three consumers in `kafka` mode) and four
-pre-created topics.
+pre-created topics. The fifth (`@returns-exceptions`) needs only
+returns-processing, exception-management and inventory-storage (with its
+`RETURN_LINE_CONSUMER_GROUP`); the feature injects the upstream facts
+itself, so no order-management, fulfillment-execution or product-master
+checkout is needed.
