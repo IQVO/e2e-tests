@@ -141,6 +141,14 @@ type world struct {
 	// slot is the slotting-optimization correlation (plans, injected demand
 	// and placement guards by run-scoped site). See slotting_test.go.
 	slot *slottingState
+
+	// ret is the returns-processing correlation (RMA, receipt, disposition
+	// of scenario 1). See returns_test.go.
+	ret *returnsState
+
+	// exc is the exception-management correlation (the case under test in
+	// scenarios 2 and 3). See returns_test.go.
+	exc *exceptionsState
 }
 
 func newWorld() *world {
@@ -1844,6 +1852,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
+	registerReturnsSteps(sc, w)
 	registerSlottingSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
