@@ -54,6 +54,18 @@
 #                           scenario plans its own run-scoped site. Started
 #                           after facility-layout and product-master so the
 #                           topics it reads exist.
+#   3d. returns-processing — the WMS-tier returns context (RMA
+#                           authorization against an allocated AND manifested
+#                           order line, receipt, inspection, disposition;
+#                           its ADR 0001-0003). Three local-copy consumers
+#                           (product classification, order lines, package
+#                           manifests), each with its own per-run group;
+#                           publishes warehouse.returns-processing.events,
+#                           whose ReturnLineStaged inventory-storage (below)
+#                           books as staged stock (inventory-storage ADR
+#                           0044). Started BEFORE inventory-storage so the
+#                           topic exists when its RETURN_LINE consumer
+#                           subscribes.
 #   4. inventory-storage — maintains a LOCAL CACHE of facility-layout's
 #                           location classifications, fed by that topic
 #                           (LOCATION_LOOKUP_MODE=kafka, inventory-storage
@@ -68,6 +80,12 @@
 #                           consumes inbound-receiving's ReceiptLineReceived
 #                           (INBOUND_RECEIPT_CONSUMER_GROUP, ADR 0037): Good
 #                           lines become staged stock, Damaged ones do not.
+#                           Its ReturnLineStaged consumer of returns-
+#                           processing (RETURN_LINE_CONSUMER_GROUP, ADR 0044)
+#                           books RESTOCK lines the same way, and its
+#                           TaskCompleted consumer (TASK_COMPLETED_
+#                           CONSUMER_GROUP, ADR 0035) confirms picks; both
+#                           groups are mandatory env on the service.
 #   5. wes-work-planning — reads a local copy of product-master's
 #                           classifications (PRODUCT_CLASSIFICATION_MODE=kafka
 #                           + PRODUCT_CLASSIFICATION_CONSUMER_GROUP; "http"
@@ -115,6 +133,17 @@
 #                           publishes TransferAllocationRequested /
 #                           WorkDemandReleased. inventory-storage (3) now
 #                           also runs its transfer allocation consumer.
+#  12. exception-management — the WES-tier exception context (its ADR
+#                           0001/0002): one case per consumed exception
+#                           fact, the operator lifecycle (triage, assign,
+#                           resolve) and declarative auto-resolve
+#                           (ExceptionPolicyDeclared rules). Six fact
+#                           consumers (fulfillment, work-planning, network-
+#                           fulfillment, order correlation, inventory,
+#                           returns), each with its own per-run group; it
+#                           calls no sibling over REST. Started LAST: it
+#                           watches facts from nearly every other context,
+#                           and every topic it reads exists by then.
 #
 # All eight publisher-capable services run with EVENT_PUBLISHER=kafka
 # against the shared broker (labor-performance is the exception -- it has
@@ -213,6 +242,26 @@ start_service slotting-optimization "${BIN_DIR}/slotting-optimization" \
   LOG_LEVEL=info
 wait_for_http "${SLOTTING_BASE_URL}/healthz"
 
+log "starting returns-processing on ${RETURNS_BASE_URL}"
+# returns-processing: cmd/api, migrations embedded (no MIGRATIONS_PATH).
+# Its three local-copy consumer groups are mandatory env (no defaults), all
+# per-run. OUTBOX_RELAY_INTERVAL keeps DispositionDecided /
+# ReturnLineStaged prompt; SHUTDOWN_DRAIN_DELAY=0 as for product-master
+# above. Started BEFORE inventory-storage so warehouse.returns-processing.
+# events exists when inventory-storage's RETURN_LINE consumer subscribes.
+start_service returns "${BIN_DIR}/returns" \
+  HTTP_ADDR=":${RETURNS_HTTP_PORT}" \
+  DATABASE_URL="${RETURNS_DB_URL}" \
+  PGPASSWORD="returns_processing" \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${RETURNS_PRODUCT_CLASSIFICATION_CONSUMER_GROUP}" \
+  ORDER_LINES_CONSUMER_GROUP="${RETURNS_ORDER_LINES_CONSUMER_GROUP}" \
+  MANIFEST_CONSUMER_GROUP="${RETURNS_MANIFEST_CONSUMER_GROUP}" \
+  OUTBOX_RELAY_INTERVAL="500ms" \
+  SHUTDOWN_DRAIN_DELAY=0 \
+  LOG_LEVEL=info
+wait_for_http "${RETURNS_BASE_URL}/healthz"
+
 log "starting inventory-storage on ${INVENTORY_BASE_URL}"
 start_service inventory "${BIN_DIR}/inventory" \
   HTTP_ADDR=":${INVENTORY_HTTP_PORT}" \
@@ -225,6 +274,8 @@ start_service inventory "${BIN_DIR}/inventory" \
   FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" \
   PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" \
   INBOUND_RECEIPT_CONSUMER_GROUP="${INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP}" \
+  RETURN_LINE_CONSUMER_GROUP="${INVENTORY_RETURN_LINE_CONSUMER_GROUP}" \
+  TASK_COMPLETED_CONSUMER_GROUP="${INVENTORY_TASK_COMPLETED_CONSUMER_GROUP}" \
   TRANSFER_ALLOCATION_CONSUMER_MODE=kafka \
   TRANSFER_ALLOCATION_CONSUMER_GROUP="${INVENTORY_TRANSFER_CONSUMER_GROUP}" \
   LOG_LEVEL=info
@@ -395,12 +446,37 @@ start_service nip "${BIN_DIR}/nip" \
   LOG_LEVEL=info
 wait_for_http "${NIP_BASE_URL}/healthz"
 
-log "all 14 services up and healthy"
+log "starting exception-management on ${EXCEPTIONS_BASE_URL}"
+# exception-management: cmd/api, migrations embedded (no MIGRATIONS_PATH).
+# Its six fact-consumer group envs are mandatory (no defaults), all per-run
+# so this harness process never joins the live cluster's groups. The outbox
+# relay publishes ExceptionOpened/Triaged/Assigned/Resolved/AutoResolved and
+# the policy declarations; 500ms keeps them inside the scenarios' windows.
+# SLA_SWEEP_INTERVAL stays at its 1m default (escalation is not under test
+# here). Started LAST: every topic its six consumers read exists by now.
+start_service exceptions "${BIN_DIR}/exceptions" \
+  HTTP_ADDR=":${EXCEPTIONS_HTTP_PORT}" \
+  DATABASE_URL="${EXCEPTIONS_DB_URL}" \
+  PGPASSWORD="exception_management" \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  FULFILLMENT_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_FULFILLMENT_CONSUMER_GROUP}" \
+  WORK_PLANNING_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_WORK_PLANNING_CONSUMER_GROUP}" \
+  NETWORK_FULFILLMENT_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_NETWORK_FULFILLMENT_CONSUMER_GROUP}" \
+  ORDER_CORRELATION_CONSUMER_GROUP="${EXCEPTIONS_ORDER_CORRELATION_CONSUMER_GROUP}" \
+  INVENTORY_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_INVENTORY_CONSUMER_GROUP}" \
+  RETURNS_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_RETURNS_CONSUMER_GROUP}" \
+  OUTBOX_RELAY_INTERVAL="500ms" \
+  SHUTDOWN_DRAIN_DELAY=0 \
+  LOG_LEVEL=info
+wait_for_http "${EXCEPTIONS_BASE_URL}/healthz"
+
+log "all 16 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
 printf '  %-24s %s\n' inbound-receiving      "${INBOUND_BASE_URL}"
 printf '  %-24s %s\n' slotting-optimization   "${SLOTTING_BASE_URL}"
+printf '  %-24s %s\n' returns-processing     "${RETURNS_BASE_URL}"
 printf '  %-24s %s\n' inventory-storage      "${INVENTORY_BASE_URL}"
 printf '  %-24s %s\n' wes-work-planning      "${WES_BASE_URL}"
 printf '  %-24s %s\n' fulfillment-execution  "${FULFILLMENT_BASE_URL}"
@@ -410,6 +486,7 @@ printf '  %-24s %s\n' order-management       "${ORDER_BASE_URL}"
 printf '  %-24s %s\n' network-fulfillment    "${NETWORK_BASE_URL}"
 printf '  %-24s %s\n' warehouse-planning     "${WAREHOUSE_PLANNING_BASE_URL}"
 printf '  %-24s %s\n' network-inventory-planning "${NIP_BASE_URL}"
+printf '  %-24s %s\n' exception-management   "${EXCEPTIONS_BASE_URL}"
 
 # --- MCP servers (cmd/mcp), one per context, pointed at the SAME
 # Postgres each HTTP service above just started against — so a fact an

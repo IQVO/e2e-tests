@@ -302,6 +302,48 @@ services:
       timeout: 3s
       retries: 20
 
+  # returns-processing (returns: RMA authorization, receipt, inspection,
+  # disposition). Own user/db name "returns_processing" on host port 5455
+  # (it ships no compose file). Migrations are embedded in its binary.
+  postgres-returns:
+    image: postgres:16
+    container_name: e2e-postgres-returns
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: returns_processing
+      POSTGRES_PASSWORD: returns_processing
+      POSTGRES_DB: returns_processing
+    ports:
+      - "5455:5432"
+    volumes:
+      - e2e_returns_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U returns_processing -d returns_processing"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # exception-management (exception cases from consumed facts). Own user/db
+  # name "exception_management" on host port 5456. Migrations are embedded
+  # in its binary.
+  postgres-exceptions:
+    image: postgres:16
+    container_name: e2e-postgres-exceptions
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: exception_management
+      POSTGRES_PASSWORD: exception_management
+      POSTGRES_DB: exception_management
+    ports:
+      - "5456:5432"
+    volumes:
+      - e2e_exceptions_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exception_management -d exception_management"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -317,3 +359,5 @@ volumes:
   e2e_planning_pg_data:
   e2e_inbound_receiving_pg_data:
   e2e_slotting_pg_data:
+  e2e_returns_pg_data:
+  e2e_exceptions_pg_data:

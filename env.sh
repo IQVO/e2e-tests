@@ -82,6 +82,21 @@ INBOUND_REPO="${REPOS_ROOT}/inbound-receiving"
 # product and layout copies. Its demand copy is fed by SiteSkuDemandChanged
 # facts the scenarios publish themselves (see features/slotting_optimization.feature).
 SLOTTING_REPO="${REPOS_ROOT}/slotting-optimization"
+# returns-processing (WMS-tier returns context: RMA authorization, receipt,
+# inspection, disposition; its ADR 0001-0004). Consumes product-master's
+# ProductClassified, order-management's OrderAllocated and
+# fulfillment-execution's PackageManifested into local copies; publishes
+# warehouse.returns-processing.events, whose ReturnLineStaged
+# inventory-storage books as staged stock (its ADR 0044). Started before
+# inventory-storage so the topic exists when its RETURN_LINE consumer
+# subscribes.
+RETURNS_REPO="${REPOS_ROOT}/returns-processing"
+# exception-management (WES-tier exception context: one case per consumed
+# exception fact, operator lifecycle, declarative auto-resolve; its ADR
+# 0001/0002). Consumes the six pinned source topics; publishes
+# warehouse.exception-management.events. Started LAST: it watches facts from
+# nearly every other context.
+EXCEPTIONS_REPO="${REPOS_ROOT}/exception-management"
 # network-inventory-planning (NIP): plans and drives the inter-warehouse
 # transfer saga (approve -> allocate at origin -> pick -> dispatch ->
 # destination receipt). Started AFTER every service it exchanges events
@@ -132,6 +147,10 @@ WAREHOUSE_PLANNING_HTTP_PORT=8100
 INBOUND_HTTP_PORT=8108
 # slotting-optimization -- the next free slot after inbound-receiving's :8108.
 SLOTTING_HTTP_PORT=8109
+# returns-processing / exception-management -- the next free slots after
+# slotting-optimization's :8109.
+RETURNS_HTTP_PORT=8110
+EXCEPTIONS_HTTP_PORT=8111
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -147,6 +166,8 @@ NIP_BASE_URL="http://localhost:${NIP_HTTP_PORT}"
 WAREHOUSE_PLANNING_BASE_URL="http://localhost:${WAREHOUSE_PLANNING_HTTP_PORT}"
 INBOUND_BASE_URL="http://localhost:${INBOUND_HTTP_PORT}"
 SLOTTING_BASE_URL="http://localhost:${SLOTTING_HTTP_PORT}"
+RETURNS_BASE_URL="http://localhost:${RETURNS_HTTP_PORT}"
+EXCEPTIONS_BASE_URL="http://localhost:${EXCEPTIONS_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -283,6 +304,14 @@ INBOUND_DB_URL="postgres://inbound_receiving@localhost:5453/inbound_receiving?ss
 # It ships no docker-compose of its own; user/db "slotting" follow the
 # fleet's <context> naming. Migrations are embedded.
 SLOTTING_DB_URL="postgres://slotting@localhost:5454/slotting?sslmode=disable"
+# returns-processing -- next free slot after slotting's :5454. It ships no
+# docker-compose of its own; user/db "returns_processing" follow the fleet's
+# <context> naming. Migrations are embedded in its binary.
+RETURNS_DB_URL="postgres://returns_processing@localhost:5455/returns_processing?sslmode=disable"
+# exception-management -- next free slot after returns-processing's :5455.
+# Same shape: no compose of its own, user/db "exception_management",
+# migrations embedded.
+EXCEPTIONS_DB_URL="postgres://exception_management@localhost:5456/exception_management?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
@@ -343,6 +372,29 @@ ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E
 # live cluster's: a first start under a new group reads from the first offset.
 INBOUND_PRODUCT_CONSUMER_GROUP="inbound-receiving-product-${E2E_CONSUMER_GROUP_SUFFIX}"
 INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP="inventory-storage-inbound-receipt-${E2E_CONSUMER_GROUP_SUFFIX}"
+# inventory-storage's two always-on WMS-tier handover consumers, both
+# mandatory env on that service (no default, boot error when unset) and both
+# per-run groups here so a harness process never joins the live cluster's:
+# ReturnLineStaged of returns-processing (its ADR 0044) and fulfillment-
+# execution's TaskCompleted confirm-pick fact (its ADR 0035).
+INVENTORY_RETURN_LINE_CONSUMER_GROUP="inventory-storage-return-line-${E2E_CONSUMER_GROUP_SUFFIX}"
+INVENTORY_TASK_COMPLETED_CONSUMER_GROUP="inventory-storage-task-completed-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# returns-processing's three local-copy consumers (its ADR 0003; each group
+# env is mandatory on the service, no default), all per-run.
+RETURNS_PRODUCT_CLASSIFICATION_CONSUMER_GROUP="returns-processing-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+RETURNS_ORDER_LINES_CONSUMER_GROUP="returns-processing-order-lines-${E2E_CONSUMER_GROUP_SUFFIX}"
+RETURNS_MANIFEST_CONSUMER_GROUP="returns-processing-manifests-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# exception-management's six fact consumers (the pinned source topics of its
+# .claude/rules/integration-events.md; each group env is mandatory on the
+# service, no default), all per-run.
+EXCEPTIONS_FULFILLMENT_CONSUMER_GROUP="exception-management-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_WORK_PLANNING_CONSUMER_GROUP="exception-management-work-planning-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_NETWORK_FULFILLMENT_CONSUMER_GROUP="exception-management-network-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_ORDER_CORRELATION_CONSUMER_GROUP="exception-management-order-correlation-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_INVENTORY_CONSUMER_GROUP="exception-management-inventory-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_RETURNS_CONSUMER_GROUP="exception-management-returns-${E2E_CONSUMER_GROUP_SUFFIX}"
 
 # slotting-optimization's three local-copy consumers (DEMAND_MODE,
 # PRODUCT_MODE, LAYOUT_MODE=kafka; each needs its group and has no default),
