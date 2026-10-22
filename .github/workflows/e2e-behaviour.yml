@@ -1114,15 +1114,14 @@ jobs:
   # consumer as the staged-stock handover: features/returns_exceptions.feature.
   # A separate job so a failure here never masks the flagship @bootstrap
   # signal, and it needs only the three services the feature talks to. No
-  # order-management, fulfillment-execution, product-master or
-  # facility-layout: the feature injects their facts (OrderAllocated,
-  # PackageManifested, TaskCPTMissed, OrderRepromised) itself as exact
-  # CloudEvents on the real topics -- the same idiom
-  # inter_warehouse_transfer.feature uses -- the SKU is never classified (the
-  # policy's per-grade default table decides), and inventory-storage keeps
-  # the permissive location lookup (the feature stows an unclassified SKU),
-  # exactly like the inbound-receiving job. Like the other scenario jobs it
-  # has no harness:red issue steps of its own.
+  # order-management, fulfillment-execution or product-master: the feature
+  # injects their facts (OrderAllocated, PackageManifested, TaskCPTMissed,
+  # OrderRepromised) itself as exact CloudEvents on the real topics -- the
+  # same idiom inter_warehouse_transfer.feature uses -- and the SKU is never
+  # classified (the policy's per-grade default table decides, and
+  # inventory-storage's placement check fails OPEN for an unclassified SKU,
+  # ADR 0009). Like the other scenario jobs it has no harness:red issue
+  # steps of its own.
   returns-exceptions-scenario:
     runs-on: ubuntu-latest
     permissions:
@@ -1220,6 +1219,14 @@ jobs:
             warehouse.returns-processing.analytics
             warehouse.exception-management.events
             warehouse.exception-management.analytics
+            # inventory-storage's other always-on consumers subscribe to
+            # these (its five consumer groups are mandatory env on current
+            # develop, and a group on a missing topic never gets an
+            # assignment): the facility-events location cache, the inbound
+            # receipt handover and the NIP transfer allocations.
+            warehouse.facility.events
+            warehouse.inbound-receiving.events
+            warehouse.network-inventory-planning.events
           )
           for t in "${topics[@]}"; do
             docker exec "${kafka_container}" /opt/kafka/bin/kafka-topics.sh \
@@ -1306,14 +1313,16 @@ jobs:
           # from env.sh's run-scoped suffix. returns-processing starts before
           # inventory-storage (its topic exists before the RETURN_LINE
           # consumer subscribes); exception-management last. inventory-storage
-          # runs without LOCATION_LOOKUP_MODE (permissive, like the
-          # inbound-receiving job: the feature stows an unclassified SKU) and
-          # without its optional inbound/transfer consumers.
+          # needs all FIVE of its consumer groups and
+          # LOCATION_LOOKUP_MODE=kafka (permissive was removed on its
+          # develop); the facility-events cache starts empty and fails OPEN
+          # for an unclassified SKU (ADR 0009), which is exactly what this
+          # feature stows.
           env HTTP_ADDR=":${RETURNS_HTTP_PORT}" DATABASE_URL="${RETURNS_DB_URL}" PGPASSWORD="returns_processing" KAFKA_BROKERS="${KAFKA_BROKERS}" PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${RETURNS_PRODUCT_CLASSIFICATION_CONSUMER_GROUP}" ORDER_LINES_CONSUMER_GROUP="${RETURNS_ORDER_LINES_CONSUMER_GROUP}" MANIFEST_CONSUMER_GROUP="${RETURNS_MANIFEST_CONSUMER_GROUP}" OUTBOX_RELAY_INTERVAL=500ms SHUTDOWN_DRAIN_DELAY=0 LOG_LEVEL=info \
             "${BIN_DIR}/returns" > /tmp/returns.log 2>&1 &
           wait_http "${RETURNS_BASE_URL}/healthz"
 
-          env HTTP_ADDR=":${INVENTORY_HTTP_PORT}" DATABASE_URL="${INVENTORY_DB_URL}" PGPASSWORD="inventory" MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" RETURN_LINE_CONSUMER_GROUP="${INVENTORY_RETURN_LINE_CONSUMER_GROUP}" TASK_COMPLETED_CONSUMER_GROUP="${INVENTORY_TASK_COMPLETED_CONSUMER_GROUP}" LOG_LEVEL=info \
+          env HTTP_ADDR=":${INVENTORY_HTTP_PORT}" DATABASE_URL="${INVENTORY_DB_URL}" PGPASSWORD="inventory" MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" EVENT_PUBLISHER=kafka KAFKA_BROKERS="${KAFKA_BROKERS}" LOCATION_LOOKUP_MODE=kafka PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" INBOUND_RECEIPT_CONSUMER_GROUP="${INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP}" RETURN_LINE_CONSUMER_GROUP="${INVENTORY_RETURN_LINE_CONSUMER_GROUP}" TASK_COMPLETED_CONSUMER_GROUP="${INVENTORY_TASK_COMPLETED_CONSUMER_GROUP}" TRANSFER_ALLOCATION_CONSUMER_GROUP="${INVENTORY_TRANSFER_CONSUMER_GROUP}" LOG_LEVEL=info \
             "${BIN_DIR}/inventory" > /tmp/inventory.log 2>&1 &
           wait_http "${INVENTORY_BASE_URL}/healthz"
 

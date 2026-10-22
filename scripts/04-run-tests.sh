@@ -23,6 +23,10 @@ export SLOTTING_BASE_URL
 # broker it publishes injected facts to and reads published facts from, and
 # the saga's path ids (so the scenario and 03-up-services.sh cannot drift).
 export NIP_BASE_URL WAREHOUSE_PLANNING_BASE_URL NIP_DB_URL KAFKA_BROKERS NIP_TRANSFER_PICK_PATH_ID NIP_TRANSFER_DISPATCH_PATH_ID
+# returns_exceptions.feature: the two new contexts' URLs (their defaults in
+# returns_test.go match env.sh, exported so the shell and the Go binary can
+# never drift).
+export RETURNS_BASE_URL EXCEPTIONS_BASE_URL
 
 # The *_DB_URL values above deliberately carry NO password in the URL
 # itself (see env.sh's own comment) -- e2e_test.go's dbOpen helper fills

@@ -182,10 +182,12 @@ func (w *world) doJSON(method, url string, body any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if method == http.MethodPost {
+	if method == http.MethodPost || method == http.MethodPut {
 		// Creating POSTs require an Idempotency-Key (facility-layout ADR-0019 and the fleet
-		// idempotency middleware). This client never re-sends a request, so a fresh key per
-		// call is the honest equivalent of a device minting one per logical action.
+		// idempotency middleware), and the two returns/exceptions contexts demand it on
+		// their policy-declaring PUTs too. This client never re-sends a request, so a fresh
+		// key per call is the honest equivalent of a device minting one per logical action;
+		// services whose PUTs are not creating simply ignore the header.
 		req.Header.Set("Idempotency-Key", newIdempotencyKey())
 	}
 	resp, err := w.client.Do(req)

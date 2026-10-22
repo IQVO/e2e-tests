@@ -454,11 +454,11 @@ func (w *world) returnsPublishedDispositionDecided() error {
 	if v, ok := intOf(p["policy_version"]); !ok || v != st.policyVersion {
 		return fmt.Errorf("DispositionDecided policy_version = %v, want %d (payload: %v)", p["policy_version"], st.policyVersion, p)
 	}
-	if _, present := p["supersedes"]; present {
-		return fmt.Errorf("DispositionDecided supersedes must be absent on a policy decision (payload: %v)", p)
+	if v, present := p["supersedes"]; present && v != nil {
+		return fmt.Errorf("DispositionDecided supersedes must be null on a policy decision (payload: %v)", p)
 	}
-	if _, present := p["reason"]; present {
-		return fmt.Errorf("DispositionDecided reason must be absent on a policy decision (payload: %v)", p)
+	if v, present := p["reason"]; present && v != nil {
+		return fmt.Errorf("DispositionDecided reason must be null on a policy decision (payload: %v)", p)
 	}
 	return nil
 }
@@ -503,20 +503,27 @@ func (w *world) returnsPublishedReturnLineStaged(site string) error {
 // Versions are append-only and each PUT is the next version, so a re-run
 // declares a fresh version that governs the cases it then opens.
 func (w *world) declareExceptionPolicy(severity, queue string, slaMinutes int) error {
-	return w.declareExceptionPolicyAutoResolve(severity, queue, slaMinutes, "", 0)
-}
-
-// declareExceptionPolicyAutoResolve is declareExceptionPolicy with the
-// auto-resolve rule (close on OrderRepromised within N minutes).
-func (w *world) declareExceptionPolicyAutoResolve(severity, queue string, slaMinutes int, onType string, withinMinutes int) error {
 	body := map[string]any{
 		"severity":   severity,
 		"queue":      queue,
 		"slaMinutes": slaMinutes,
 	}
-	if onType != "" {
-		body["autoResolve"] = map[string]any{"onType": onType, "withinMinutes": withinMinutes}
-	}
+	return w.declareExceptionPolicyBody(body)
+}
+
+// declareExceptionPolicyAutoResolve is declareExceptionPolicy with the
+// auto-resolve rule (close on OrderRepromised within N minutes).
+func (w *world) declareExceptionPolicyAutoResolve(severity, queue string, slaMinutes, withinMinutes int) error {
+	return w.declareExceptionPolicyBody(map[string]any{
+		"severity":    severity,
+		"queue":       queue,
+		"slaMinutes":  slaMinutes,
+		"autoResolve": map[string]any{"onType": typeOrderRepromisedFull, "withinMinutes": withinMinutes},
+	})
+}
+
+// declareExceptionPolicyBody PUTs the policy body and checks the 201.
+func (w *world) declareExceptionPolicyBody(body map[string]any) error {
 	if err := w.expectOK2xx(w.doJSON(http.MethodPut,
 		fmt.Sprintf("%s/exception-policies/%s", exceptionsBaseURL, typeTaskCPTMissedFull), body)); err != nil {
 		return err
