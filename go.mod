@@ -1,6 +1,6 @@
 module github.com/claudioed/warehouse-e2e
 
-go 1.26.6
+go 1.26.10
 
 require (
 	github.com/cloudevents/sdk-go/v2 v2.16.2
