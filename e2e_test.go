@@ -140,6 +140,9 @@ type world struct {
 	// mc is the mastercase correlation (GTINs, SSCCs, bins), see mastercase_test.go.
 	mc *mastercaseState
 
+	// si is the seller-inbound cross-org correlation. See seller_inbound_test.go.
+	si *siState
+
 	// slot is the slotting-optimization correlation (plans, injected demand
 	// and placement guards by run-scoped site). See slotting_test.go.
 	slot *slottingState
@@ -1857,6 +1860,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
 	registerMastercaseSteps(sc, w)
+	registerSellerInboundSteps(sc, w)
 	registerReturnsSteps(sc, w)
 	registerSlottingSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {

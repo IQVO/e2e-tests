@@ -294,6 +294,38 @@ Pin `E2E_CONSUMER_GROUP_SUFFIX` (e.g. `warehouse-day`) before `make up` when
 running against a long-lived shared broker, so services resume their
 committed offsets across restarts instead of replaying the topic history.
 
+## Seller inbound, cross-org (`@seller-inbound`, live cluster)
+
+`features/seller_inbound.feature` + `seller_inbound_test.go`: a seller plans and ships
+SSCC-labelled mastercases to a vendor node, the vendor polls them and reports a short and a missing
+carton, the seller sees `CLOSED_WITH_DISCREPANCY` and node-performance exposes the inbound metrics.
+It runs against the **kind cluster through Kong** (not the local harness) and is self-contained: a
+fresh vendor, an `INBOUND_CROSS_DOCK` node with inbound limits, a catalogue item (each GTIN + CASE of
+12) and a seller per run, every GTIN/SSCC valid and unique. The fleet is not part of it: its ACL
+(network-fulfillment) runs in stub mode there, so the test plays the fleet's role through the Vendor API
+(`POST /vendor/inbound-receipts`).
+
+```sh
+P=http://localhost:8000/api
+SELLER_INBOUND_BASE_URL=$P/seller-inbound VENDOR_CONNECTIVITY_BASE_URL=$P/vendor-connectivity \
+NODE_TOPOLOGY_BASE_URL=$P/node-topology OFFER_AVAILABILITY_BASE_URL=$P/offer-availability \
+NODE_PERFORMANCE_BASE_URL=$P/node-performance GODOG_TAGS=@seller-inbound \
+  go test -v -run TestMain -timeout 15m .
+```
+
+| Env var | Default | Context |
+|---|---|---|
+| `SELLER_INBOUND_BASE_URL` | `http://localhost:8000/api/seller-inbound` | sellers, plans, shipments, cartons, labels |
+| `VENDOR_CONNECTIVITY_BASE_URL` | `http://localhost:8000/api/vendor-connectivity` | vendors, nodes, inbound poll and receipts |
+| `NODE_TOPOLOGY_BASE_URL` | `http://localhost:8000/api/node-topology` | node profile with `inbound` limits, activation |
+| `OFFER_AVAILABILITY_BASE_URL` | `http://localhost:8000/api/offer-availability` | catalogue item, pack levels, inventory feed |
+| `NODE_PERFORMANCE_BASE_URL` | `http://localhost:8000/api/node-performance` | `GET /scorecards/{nodeId}` |
+
+Tags: `@e2e @seller-inbound`. Every cross-context hop is Kafka, so the steps poll (up to 90 s) through real
+behaviour (plan accepted, first carton accepted, poll returns the shipment); only the "not yet learned"
+refusals are awaited, any other refusal fails at once. Requires the Kafka topic
+`retailnetwork.seller-inbound.events` to exist before vendor-connectivity starts (see the PR notes).
+
 ## Real product catalogue (`cmd/seed-products`)
 
 Registers **at least 10,000 real products** in product-master through its
