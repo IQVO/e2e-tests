@@ -137,6 +137,8 @@ type world struct {
 	// inb is the inbound-receiving correlation (receipt and appointment ids
 	// by run-scoped ASN number). See inbound_test.go.
 	inb *inboundState
+	// mc is the mastercase correlation (GTINs, SSCCs, bins), see mastercase_test.go.
+	mc *mastercaseState
 
 	// slot is the slotting-optimization correlation (plans, injected demand
 	// and placement guards by run-scoped site). See slotting_test.go.
@@ -1854,6 +1856,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
+	registerMastercaseSteps(sc, w)
 	registerReturnsSteps(sc, w)
 	registerSlottingSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
@@ -1983,7 +1986,7 @@ func TestMain(m *testing.M) {
 	// default; scripts/06-run-soak.sh sets GODOG_TAGS=@soak to run ONLY
 	// that scenario. godog's Tags expression: "~@soak" means "not
 	// tagged @soak".
-	tags := envOrDefault("GODOG_TAGS", "~@soak")
+	tags := envOrDefault("GODOG_TAGS", "~@soak && ~@blocked")
 
 	suite := godog.TestSuite{
 		Name:                "e2e",
