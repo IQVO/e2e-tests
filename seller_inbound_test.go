@@ -261,7 +261,7 @@ func (w *world) catalogItemWithCase(perCase int) error {
 		return fmt.Errorf("declare EACH: %w", err)
 	}
 	if err := w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/catalog-items/%s/packaging/CASE", offerAvailabilityBaseURL, s.itemID),
-		map[string]any{"gtin": s.caseGtin, "childGtin": s.eachGtin, "unitsPerPack": perCase, "dimsMm": map[string]any{"l": 400, "w": 300, "h": 200}, "grossWeightG": 5200})); err != nil {
+		map[string]any{"gtin": s.caseGtin, "childGtin": s.eachGtin, "unitsPerPack": perCase, "dimsMm": map[string]any{"lengthMm": 400, "widthMm": 300, "heightMm": 200}, "grossWeightG": 5200})); err != nil {
 		return fmt.Errorf("declare CASE: %w", err)
 	}
 	return nil
