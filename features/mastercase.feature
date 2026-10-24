@@ -46,16 +46,10 @@ Feature: Mastercase - sealed SSCC cartons keep their eaches from receipt to stoc
     # Received but not yet stowed: staged stock is not usable.
     And the usable inventory of SKU "SKU-MC-RCV-<run>" in inventory-storage is 0 eaches, 0 loose and 0 reservable cases
 
-  # BLOCKED (product gap, reproduced live): every stow of a container answers
-  #   409 bin-handling-unit-mismatch "bin handling unit does not accept this stock"
-  # because inventory-storage (ADR 0045 s.4, fail closed) needs the bin's handling
-  # unit (CASE|PALLET) from facility-layout's LocationSlotRegistered event, and
-  # facility-layout develop does not publish `handlingUnit` yet (no field in its
-  # model, API or events). Until it does, no seeded bin can take a sealed case,
-  # so stow -> break -> reserve cannot be exercised end to end. Remove @blocked
-  # when facility-layout publishes the handling unit; the steps are written to
-  # inventory-storage's published openapi and have NOT been run past the stow.
-  @e2e @mastercase @blocked @inbound-receiving @inventory-storage
+  # Needs facility-layout's bin handling unit (ADR 0040, PUT /locations/{code}/handling-unit)
+  # and inventory-storage's LocationSlotHandlingUnitDeclared consumer (ADR 0047): the
+  # seeded-bin step declares CASE / EACH on the two bins it picks, so no manual setup.
+  @e2e @mastercase @inbound-receiving @inventory-storage
   Scenario: Mastercase: 3 SSCC cartons = 36 eaches, conserved from receipt to pick
     Given SKU "SKU-MC-ALL-<run>" declares an EACH GTIN and a CASE pack level of 12 eaches in product-master
     And the CASE GTIN of SKU "SKU-MC-ALL-<run>" eventually resolves in product-master as an active CASE of 12 eaches

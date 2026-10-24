@@ -35,7 +35,7 @@ type mastercaseState struct {
 	caseGtin map[string]string   // sku -> CASE GTIN
 	ssccs    map[string][]string // asn -> carton SSCCs, in scan order
 	seq      int                 // next SSCC serial digit within this process
-	caseBin  string
+	caseBins []string            // one CASE bin per carton: seeded bulk bins hold ~22 eaches, so 36 eaches need 3
 	looseBin string
 	reserved map[string]int // demandRef -> eaches reserved
 	scan     map[string]map[string]any
@@ -360,7 +360,9 @@ func (w *world) seededBins(site string) error {
 	if w.last.status != http.StatusOK {
 		return fmt.Errorf("GET layout of %s = %d (%s)", site, w.last.status, w.last.body)
 	}
-	pick := func(zoneSub string) string {
+	// candidates lists every Active slot of the zones whose id contains zoneSub.
+	candidates := func(zoneSub string) []string {
+		var out []string
 		zs, _ := w.last.json()["zones"].([]any)
 		for _, z := range zs {
 			zm := z.(map[string]any)
@@ -376,30 +378,131 @@ func (w *world) seededBins(site string) error {
 						continue
 					}
 					if c, _ := sm["locationCode"].(string); c != "" {
-						return c
+						out = append(out, c)
 					}
 				}
 			}
 		}
-		return ""
+		return out
 	}
 	m := w.mcs()
-	m.caseBin, m.looseBin = pick("STOR1-BLK"), pick("STOR1-FWD")
-	if m.caseBin == "" || m.looseBin == "" {
-		return fmt.Errorf("site %s has no seeded STOR1-BLK / STOR1-FWD slot", site)
+	var err error
+	if m.caseBins, err = w.binsWithRoom(candidates("STOR1-RSV"), 12, 3); err != nil {
+		return err
+	}
+	// candidates reads w.last, which binWithRoom overwrote: re-read the layout.
+	if err := w.doJSON(http.MethodGet, facilityBaseURL+"/sites/"+site+"/layout", nil); err != nil {
+		return err
+	}
+	if m.looseBin, err = w.binWithRoom(candidates("STOR1-FWD"), 12); err != nil {
+		return err
+	}
+	// facility-layout owns the bin's handling unit (ADR 0040): declare what each
+	// seeded bin accepts, idempotently (PUT), so the scenario does not depend on
+	// manual setup. inventory-storage learns it from LocationSlotHandlingUnitDeclared
+	// (ADR 0047); the stow below therefore waits for that event to land.
+	// A bin inventory-storage has never seen is registered with a capacity (PUT is
+	// idempotent and only converges upward); known bins keep theirs.
+	for _, b := range append(append([]string{}, m.caseBins...), m.looseBin) {
+		if err := w.doJSON(http.MethodGet, inventoryBaseURL+"/bins/"+url.PathEscape(b), nil); err != nil {
+			return err
+		}
+		if w.last.status != http.StatusNotFound {
+			continue
+		}
+		if err := w.expectOK2xx(w.doJSON(http.MethodPut, inventoryBaseURL+"/bins/"+url.PathEscape(b), map[string]any{"capacity": 120})); err != nil {
+			return fmt.Errorf("register bin %s: %w", b, err)
+		}
+	}
+	units := map[string]string{m.looseBin: "EACH"}
+	for _, b := range m.caseBins {
+		units[b] = "CASE"
+	}
+	for bin, unit := range units {
+		if err := w.expectOK2xx(w.doJSON(http.MethodPut, facilityBaseURL+"/locations/"+url.PathEscape(bin)+"/handling-unit",
+			map[string]any{"handlingUnit": unit})); err != nil {
+			return fmt.Errorf("declare handling unit %s on %s: %w", unit, bin, err)
+		}
 	}
 	return nil
+}
+
+// binWithRoom returns the first bin of the candidates (preferring a completely
+// empty one) that inventory-storage reports with at least need units free, so
+// the scenario does not depend on which bins the inventory seed already filled.
+func (w *world) binWithRoom(cands []string, need int) (string, error) {
+	fallback := ""
+	for _, c := range cands {
+		if err := w.doJSON(http.MethodGet, inventoryBaseURL+"/bins/"+url.PathEscape(c), nil); err != nil {
+			continue
+		}
+		if w.last.status == http.StatusNotFound {
+			// never used: inventory-storage registers a bin on first stock, so it is empty.
+			return c, nil
+		}
+		if w.last.status != http.StatusOK {
+			continue
+		}
+		b := w.last.json()
+		avail, _ := b["available"].(float64)
+		occ, _ := b["occupied"].(float64)
+		if int(avail) < need {
+			continue
+		}
+		if occ == 0 {
+			return c, nil
+		}
+		if fallback == "" {
+			fallback = c
+		}
+	}
+	if fallback == "" {
+		return "", fmt.Errorf("no bin with %d free units among %d candidates", need, len(cands))
+	}
+	return fallback, nil
+}
+
+// binsWithRoom returns n distinct bins with at least need units free each.
+func (w *world) binsWithRoom(cands []string, need, n int) ([]string, error) {
+	var out []string
+	for len(out) < n {
+		b, err := w.binWithRoom(cands, need)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+		var rest []string
+		for _, c := range cands {
+			if c != b {
+				rest = append(rest, c)
+			}
+		}
+		cands = rest
+	}
+	return out, nil
 }
 
 func (w *world) stowContainer(idx int, asn string) error {
 	asn = w.rs(asn)
 	lpn := w.mcs().ssccs[asn][idx-1]
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/containers/%s:stow", inventoryBaseURL, lpn),
-		map[string]any{"bin": w.mcs().caseBin})); err != nil {
-		return fmt.Errorf("stow %s into %s: %w", lpn, w.mcs().caseBin, err)
+	bin := w.mcs().caseBins[(idx-1)%len(w.mcs().caseBins)]
+	// The bin's handling unit reaches inventory-storage over Kafka: until it has
+	// landed the stow fails closed with 409 bin-handling-unit-mismatch, so retry
+	// that one answer (any other failure is real and returned at once).
+	if err := eventually(func() error {
+		if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/containers/%s:stow", inventoryBaseURL, lpn),
+			map[string]any{"bin": bin}); err != nil {
+			return err
+		}
+		if w.last.status == http.StatusConflict && strings.Contains(string(w.last.body), "bin-handling-unit-mismatch") {
+			return fmt.Errorf("handling unit of %s not yet known to inventory-storage: %s", bin, w.last.body)
+		}
+		return w.expectOK2xx(nil)
+	}); err != nil {
+		return fmt.Errorf("stow %s into %s: %w", lpn, bin, err)
 	}
 	c := w.last.json()
-	if c["binId"] != w.mcs().caseBin || c["state"] != "SEALED" {
+	if c["binId"] != bin || c["state"] != "SEALED" {
 		return fmt.Errorf("stowed container = %s", w.last.body)
 	}
 	return nil
