@@ -709,6 +709,25 @@ func (w *world) sellerSeesDiscrepancy() error {
 // node-performance
 // ---------------------------------------------------------------------
 
+// feedAppliedForNode applies an empty FULL inventory feed for the node in
+// offer-availability. node-performance's inbound metrics are derived at read time
+// onto an existing scorecard and neither inbound event opens one (ADR 0009: "no
+// scorecard is created ... by one"); a scorecard exists from the node's first
+// observation, and an applied inventory feed is the cheapest REST-driven one.
+func (w *world) feedAppliedForNode() error {
+	s := w.sis()
+	if err := w.doJSON(http.MethodPost, offerAvailabilityBaseURL+"/inventory-feeds", map[string]any{
+		"feedId": "FEED-" + strings.TrimPrefix(s.nodeID, "node-"), "nodeId": s.nodeID, "fullUpdate": true,
+		"asOf": time.Now().UTC().Format(time.RFC3339), "lines": []map[string]any{},
+	}); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusCreated || w.last.json()["state"] != "APPLIED" {
+		return fmt.Errorf("apply inventory feed = %d, want 201 APPLIED (%s)", w.last.status, w.last.body)
+	}
+	return nil
+}
+
 func (w *world) nodePerformanceExposes(rateNum, rateDen int) error {
 	s := w.sis()
 	want := float64(rateNum) / float64(rateDen)
@@ -777,5 +796,6 @@ func registerSellerInboundSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^seller-inbound eventually shows the shipment CLOSED_WITH_DISCREPANCY with cartons RECEIVED, RECEIVED and MISSING$`, w.sellerSeesDiscrepancy)
 	sc.Step(`^the received shipment eventually leaves the vendor poll$`, func() error { return siEventually(w.vendorPollNoLongerHasShipment) })
 	sc.Step(`^the vendor reads the shipment by id as CLOSED_WITH_DISCREPANCY$`, func() error { return w.vendorGetsShipment("CLOSED_WITH_DISCREPANCY") })
+	sc.Step(`^an empty full inventory feed is applied for the node in offer-availability$`, w.feedAppliedForNode)
 	sc.Step(`^node-performance eventually exposes for the node an inboundAccuracyRate of (\d+)/(\d+) and an inboundTimelinessP95Minutes of at least 0$`, w.nodePerformanceExposes)
 }

@@ -73,8 +73,11 @@ Feature: Seller inbound - a seller ships mastercases to a vendor node and the ne
     And seller-inbound eventually shows the shipment CLOSED_WITH_DISCREPANCY with cartons RECEIVED, RECEIVED and MISSING
     And the received shipment eventually leaves the vendor poll
     And the vendor reads the shipment by id as CLOSED_WITH_DISCREPANCY
+    # node-performance derives the inbound metrics onto an EXISTING scorecard and neither inbound
+    # event opens one (ADR 0009), so give the node its first observation: an applied inventory feed.
+    When an empty full inventory feed is applied for the node in offer-availability
     # 2 of the 3 cartons were reported RECEIVED.
-    And node-performance eventually exposes for the node an inboundAccuracyRate of 2/3 and an inboundTimelinessP95Minutes of at least 0
+    Then node-performance eventually exposes for the node an inboundAccuracyRate of 2/3 and an inboundTimelinessP95Minutes of at least 0
 
   @e2e @seller-inbound
   Scenario: A suspended seller cannot confirm an inbound plan
