@@ -49,13 +49,15 @@ Feature: Seller inbound - a seller ships mastercases to a vendor node and the ne
     And seller-inbound eventually accepts a CASE_PACKED plan of 36 eaches of the item for the node
     And the plan is confirmed
     When a shipment is opened against the plan
-    # Carton 1 and 2 get a network-issued SSCC, carton 3 carries the seller's own valid, unique one.
-    And 3 cartons of 12 eaches are added, the last 1 with a seller-supplied SSCC
-    Then the 3 carton SSCCs are valid 18-digit GS1 numbers and unique
-    And a carton reusing the SSCC of carton 3 is refused with problem "sscc-not-unique"
-    And a carton of 12 eaches weighing 20001 g is refused with 422 problem "carton-overweight"
+    # Refusals first, while the plan still has room: a refused carton adds nothing.
+    Then a carton of 12 eaches weighing 20001 g is refused with 422 problem "carton-overweight"
     And a carton of 12 eaches with a length of 900 mm is refused with 422 problem "carton-oversize"
     And a carton of 10 eaches weighing 5200 g is refused with 422 problem "case-qty-mismatches-gtin"
+
+    # Carton 1 and 2 get a network-issued SSCC, carton 3 carries the seller's own valid, unique one.
+    When 3 cartons of 12 eaches are added, the last 1 with a seller-supplied SSCC
+    Then the 3 carton SSCCs are valid 18-digit GS1 numbers and unique
+    And a carton reusing the SSCC of carton 3 is refused with problem "sscc-not-unique"
     And shipping the unlabelled shipment is refused with problem "shipment-not-labelled" and the shipment stays DRAFT
 
     When the shipment is labelled

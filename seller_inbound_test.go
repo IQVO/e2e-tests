@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -381,7 +382,19 @@ func (w *world) addCartons(n, qty, supplied int) error {
 		if i >= n-supplied {
 			sscc = w.siSscc()
 		}
-		if err := w.postCarton(w.cartonBody(qty, 5200, sscc)); err != nil {
+		// The case pack level reaches seller-inbound's local packaging view over Kafka
+		// (offer-availability events): until it has arrived the first carton is refused
+		// because the GTIN "is not an active CASE level". Only that refusal is awaited.
+		if err := siEventually(func() error {
+			if err := w.postCarton(w.cartonBody(qty, 5200, sscc)); err != nil {
+				return err
+			}
+			if w.last.status == http.StatusUnprocessableEntity && w.last.json()["type"] == "case-qty-mismatches-gtin" &&
+				strings.Contains(fmt.Sprint(w.last.json()["detail"]), "is not an active CASE level") {
+				return fmt.Errorf("pack level not yet known to seller-inbound: %s", w.last.body)
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
 		if w.last.status != http.StatusCreated {
