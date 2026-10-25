@@ -1861,6 +1861,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerInboundSteps(sc, w)
 	registerMastercaseSteps(sc, w)
 	registerSellerInboundSteps(sc, w)
+	registerPhase5ASteps(sc, w)
 	registerReturnsSteps(sc, w)
 	registerSlottingSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
