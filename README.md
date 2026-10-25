@@ -348,6 +348,37 @@ NODE_TOPOLOGY_BASE_URL=$P/node-topology OFFER_AVAILABILITY_BASE_URL=$P/offer-ava
 NODE_PERFORMANCE_BASE_URL=$P/node-performance PRODUCT_MASTER_BASE_URL=$P/product-master \
 LABOR_PERFORMANCE_BASE_URL=$P/labor-performance PROCESS_PATH_BASE_URL=$P/process-path-management \
 WORK_PLANNING_BASE_URL=$P/wes-work-planning GODOG_TAGS=@phase5 \
+
+## Phase 5 part B: case-multiple transfers and ship-in-own-container (`@phase5`, live cluster)
+
+`features/phase5_b.feature` + `phase5_b_test.go`, black-box REST through Kong, nothing injected and
+no database touched. Valid GTIN-14s are computed per run (prefix `9502`), every id is run-scoped.
+
+- **network-inventory-planning ADR 0017**: with an ACTIVE CASE of 12 in product-master, a
+  proposal (`POST /v1/transfer-proposals:generate`) is rounded to the nearest whole case, a tie
+  up, at least one case, capped at what the origin supplies; `caseMultiple`, `cases`,
+  `requestedQtyEaches`, `roundedQtyEaches` and the signed `remainderEaches` are asserted exactly
+  (25 -> 24 +1, 18 -> 24 -6, 17 -> 12 +5, 1 -> 12 -11, 24 -> 24 0, supply 40 -> 36); a plain SKU
+  has no case fields; an origin below one case proposes nothing.
+- **fulfillment-execution ADR 0056**: a PACK task (`POST /tasks`, claimed by a station with a
+  private run-scoped capability) is sealed with `shipInOwnContainer` + `lineQuantity`:
+  exactly 12 -> 201 with `containerSource: CASE`, the case GTIN and its declared
+  dimensions/weight (also on `GET /packages/{id}`); 11, 13, 24 -> 422
+  `ship-in-own-container-quantity-mismatch`; SKU without CASE -> 422
+  `ship-in-own-container-no-case-level`; refusals seal nothing; no option = ordinary carton;
+  option without `lineQuantity` = 400.
+- **`@blocked @phase5-approve`** (`POST /v1/transfers:approve` + `GET /v1/transfers/{id}`, incl.
+  422 `below-one-case`): not drivable on the live cluster: order-management projects demand only
+  to its one `DEMAND_PROJECTION_SITE_ID`, and NIP's fail-closed snapshot refuses ALL approvals
+  while any capability/demand/plan fact in its read models is older than 10 minutes (live:
+  `stale site capability for ABE8`). Reasons are written on the scenario; steps are real except
+  the demand fact (pending).
+
+```sh
+P=http://localhost:8000/api
+PRODUCT_MASTER_BASE_URL=$P/product-master FACILITY_BASE_URL=$P/facility-layout \
+NETWORK_INVENTORY_PLANNING_BASE_URL=$P/network-inventory-planning \
+FULFILLMENT_BASE_URL=$P/fulfillment-execution GODOG_TAGS=@phase5 \
   go test -count=1 -v -run TestMain -timeout 15m .
 ```
 
@@ -359,6 +390,14 @@ WORK_PLANNING_BASE_URL=$P/wes-work-planning GODOG_TAGS=@phase5 \
 | `PRODUCT_MASTER_BASE_URL` | the existing variable | pack levels with dims |
 
 Plus the seller-inbound variables above. Tags: `@e2e @phase5` plus the one in the table.
+
+| `NETWORK_INVENTORY_PLANNING_BASE_URL` | `NIP_BASE_URL` (`http://localhost:8099`) | proposals, approval, transfers |
+| `FULFILLMENT_BASE_URL` | `http://localhost:8084` | tasks, stations, seal-package, packages |
+| `PRODUCT_MASTER_BASE_URL`, `FACILITY_BASE_URL` | as elsewhere | pack levels; site transfer capability |
+
+Both pack levels reach NIP and fulfillment-execution over Kafka into local views that have no REST
+read, so the "eventually" steps probe the behaviour (a proposal carrying `caseMultiple`; a refused
+own-container seal that no longer answers `no-case-level`).
 
 ## Real product catalogue (`cmd/seed-products`)
 
