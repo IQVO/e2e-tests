@@ -1,0 +1,500 @@
+# Declared surfaces; clusterChecks are Phase 4+ obligations, not executed native coverage.
+suites:
+  native-smoke: ~@cluster && ~@resilience && ~@soak
+  cluster-acceptance: '@cluster'
+  resilience: '@resilience'
+  soak: '@soak'
+components:
+  customer-ordering:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: customer_ordering_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  delivery-promise:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: delivery_promise_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  ecosystem:
+    kinds:
+    - shell
+    nativeScenarios: []
+    clusterChecks: []
+  exception-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: exceptions-projector
+      reports: exceptions-reports
+    remote: exceptions_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  facility-layout:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: facility
+      mcp: mcp
+      projector: facility-projector
+      reports: facility-reports
+    remote: facility_mfe/App
+    nativeScenarios:
+    - facility-layout-propagation
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  fulfillment-execution:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: execution
+      mcp: mcp
+      projector: fulfillment-projector
+      reports: fulfillment-reports
+      sweep: sweep
+    remote: fulfillment_mfe/App
+    nativeScenarios:
+    - bootstrap
+    - network-fulfillment
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  inbound-receiving:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: inbound-projector
+      reports: inbound-reports
+    remote: inbound_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  inventory-storage:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: inventory
+      mcp: mcp
+      projector: inventory-projector
+      reports: inventory-reports
+    remote: inventory_mfe/App
+    nativeScenarios:
+    - bootstrap
+    - network-fulfillment
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  labor-performance:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: labor
+      mcp: mcp
+      projector: labor-projector
+      reports: labor-reports
+    remote: labor_mfe/App
+    nativeScenarios:
+    - labor-performance
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  last-mile-delivery:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: last_mile_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  linehaul-transportation:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: linehaul_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  network-fulfillment:
+    kinds:
+    - backend
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: netfulfil
+      mcp: mcp
+      projector: netfulfil-projector
+      reports: netfulfil-reports
+    nativeScenarios:
+    - network-fulfillment
+    clusterChecks:
+    - api
+    remote: network_fulfillment_mfe/App
+  network-inventory-planning:
+    kinds:
+    - backend
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: network-inventory-planning
+      mcp: mcp
+      projector: nip-projector
+      reports: nip-reports
+    remote: nip_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  node-performance:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: node_performance_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  node-topology:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: node_topology_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  offer-availability:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: offer_availability_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  order-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: order
+      mcp: mcp
+      projector: order-projector
+      reports: order-reports
+    remote: order_mgmt_mfe/App
+    nativeScenarios:
+    - order-release
+    - promise-repromise
+    - capability-promise
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  order-sourcing:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: order_sourcing_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  pick-face-replenishment:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: pfr-projector
+      reports: pfr-reports
+    remote: replenishment_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  process-path-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: pathmgmt
+      mcp: mcp
+      projector: pathmgmt-projector
+      reports: pathmgmt-reports
+    remote: process_path_mfe/App
+    nativeScenarios:
+    - process-path-management
+    - process-path-propagation
+    - capability-promise
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  product-master:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: product-projector
+      reports: product-reports
+    remote: productmaster_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  returns-processing:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: returns-projector
+      reports: returns-reports
+    remote: returns_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  shipping-and-tracking:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: shipping_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  slotting-optimization:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: slotting-projector
+      reports: slotting-reports
+    remote: slotting_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  task-interleaving:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: ti-projector
+      reports: ti-reports
+    remote: task_interleaving_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  vendor-connectivity:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+    remote: vendor_connectivity_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  seller-inbound:
+    kinds:
+    - backend
+    - oltp
+    commands:
+      backend: api
+    nativeScenarios: []
+    clusterChecks: []
+  warehouse-console:
+    kinds:
+    - shell
+    nativeScenarios: []
+    clusterChecks:
+    - browser
+  warehouse-ops-agent:
+    kinds:
+    - backend
+    commands:
+      backend: agent
+    nativeScenarios:
+    - flow-balance-exception
+    clusterChecks:
+    - api
+  warehouse-planning:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: api
+      mcp: mcp
+      projector: planning-projector
+      reports: planning-reports
+    remote: capacity_mfe/App
+    nativeScenarios: []
+    clusterChecks: []
+  wes-work-planning:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: wes
+      mcp: mcp
+      projector: wes-projector
+      reports: wes-reports
+    remote: planning_mfe/App
+    nativeScenarios:
+    - order-release
+    - process-path-propagation
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  workforce-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: workforce
+      mcp: mcp
+      projector: workforce-projector
+      reports: workforce-reports
+    remote: workforce_mfe/App
+    nativeScenarios:
+    - bootstrap
+    - process-path-propagation
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser

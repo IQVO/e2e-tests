@@ -112,7 +112,7 @@ WAREHOUSE_PLANNING_REPO="${REPOS_ROOT}/warehouse-planning"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
-RUN_DIR="${WORKSPACE_ROOT}/run"
+RUN_DIR="${RUN_DIR:-${WORKSPACE_ROOT}/run}"
 
 # ---- HTTP ports (offset from each repo's own default :8080 so all
 #      five can run side by side on one machine) -------------------
@@ -196,21 +196,11 @@ WORKFORCE_MCP_URL="http://localhost:${WORKFORCE_MCP_PORT}/mcp"
 LABOR_MCP_URL="http://localhost:${LABOR_MCP_PORT}/mcp"
 ORDER_MCP_URL="http://localhost:${ORDER_MCP_PORT}/mcp"
 
-# Fixed test-only bearer read keys, one per context's own MCP server —
-# same static-bearer-key scheme every context uses in prod (ADR-0008),
-# just a throwaway value for this local harness.
-FACILITY_MCP_READ_KEY="e2e-facility-mcp-read-key"
-INVENTORY_MCP_READ_KEY="e2e-inventory-mcp-read-key"
-WES_MCP_READ_KEY="e2e-wes-mcp-read-key"
-FULFILLMENT_MCP_READ_KEY="e2e-fulfillment-mcp-read-key"
-WORKFORCE_MCP_READ_KEY="e2e-workforce-mcp-read-key"
-LABOR_MCP_READ_KEY="e2e-labor-mcp-read-key"
-ORDER_MCP_READ_KEY="e2e-order-mcp-read-key"
+# MCP servers expose unauthenticated Streamable HTTP on the local harness.
 
 # ---- warehouse-ops-agent (the agentic decision-support layer, T5) --
 OPS_AGENT_HTTP_PORT=8096
 OPS_AGENT_BASE_URL="http://localhost:${OPS_AGENT_HTTP_PORT}"
-OPS_AGENT_MCP_READ_KEY="e2e-ops-agent-mcp-read-key"
 
 # ---- Analytics *-reports ports (each context's separate read-only reports
 #      binary -- cmd/<svc>-reports, backed by its own analytical Postgres,

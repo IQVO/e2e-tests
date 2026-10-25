@@ -7,11 +7,8 @@
 #                           fleet's declared process-path catalogue;
 #                           publishes ProcessPathCreated/Updated/
 #                           Deactivated to Kafka, which the other five
-#                           services below optionally consume when they
-#                           set PATH_CATALOGUE_SOURCE=kafka -- see
-#                           warehouse-infra's deploy_process_path_kafka_source
-#                           Terraform variable for the equivalent live-
-#                           cluster toggle)
+#                           publish catalogue changes to Kafka, consumed
+#                           live by the four catalogue clients below)
 #   2. facility-layout   — no deps (Open Host Service for the warehouse map).
 #                           Runs with EVENT_PUBLISHER=kafka so its Published
 #                           Language actually reaches
@@ -152,15 +149,8 @@
 # event flow (WorkReleased -> Task, TaskCompleted -> WorkUnit completion /
 # labor-performance scoring, ShiftPlanCommitted -> labor-plan-view,
 # OrderAllocated/OrderPartiallyAllocated -> WorkUnit) is exercised for
-# real, not just each service in isolation. process-path-management's own
-# catalogue events are NOT consumed by any of the six below in this harness
-# today (each still
-# defaults to PATH_CATALOGUE_SOURCE=file, matching the live cluster's own
-# default-off toggle) -- process-path-management is started here so its
-# REST API and Kafka publisher are available to exercise directly, and so
-# opting a service into PATH_CATALOGUE_SOURCE=kafka locally is a one-line
-# addition to that service's start_service call below, not a new harness
-# feature.
+# process-path-management catalogue events are seeded before consumers start,
+# replayed by four Kafka-fed clients, and then applied live without restarts.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -176,6 +166,7 @@ start_service process-path "${BIN_DIR}/process-path" \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
   LOG_LEVEL=info
 wait_for_http "${PROCESS_PATH_BASE_URL}/healthz"
+"${SCRIPT_DIR}/seed-process-paths.sh"
 
 log "starting facility-layout on ${FACILITY_BASE_URL}"
 start_service facility "${BIN_DIR}/facility" \
@@ -292,7 +283,7 @@ start_service wes "${BIN_DIR}/wes" \
   KAFKA_CONSUMER_GROUP="${WES_CONSUMER_GROUP}" \
   PRODUCT_CLASSIFICATION_MODE=kafka \
   PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${WES_CLASSIFICATION_CONSUMER_GROUP}" \
-  PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" \
+  PATH_CATALOGUE_SOURCE=kafka \
   LOG_LEVEL=info
 wait_for_http "${WES_BASE_URL}/healthz"
 
@@ -310,7 +301,7 @@ start_service_in execution "${FULFILLMENT_REPO}" "${BIN_DIR}/execution" \
   WORK_RELEASED_CONSUMER_GROUP="${FULFILLMENT_CONSUMER_GROUP}" \
   PRODUCT_CLASSIFICATION_MODE=kafka \
   PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP}" \
-  PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" \
+  PATH_CATALOGUE_SOURCE=kafka \
   LOG_LEVEL=info
 wait_for_http "${FULFILLMENT_BASE_URL}/healthz"
 
@@ -339,7 +330,7 @@ start_service workforce "${BIN_DIR}/workforce" \
   MIGRATIONS_PATH="${WORKFORCE_REPO}/migrations" \
   EVENT_PUBLISHER=kafka \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" \
+  PATH_CATALOGUE_SOURCE=kafka \
   INSTALLED_CAPACITY_MODE=http \
   FULFILLMENT_EXECUTION_BASE_URL="${FULFILLMENT_BASE_URL}" \
   LOG_LEVEL=info
@@ -363,6 +354,7 @@ start_service order "${BIN_DIR}/order" \
   MIGRATIONS_PATH="${ORDER_REPO}/migrations" \
   EVENT_PUBLISHER=kafka \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  PATH_CATALOGUE_SOURCE=kafka \
   INVENTORY_STORAGE_MODE=http \
   INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" \
   PRODUCT_CLASSIFICATION_MODE=kafka \
@@ -492,8 +484,7 @@ printf '  %-24s %s\n' exception-management   "${EXCEPTIONS_BASE_URL}"
 # Postgres each HTTP service above just started against — so a fact an
 # HTTP call writes (e.g. a shift plan, a work pool) is immediately
 # visible to warehouse-ops-agent's MCP-tool reads. Every one of these
-# only needs its own MCP_READ_KEY: none of the 5 contexts' T1 outbound
-# clients call a write tool. -----------------------------------------
+# serves unauthenticated Streamable HTTP. -----------------------------
 
 log "starting facility-layout MCP server on :${FACILITY_MCP_PORT}"
 start_service facility-mcp "${BIN_DIR}/facility-mcp" \
@@ -501,7 +492,6 @@ start_service facility-mcp "${BIN_DIR}/facility-mcp" \
   DATABASE_URL="${FACILITY_DB_URL}" \
   PGPASSWORD="facility" \
   MIGRATIONS_PATH="${FACILITY_REPO}/migrations" \
-  MCP_READ_KEY="${FACILITY_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${FACILITY_MCP_PORT}"
 
@@ -511,7 +501,6 @@ start_service inventory-mcp "${BIN_DIR}/inventory-mcp" \
   DATABASE_URL="${INVENTORY_DB_URL}" \
   PGPASSWORD="inventory" \
   MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" \
-  MCP_READ_KEY="${INVENTORY_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${INVENTORY_MCP_PORT}"
 
@@ -524,7 +513,6 @@ start_service wes-mcp "${BIN_DIR}/wes-mcp" \
   DATABASE_URL="${WES_DB_URL}" \
   PGPASSWORD="wes" \
   PRODUCT_CLASSIFICATION_MODE=kafka \
-  MCP_READ_KEY="${WES_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${WES_MCP_PORT}"
 
@@ -535,7 +523,6 @@ start_service_in execution-mcp "${FULFILLMENT_REPO}" "${BIN_DIR}/execution-mcp" 
   MCP_ADDR=":${FULFILLMENT_MCP_PORT}" \
   DATABASE_URL="${FULFILLMENT_DB_URL}" \
   PGPASSWORD="fulfillment" \
-  MCP_READ_KEY="${FULFILLMENT_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${FULFILLMENT_MCP_PORT}"
 
@@ -546,7 +533,6 @@ start_service workforce-mcp "${BIN_DIR}/workforce-mcp" \
   PGPASSWORD="workforce" \
   MIGRATIONS_PATH="${WORKFORCE_REPO}/migrations" \
   PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE}" \
-  MCP_READ_KEY="${WORKFORCE_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${WORKFORCE_MCP_PORT}"
 
@@ -565,7 +551,6 @@ start_service labor-mcp "${BIN_DIR}/labor-mcp" \
   DATABASE_URL="${LABOR_DB_URL}" \
   PGPASSWORD="labor" \
   MIGRATIONS_PATH="${LABOR_REPO}/migrations" \
-  MCP_READ_KEY="${LABOR_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${LABOR_MCP_PORT}"
 
@@ -579,7 +564,6 @@ start_service order-mcp "${BIN_DIR}/order-mcp" \
   DATABASE_URL="${ORDER_DB_URL}" \
   PGPASSWORD="order" \
   MIGRATIONS_PATH="${ORDER_REPO}/migrations" \
-  MCP_READ_KEY="${ORDER_MCP_READ_KEY}" \
   LOG_LEVEL=info
 wait_for_tcp localhost "${ORDER_MCP_PORT}"
 
@@ -592,16 +576,10 @@ log "starting warehouse-ops-agent on ${OPS_AGENT_BASE_URL}"
 start_service ops-agent "${BIN_DIR}/ops-agent" \
   AGENT_ADDR=":${OPS_AGENT_HTTP_PORT}" \
   WES_WORK_PLANNING_MCP_ENDPOINT="${WES_MCP_URL}" \
-  WES_WORK_PLANNING_MCP_READ_KEY="${WES_MCP_READ_KEY}" \
   FULFILLMENT_EXECUTION_MCP_ENDPOINT="${FULFILLMENT_MCP_URL}" \
-  FULFILLMENT_EXECUTION_MCP_READ_KEY="${FULFILLMENT_MCP_READ_KEY}" \
   INVENTORY_STORAGE_MCP_ENDPOINT="${INVENTORY_MCP_URL}" \
-  INVENTORY_STORAGE_MCP_READ_KEY="${INVENTORY_MCP_READ_KEY}" \
   WORKFORCE_MANAGEMENT_MCP_ENDPOINT="${WORKFORCE_MCP_URL}" \
-  WORKFORCE_MANAGEMENT_MCP_READ_KEY="${WORKFORCE_MCP_READ_KEY}" \
   FACILITY_LAYOUT_MCP_ENDPOINT="${FACILITY_MCP_URL}" \
-  FACILITY_LAYOUT_MCP_READ_KEY="${FACILITY_MCP_READ_KEY}" \
-  MCP_READ_KEY="${OPS_AGENT_MCP_READ_KEY}" \
   DAILY_BRIEF_PATH_TARGETS="${OPS_AGENT_PATH_TARGETS}" \
   LOG_LEVEL=info
 wait_for_http "${OPS_AGENT_BASE_URL}/healthz"

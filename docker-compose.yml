@@ -1,21 +1,4 @@
-####################################################################
-# e2e-tests/docker-compose.yml
-#
-# Postgres ONLY. Kafka is intentionally NOT declared here: a shared
-# broker already runs from ~/warehouse-systems/docker-compose.kafka.yml
-# (container "warehouse-kafka", host port 9092) and every service repo's
-# own README says to connect to it rather than spin up a second one.
-# scripts/02-up-infra.sh starts that compose file too if it isn't
-# already running.
-#
-# Each service gets its OWN Postgres instance, on its own host port,
-# using the SAME database name/user/password its own repo's
-# docker-compose.yml already uses (so DATABASE_URL construction is a
-# copy-paste of what each service expects). Ports are offset from the
-# services' own defaults (normally all 5432) to avoid colliding with a
-# developer's per-repo `docker compose up` left running from another
-# session.
-####################################################################
+# Nine dedicated Postgres databases. Kafka is ephemeral and managed outside Compose.
 name: warehouse-e2e
 
 services:
