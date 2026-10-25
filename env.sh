@@ -4,6 +4,10 @@
 
 # ---- repo layout -------------------------------------------------
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# REPOS_ROOT is the directory holding every sibling repo checkout. It
+# defaults to the parent of this checkout, but is overridable so a git
+# worktree of e2e-tests (whose parent is NOT the repos root) can still point
+# at the sibling checkouts: REPOS_ROOT=/path/to/repos bash scripts/01-build.sh
 REPOS_ROOT="${REPOS_ROOT:-$(cd "${WORKSPACE_ROOT}/.." && pwd)}"
 
 FACILITY_REPO="${REPOS_ROOT}/facility-layout"
@@ -22,7 +26,15 @@ ORDER_REPO="${REPOS_ROOT}/order-management"
 # each of those three services' main() treats a missing/malformed
 # catalogue as a boot-time fatal error, by design (never falls back to
 # an empty catalogue).
-PATH_CATALOGUE_FILE="${REPOS_ROOT}/warehouse-infra/config/process-paths/sortable-fc.yaml"
+#
+# This harness points at ITS OWN copy (fixtures/process-paths/sortable-fc.yaml):
+# warehouse-infra's four entries plus the dispatch family the inter-warehouse
+# transfer saga needs (fulfillment-execution ADR-0036 requires a
+# `dispatch-*` family in the catalogue before TRANSFER_DISPATCH work can be
+# released; warehouse-infra's frozen file has none). Override
+# PATH_CATALOGUE_FILE to run against the infra file verbatim (the transfer
+# scenario then fails at the dispatch leg, by design).
+PATH_CATALOGUE_FILE="${PATH_CATALOGUE_FILE:-${WORKSPACE_ROOT}/fixtures/process-paths/sortable-fc.yaml}"
 # process-path-management (8th bounded context — Generic Subdomain owning
 # the fleet's declared process-path catalogue, replacing the static
 # config/process-paths/*.yaml file the other five services used to boot
@@ -35,6 +47,68 @@ PROCESS_PATH_REPO="${REPOS_ROOT}/process-path-management"
 # topic to subscribe to from the start, not because of a synchronous
 # call).
 LABOR_REPO="${REPOS_ROOT}/labor-performance"
+# network-fulfillment (9th bounded context — Supporting Subdomain / ACL to
+# the external retail network, ADR 0001). Started LAST: its own gateway is
+# ModeStub by default (no credentials ever needed), and its ONLY outbound
+# HTTP dependency is order-management, which must already be up. It
+# receives inbound demand entirely by polling a seeded stub file (never
+# by an HTTP intake -- there is none, ADR 0001 §5), so this harness feeds
+# it via NETWORK_SEED_FILE/PRODUCT_TRANSLATION_FILE fixtures in
+# fixtures/network-fulfillment/ rather than an HTTP step.
+NETWORK_REPO="${REPOS_ROOT}/network-fulfillment"
+# product-master (10th bounded context -- the WMS-tier owner of SKU master
+# data: handling classification and the declared/measured physical profile,
+# its ADR 0001/0002). Classification moved here from inventory-storage (its
+# ADR 0003, inventory-storage ADR 0034): inventory-storage's PUT answers
+# 410 classification-moved and every reader (inventory-storage,
+# order-management, wes-work-planning, fulfillment-execution) keeps a local
+# copy fed by warehouse.product-master.events. Started right after
+# facility-layout and BEFORE inventory-storage, so its topic exists by the
+# time the consumers subscribe.
+PRODUCT_MASTER_REPO="${REPOS_ROOT}/product-master"
+# inbound-receiving (WMS-tier inbound dock workflow: ASN, dock appointment,
+# receipt -- its ADR 0001/0002). Its Good receipt lines are handed to
+# inventory-storage as ReceiptLineReceived events (inbound-receiving ADR 0003,
+# inventory-storage ADR 0037); it keeps local copies of product-master's
+# ProductRegistered (known SKUs) and facility-layout's dock doors. Started
+# after product-master and BEFORE inventory-storage, so
+# warehouse.inbound-receiving.events exists when inventory-storage subscribes.
+INBOUND_REPO="${REPOS_ROOT}/inbound-receiving"
+# slotting-optimization (WMS-tier planner of forward pick slots, its ADR
+# 0001/0002): a SlotPlan is computed from event-fed local copies of
+# order-management's SiteSkuDemandChanged, product-master's classification and
+# physical profile, and facility-layout's zones and slots (its ADR 0003). It
+# is started after product-master and facility-layout, whose events feed its
+# product and layout copies. Its demand copy is fed by SiteSkuDemandChanged
+# facts the scenarios publish themselves (see features/slotting_optimization.feature).
+SLOTTING_REPO="${REPOS_ROOT}/slotting-optimization"
+# returns-processing (WMS-tier returns context: RMA authorization, receipt,
+# inspection, disposition; its ADR 0001-0004). Consumes product-master's
+# ProductClassified, order-management's OrderAllocated and
+# fulfillment-execution's PackageManifested into local copies; publishes
+# warehouse.returns-processing.events, whose ReturnLineStaged
+# inventory-storage books as staged stock (its ADR 0044). Started before
+# inventory-storage so the topic exists when its RETURN_LINE consumer
+# subscribes.
+RETURNS_REPO="${REPOS_ROOT}/returns-processing"
+# exception-management (WES-tier exception context: one case per consumed
+# exception fact, operator lifecycle, declarative auto-resolve; its ADR
+# 0001/0002). Consumes the six pinned source topics; publishes
+# warehouse.exception-management.events. Started LAST: it watches facts from
+# nearly every other context.
+EXCEPTIONS_REPO="${REPOS_ROOT}/exception-management"
+# network-inventory-planning (NIP): plans and drives the inter-warehouse
+# transfer saga (approve -> allocate at origin -> pick -> dispatch ->
+# destination receipt). Started AFTER every service it exchanges events
+# with; it has no outbound HTTP at all (Kafka + its own Postgres only).
+NIP_REPO="${REPOS_ROOT}/network-inventory-planning"
+# warehouse-planning: the producer of CapacityPlanPublished, one of the
+# three fail-closed read-model inputs NIP needs before it will simulate or
+# approve anything (the other two are facility-layout's SiteCapabilityChanged
+# and order-management's SiteSkuDemandChanged -- see
+# features/inter_warehouse_transfer.feature's header for which of the three
+# this harness can produce from a real service and which it must inject).
+WAREHOUSE_PLANNING_REPO="${REPOS_ROOT}/warehouse-planning"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
@@ -57,6 +131,26 @@ PROCESS_PATH_HTTP_PORT=8087
 # labor-performance (7th bounded context) — next free slot after
 # process-path-management's :8087.
 LABOR_HTTP_PORT=8088
+# network-fulfillment (9th bounded context) — next free slot after
+# labor-performance's :8088.
+NETWORK_HTTP_PORT=8089
+# product-master (10th bounded context) — next free slot after
+# network-fulfillment's :8089 (8091+ are the MCP ports below).
+PRODUCT_MASTER_HTTP_PORT=8090
+# network-inventory-planning / warehouse-planning -- 8099 and 8100 are the
+# next free slots after the 8091-8098 MCP/agent range and before the
+# 8101-8107 analytics reports range below.
+NIP_HTTP_PORT=8099
+WAREHOUSE_PLANNING_HTTP_PORT=8100
+# inbound-receiving -- 8108 is the next free slot after the 8101-8107
+# analytics *-reports range below (8091-8100 are taken above).
+INBOUND_HTTP_PORT=8108
+# slotting-optimization -- the next free slot after inbound-receiving's :8108.
+SLOTTING_HTTP_PORT=8109
+# returns-processing / exception-management -- the next free slots after
+# slotting-optimization's :8109.
+RETURNS_HTTP_PORT=8110
+EXCEPTIONS_HTTP_PORT=8111
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -66,6 +160,14 @@ WORKFORCE_BASE_URL="http://localhost:${WORKFORCE_HTTP_PORT}"
 ORDER_BASE_URL="http://localhost:${ORDER_HTTP_PORT}"
 PROCESS_PATH_BASE_URL="http://localhost:${PROCESS_PATH_HTTP_PORT}"
 LABOR_BASE_URL="http://localhost:${LABOR_HTTP_PORT}"
+NETWORK_BASE_URL="http://localhost:${NETWORK_HTTP_PORT}"
+PRODUCT_MASTER_BASE_URL="http://localhost:${PRODUCT_MASTER_HTTP_PORT}"
+NIP_BASE_URL="http://localhost:${NIP_HTTP_PORT}"
+WAREHOUSE_PLANNING_BASE_URL="http://localhost:${WAREHOUSE_PLANNING_HTTP_PORT}"
+INBOUND_BASE_URL="http://localhost:${INBOUND_HTTP_PORT}"
+SLOTTING_BASE_URL="http://localhost:${SLOTTING_HTTP_PORT}"
+RETURNS_BASE_URL="http://localhost:${RETURNS_HTTP_PORT}"
+EXCEPTIONS_BASE_URL="http://localhost:${EXCEPTIONS_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -172,12 +274,46 @@ PROCESS_PATH_DB_URL="postgres://process_path@localhost:5447/process_path?sslmode
 # labor-performance (7th bounded context) — next free slot after
 # process-path-management's :5447.
 LABOR_DB_URL="postgres://labor@localhost:5448/labor?sslmode=disable"
+# network-fulfillment (9th bounded context) — next free slot after
+# labor-performance's :5448.
+NETWORK_DB_URL="postgres://network@localhost:5449/network?sslmode=disable"
+# product-master (10th bounded context) — next free slot after
+# network-fulfillment's :5449. product-master ships no docker-compose of its
+# own; user/db "product_master" follows the fleet's <context> naming.
+PRODUCT_MASTER_DB_URL="postgres://product_master@localhost:5450/product_master?sslmode=disable"
+# network-inventory-planning -- next free slot after network-fulfillment's
+# :5449. Own user/db name "nip" (it ships no docker-compose.yml of its own).
+NIP_DB_URL="postgres://nip@localhost:5451/nip?sslmode=disable"
+# warehouse-planning -- next free slot after NIP's :5451.
+WAREHOUSE_PLANNING_DB_URL="postgres://planning@localhost:5452/planning?sslmode=disable"
+# inbound-receiving -- next free slot after warehouse-planning's :5452. It
+# ships no docker-compose of its own; user/db "inbound_receiving" follows the
+# fleet's <context> naming (like product_master). Migrations are embedded.
+INBOUND_DB_URL="postgres://inbound_receiving@localhost:5453/inbound_receiving?sslmode=disable"
+# slotting-optimization -- next free slot after :5453.
+# It ships no docker-compose of its own; user/db "slotting" follow the
+# fleet's <context> naming. Migrations are embedded.
+SLOTTING_DB_URL="postgres://slotting@localhost:5454/slotting?sslmode=disable"
+# returns-processing -- next free slot after slotting's :5454. It ships no
+# docker-compose of its own; user/db "returns_processing" follow the fleet's
+# <context> naming. Migrations are embedded in its binary.
+RETURNS_DB_URL="postgres://returns_processing@localhost:5455/returns_processing?sslmode=disable"
+# exception-management -- next free slot after returns-processing's :5455.
+# Same shape: no compose of its own, user/db "exception_management",
+# migrations embedded.
+EXCEPTIONS_DB_URL="postgres://exception_management@localhost:5456/exception_management?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
 #      Bitnami externalAccess NodePort (warehouse-infra PR #6). This
 #      harness does not start its own broker -- see scripts/02-up-infra.sh.
-KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:19092}"
+#      KAFKA_BROKERS is overridable so a run can target a throwaway broker
+#      instead (CI's `services: kafka` container is on :9092 too; a
+#      developer who must not touch the shared cluster topics -- the
+#      transfer saga publishes and CONSUMES commands on shared topics --
+#      starts e.g. an apache/kafka container on :29092 and exports
+#      KAFKA_BROKERS=localhost:29092).
+KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:9092}"
 
 # ---- Kafka consumer-group isolation --------------------------------
 # Consumer-group offsets are SHARED infrastructure state, not per-process
@@ -198,20 +334,105 @@ KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:19092}"
 # the topics itself instead of competing for them. This does NOT change how
 # the services behave in the cluster, where sharing one group per service is
 # exactly right.
-E2E_CONSUMER_GROUP_SUFFIX="e2e-$$-$(date +%s)"
+# Overridable: the warehouse-day simulator pins a STABLE suffix so the
+# services resume their committed offsets across restarts (as in
+# production) instead of replaying the shared broker's whole history on
+# every boot. Unset, every run still gets an isolated, unique group.
+E2E_CONSUMER_GROUP_SUFFIX="${E2E_CONSUMER_GROUP_SUFFIX:-e2e-$$-$(date +%s)}"
 WES_CONSUMER_GROUP="wes-work-planning-${E2E_CONSUMER_GROUP_SUFFIX}"
 FULFILLMENT_CONSUMER_GROUP="fulfillment-execution-${E2E_CONSUMER_GROUP_SUFFIX}"
 LABOR_CONSUMER_GROUP="labor-performance-${E2E_CONSUMER_GROUP_SUFFIX}"
+# product-master's ProductClassified fan-out (product-master ADR 0003 stages
+# C and D): one per-run group per local copy, so a harness process never
+# joins the live cluster's group for warehouse.product-master.events.
+# inventory-storage reads PRODUCT_MASTER_CONSUMER_GROUP; the three readers
+# read PRODUCT_CLASSIFICATION_CONSUMER_GROUP (with
+# PRODUCT_CLASSIFICATION_MODE=kafka -- "http" is rejected at boot).
+INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP="inventory-storage-product-master-${E2E_CONSUMER_GROUP_SUFFIX}"
+WES_CLASSIFICATION_CONSUMER_GROUP="wes-work-planning-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP="fulfillment-execution-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# inbound-receiving <-> inventory-storage handover. inbound-receiving keeps a
+# local copy of product-master's ProductRegistered (PRODUCT_MODE=kafka +
+# PRODUCT_CONSUMER_GROUP; its dock-door copy stays PERMISSIVE here, so no
+# DOCK_DOOR_CONSUMER_GROUP). inventory-storage's consumer of
+# ReceiptLineReceived (its ADR 0037) does not exist unless
+# INBOUND_RECEIPT_CONSUMER_GROUP is set. Both are per-run groups, never the
+# live cluster's: a first start under a new group reads from the first offset.
+INBOUND_PRODUCT_CONSUMER_GROUP="inbound-receiving-product-${E2E_CONSUMER_GROUP_SUFFIX}"
+INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP="inventory-storage-inbound-receipt-${E2E_CONSUMER_GROUP_SUFFIX}"
+# inventory-storage's two always-on WMS-tier handover consumers, both
+# mandatory env on that service (no default, boot error when unset) and both
+# per-run groups here so a harness process never joins the live cluster's:
+# ReturnLineStaged of returns-processing (its ADR 0044) and fulfillment-
+# execution's TaskCompleted confirm-pick fact (its ADR 0035).
+INVENTORY_RETURN_LINE_CONSUMER_GROUP="inventory-storage-return-line-${E2E_CONSUMER_GROUP_SUFFIX}"
+INVENTORY_TASK_COMPLETED_CONSUMER_GROUP="inventory-storage-task-completed-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# returns-processing's three local-copy consumers (its ADR 0003; each group
+# env is mandatory on the service, no default), all per-run.
+RETURNS_PRODUCT_CLASSIFICATION_CONSUMER_GROUP="returns-processing-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+RETURNS_ORDER_LINES_CONSUMER_GROUP="returns-processing-order-lines-${E2E_CONSUMER_GROUP_SUFFIX}"
+RETURNS_MANIFEST_CONSUMER_GROUP="returns-processing-manifests-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# exception-management's six fact consumers (the pinned source topics of its
+# .claude/rules/integration-events.md; each group env is mandatory on the
+# service, no default), all per-run.
+EXCEPTIONS_FULFILLMENT_CONSUMER_GROUP="exception-management-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_WORK_PLANNING_CONSUMER_GROUP="exception-management-work-planning-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_NETWORK_FULFILLMENT_CONSUMER_GROUP="exception-management-network-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_ORDER_CORRELATION_CONSUMER_GROUP="exception-management-order-correlation-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_INVENTORY_CONSUMER_GROUP="exception-management-inventory-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_RETURNS_CONSUMER_GROUP="exception-management-returns-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# slotting-optimization's three local-copy consumers (DEMAND_MODE,
+# PRODUCT_MODE, LAYOUT_MODE=kafka; each needs its group and has no default),
+# all per-run groups so a harness process never joins the live cluster's.
+SLOTTING_DEMAND_CONSUMER_GROUP="slotting-optimization-demand-${E2E_CONSUMER_GROUP_SUFFIX}"
+SLOTTING_PRODUCT_CONSUMER_GROUP="slotting-optimization-product-${E2E_CONSUMER_GROUP_SUFFIX}"
+SLOTTING_LAYOUT_CONSUMER_GROUP="slotting-optimization-layout-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# inventory-storage's transfer allocation command consumer (ADR-0030; dark
+# unless TRANSFER_ALLOCATION_CONSUMER_MODE=kafka, set in 03-up-services.sh)
+# and network-inventory-planning's five consumers (each group env var is its
+# own on-switch; none has a default).
+INVENTORY_TRANSFER_CONSUMER_GROUP="inventory-storage-transfer-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_CAPABILITY_CONSUMER_GROUP="nip-site-capability-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_DEMAND_CONSUMER_GROUP="nip-site-sku-demand-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_CAPACITY_PLAN_CONSUMER_GROUP="nip-capacity-plan-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_TRANSFER_REPLY_CONSUMER_GROUP="nip-transfer-reply-${E2E_CONSUMER_GROUP_SUFFIX}"
+NIP_TRANSFER_FACT_CONSUMER_GROUP="nip-transfer-fact-${E2E_CONSUMER_GROUP_SUFFIX}"
+# warehouse-planning's two inbound consumers DO have literal defaults, which
+# would join the live cluster's groups -- always override.
+WAREHOUSE_PLANNING_LABOR_CONSUMER_GROUP="warehouse-planning-labor-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP="warehouse-planning-storage-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# ---- inter-warehouse transfer saga configuration --------------------
+# The pick leg's path is `pick-transfer` (inside the existing PICK family,
+# matchPrefix `pick`); the dispatch leg's is `dispatch-transfer` (the
+# DISPATCH family this harness's catalogue fixture adds). NIP has no
+# default for the pick path: unset, POST /v1/transfers:approve answers 503.
+NIP_TRANSFER_PICK_PATH_ID="pick-transfer"
+NIP_TRANSFER_DISPATCH_PATH_ID="dispatch-transfer"
+# NIP refuses to plan from a single stale fact, anywhere in its read models
+# (ADR 0002), and this harness's Postgres volumes persist across runs, so a
+# row published by an earlier run would otherwise poison the next. A wide
+# budget keeps the suite re-runnable; production uses the 10m default.
+NIP_PLANNING_MAX_STALENESS="${NIP_PLANNING_MAX_STALENESS:-720h}"
 
 # ---- misc -----------------------------------------------------------
 HEALTH_TIMEOUT_SECS=60
 
-# network-fulfillment is the ninth database / tenth backend application.
-NETWORK_FULFILLMENT_REPO="${REPOS_ROOT}/network-fulfillment"
-NETWORK_FULFILLMENT_HTTP_PORT=8089
-NETWORK_FULFILLMENT_BASE_URL="http://localhost:${NETWORK_FULFILLMENT_HTTP_PORT}"
-NETWORK_FULFILLMENT_DB_URL="postgres://network_fulfillment@localhost:5449/network_fulfillment?sslmode=disable"
-PRODUCT_TRANSLATION_FILE="${RUN_DIR}/network/product-translation.json"
-NETWORK_SEED_FILE="${RUN_DIR}/network/demand.json"
-# Separate site for the network's required deadline; ordinary fallback orders use e2e-native.
-NATIVE_SITE_ID=e2e-native
+# ---- network-fulfillment fixtures ------------------------------------
+# The ACL dictionary (network product id -> SKU) and the stub demand this
+# harness feeds network-fulfillment's poller. Both live in THIS repo
+# (fixtures/network-fulfillment/), not in network-fulfillment's own repo:
+# they are e2e-test data this harness owns, the same way
+# PATH_CATALOGUE_FILE above is warehouse-infra's fixture, not a sibling
+# service's. NETWORK_SEED_FILE's networkRef/site/SKU values are picked to
+# match the fixed SKUs this file's own PRODUCT_TRANSLATION_FILE maps, and
+# the network-fulfillment.feature scenario receives/stows those same SKUs
+# in inventory-storage before asserting on the resulting NetworkOrder.
+NETWORK_PRODUCT_TRANSLATION_FILE="${WORKSPACE_ROOT}/fixtures/network-fulfillment/product-translation.json"
+NETWORK_SEED_FILE="${WORKSPACE_ROOT}/fixtures/network-fulfillment/seed-demand.json"

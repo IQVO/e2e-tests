@@ -160,19 +160,169 @@ services:
       timeout: 3s
       retries: 20
 
-  postgres-network-fulfillment:
+  # network-fulfillment (9th bounded context — Supporting/ACL to the
+  # external retail network, ADR 0001). Own user/db name "network", on
+  # host port 5449 (past this harness's own 5441-5448 range).
+  postgres-network:
     image: postgres:16
-    container_name: e2e-postgres-network-fulfillment
+    container_name: e2e-postgres-network
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: network_fulfillment
-      POSTGRES_PASSWORD: network_fulfillment
-      POSTGRES_DB: network_fulfillment
+      POSTGRES_USER: network
+      POSTGRES_PASSWORD: network
+      POSTGRES_DB: network
     ports:
       - "5449:5432"
     volumes:
-      - e2e_network_fulfillment_pg_data:/var/lib/postgresql/data
+      - e2e_network_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U network_fulfillment -d network_fulfillment"]
+      test: ["CMD-SHELL", "pg_isready -U network -d network"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # product-master (10th bounded context — owner of SKU classification and
+  # the physical profile, see env.sh's own comment). Own user/db name
+  # "product_master", on host port 5450 (past this harness's own
+  # 5441-5449 range). Migrations are embedded in its binary.
+  postgres-product-master:
+    image: postgres:16
+    container_name: e2e-postgres-product-master
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: product_master
+      POSTGRES_PASSWORD: product_master
+      POSTGRES_DB: product_master
+    ports:
+      - "5450:5432"
+    volumes:
+      - e2e_product_master_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U product_master -d product_master"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # network-inventory-planning (inter-warehouse transfer saga). Own
+  # user/db name "nip" on host port 5451 (it ships no compose file).
+  postgres-nip:
+    image: postgres:16
+    container_name: e2e-postgres-nip
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nip
+      POSTGRES_PASSWORD: nip
+      POSTGRES_DB: nip
+    ports:
+      - "5451:5432"
+    volumes:
+      - e2e_nip_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nip -d nip"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # warehouse-planning (producer of CapacityPlanPublished). Own user/db name
+  # "planning" on host port 5452.
+  postgres-planning:
+    image: postgres:16
+    container_name: e2e-postgres-planning
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: planning
+      POSTGRES_PASSWORD: planning
+      POSTGRES_DB: planning
+    ports:
+      - "5452:5432"
+    volumes:
+      - e2e_planning_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planning -d planning"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # inbound-receiving (ASN / dock appointment / receipt, its ADR 0001). Own
+  # user/db name "inbound_receiving" on host port 5453 (it ships no compose
+  # file). Migrations are embedded in its binary.
+  postgres-inbound-receiving:
+    image: postgres:16
+    container_name: e2e-postgres-inbound-receiving
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: inbound_receiving
+      POSTGRES_PASSWORD: inbound_receiving
+      POSTGRES_DB: inbound_receiving
+    ports:
+      - "5453:5432"
+    volumes:
+      - e2e_inbound_receiving_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inbound_receiving -d inbound_receiving"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # slotting-optimization (SlotPlan, its ADR 0001/0002). Own user/db name
+  # "slotting" on host port 5454 (it ships no compose file). Migrations are
+  # embedded in its binary.
+  postgres-slotting:
+    image: postgres:16
+    container_name: e2e-postgres-slotting
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slotting
+      POSTGRES_PASSWORD: slotting
+      POSTGRES_DB: slotting
+    ports:
+      - "5454:5432"
+    volumes:
+      - e2e_slotting_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slotting -d slotting"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # returns-processing (returns: RMA authorization, receipt, inspection,
+  # disposition). Own user/db name "returns_processing" on host port 5455
+  # (it ships no compose file). Migrations are embedded in its binary.
+  postgres-returns:
+    image: postgres:16
+    container_name: e2e-postgres-returns
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: returns_processing
+      POSTGRES_PASSWORD: returns_processing
+      POSTGRES_DB: returns_processing
+    ports:
+      - "5455:5432"
+    volumes:
+      - e2e_returns_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U returns_processing -d returns_processing"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # exception-management (exception cases from consumed facts). Own user/db
+  # name "exception_management" on host port 5456. Migrations are embedded
+  # in its binary.
+  postgres-exceptions:
+    image: postgres:16
+    container_name: e2e-postgres-exceptions
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: exception_management
+      POSTGRES_PASSWORD: exception_management
+      POSTGRES_DB: exception_management
+    ports:
+      - "5456:5432"
+    volumes:
+      - e2e_exceptions_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exception_management -d exception_management"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -186,4 +336,11 @@ volumes:
   e2e_order_pg_data:
   e2e_process_path_pg_data:
   e2e_labor_pg_data:
-  e2e_network_fulfillment_pg_data:
+  e2e_network_pg_data:
+  e2e_product_master_pg_data:
+  e2e_nip_pg_data:
+  e2e_planning_pg_data:
+  e2e_inbound_receiving_pg_data:
+  e2e_slotting_pg_data:
+  e2e_returns_pg_data:
+  e2e_exceptions_pg_data:

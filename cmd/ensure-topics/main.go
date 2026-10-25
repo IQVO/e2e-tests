@@ -1,0 +1,161 @@
+// Command ensure-topics creates, and waits for a leader on, every Kafka topic
+// the harness's services publish to or consume from.
+//
+// Why it exists: a broker with topic auto-creation on is not enough for a
+// freshly started broker. The FIRST publish to a topic can race the broker's
+// own metadata propagation and fail with "Unknown Topic Or Partition", and a
+// consumer group subscribed to a topic that does not exist yet is never given
+// an assignment, so it silently never reads anything (this stalled the
+// inter-warehouse transfer scenario at "no published capacity plan facts" on a
+// clean broker). Creating every topic explicitly up front, then confirming
+// each has a leader, removes both races. It is idempotent: an existing topic is
+// left alone, so it is safe against the shared cluster broker too.
+//
+// Usage: KAFKA_BROKERS=host:port go run ./cmd/ensure-topics
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/segmentio/kafka-go"
+)
+
+// topics is every topic a harness service publishes to or consumes from.
+// Business topics are named warehouse.<context>.events; analytics streams
+// warehouse.<context>.analytics.
+var topics = []string{
+	"warehouse.facility.events",
+	"warehouse.facility.analytics",
+	"warehouse.product-master.events",
+	// product-master's analytics stream: the outbox relay publishes BOTH
+	// topics (integration + analytics) per event; a missing analytics
+	// topic fails the whole relay batch with Unknown Topic Or Partition
+	// (observed live: 32 attempt-capped outbox rows starving the events
+	// topic past every scenario's 30s window on a fresh broker).
+	"warehouse.product-master.analytics",
+	// inbound-receiving's integration topic: inventory-storage consumes
+	// ReceiptLineReceived from it (a group on a topic that does not exist yet
+	// is never assigned a partition), and inbound_receiving.feature scans it.
+	"warehouse.inbound-receiving.events",
+	"warehouse.inbound-receiving.analytics",
+	// slotting-optimization's integration topic (SlotPlanGenerated /
+	// Approved / Rejected, key = plan id): published through its outbox relay
+	// and scanned by slotting_optimization.feature.
+	"warehouse.slotting-optimization.events",
+	// returns-processing's integration topic: ReturnAuthorized /
+	// ReturnLineStaged etc. leave through its outbox relay (which also
+	// publishes the analytics topic below), inventory-storage's RETURN_LINE
+	// consumer subscribes to the events topic (a group on a missing topic is
+	// never assigned a partition), and returns_exceptions.feature scans it.
+	"warehouse.returns-processing.events",
+	"warehouse.returns-processing.analytics",
+	// exception-management's integration topic: ExceptionOpened /
+	// ExceptionAutoResolved etc. through its outbox relay (plus its
+	// analytics topic), and returns_exceptions.feature scans it.
+	"warehouse.exception-management.events",
+	"warehouse.exception-management.analytics",
+	"warehouse.inventory.events",
+	"warehouse.inventory.analytics",
+	"warehouse.work-planning.events",
+	"warehouse.wes.analytics",
+	"warehouse.fulfillment.events",
+	"warehouse.fulfillment.analytics",
+	"warehouse.workforce.events",
+	"warehouse.workforce.analytics",
+	"warehouse.order-management.events",
+	"warehouse.order-management.analytics",
+	"warehouse.process-path-management.events",
+	"warehouse.process-path-management.analytics",
+	"warehouse.labor-performance.events",
+	"warehouse.labor-performance.analytics",
+	"warehouse.network-inventory-planning.events",
+	"warehouse.network-inventory-planning.analytics",
+	"warehouse.warehouse-planning.events",
+	"warehouse.warehouse-planning.analytics",
+	// slotting-optimization's analytics stream: its relay publishes BOTH
+	// topics per event; a missing analytics topic fails the relay batch
+	// (same Unknown Topic Or Partition class as product-master above).
+	"warehouse.slotting-optimization.analytics",
+	// pick-face-replenishment and task-interleaving: wes-work-planning's
+	// integration consumer group subscribes to their events topics (the
+	// REPLENISH consumer and the interleaving hint consumer); a group with
+	// a missing topic in its subscription NEVER gets a partition assigned,
+	// which silently stalls workforce/inventory/work-planning consumption
+	// with it. Their analytics topics cover their own relays.
+	"warehouse.pick-face-replenishment.events",
+	"warehouse.pick-face-replenishment.analytics",
+	"warehouse.task-interleaving.events",
+	"warehouse.task-interleaving.analytics",
+	"warehouse.network-fulfillment.events",
+	"warehouse.network-fulfillment.analytics",
+}
+
+const leaderWait = 30 * time.Second
+
+func main() {
+	brokers := os.Getenv("KAFKA_BROKERS")
+	if brokers == "" {
+		brokers = "localhost:9092"
+	}
+	if err := run(context.Background(), strings.Split(brokers, ",")[0]); err != nil {
+		fmt.Fprintln(os.Stderr, "ensure-topics:", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, broker string) error {
+	conn, err := kafka.DialContext(ctx, "tcp", broker)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", broker, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Topic creation must go to the controller.
+	controller, err := conn.Controller()
+	if err != nil {
+		return fmt.Errorf("find controller: %w", err)
+	}
+	cc, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		return fmt.Errorf("dial controller %s:%d: %w", controller.Host, controller.Port, err)
+	}
+	defer func() { _ = cc.Close() }()
+
+	configs := make([]kafka.TopicConfig, 0, len(topics))
+	for _, t := range topics {
+		configs = append(configs, kafka.TopicConfig{Topic: t, NumPartitions: 1, ReplicationFactor: 1})
+	}
+	// CreateTopics on an existing topic is a no-op success.
+	if err := cc.CreateTopics(configs...); err != nil && !errors.Is(err, kafka.TopicAlreadyExists) {
+		return fmt.Errorf("create topics: %w", err)
+	}
+
+	deadline := time.Now().Add(leaderWait)
+	for _, t := range topics {
+		if err := waitForLeader(conn, t, deadline); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("ensure-topics: %d topics ready on %s\n", len(topics), broker)
+	return nil
+}
+
+func waitForLeader(conn *kafka.Conn, topic string, deadline time.Time) error {
+	for {
+		parts, err := conn.ReadPartitions(topic)
+		if err == nil && len(parts) > 0 && parts[0].Leader.ID >= 0 && parts[0].Leader.Host != "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("topic %s never got an assigned leader (last error: %v)", topic, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}

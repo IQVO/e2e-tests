@@ -26,7 +26,7 @@ func TestProcessPathCycleTimeContract(t *testing.T) {
 			world := newWorld()
 			var err error
 			if operation == "define" {
-				err = world.definePath("contract-path", "contract", "pick", "90s")
+				err = world.definePath("contract-path", "contract", "pick")
 			} else {
 				err = world.revisePath("contract-path", "contract", "pick", "90s")
 			}
@@ -55,8 +55,7 @@ func TestRunIdentityFromEnvironment(t *testing.T) {
 }
 
 func TestDefaultTagsExcludeSetupAndSoak(t *testing.T) {
-	if got := defaultGodogTags(); got != "~@soak && ~@setup" {
+	if got := defaultGodogTags(); got != "~@soak && ~@blocked && ~@setup" {
 		t.Fatalf("default tags = %q; setup must run only during service preparation", got)
 	}
 }
-

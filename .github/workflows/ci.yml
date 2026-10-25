@@ -18,6 +18,19 @@ defaults:
     shell: bash
 
 jobs:
+
+  # Agent-guide sensor (harness-template v3): skills load, references resolve, context budget.
+  # BLOCKING: the guides are clean (0 errors); keep them that way.
+  guide-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 scripts/harness/guide_lint.py
+      - run: python3 scripts/harness/repo_lint.py
+      - run: python3 scripts/harness/test_hook.py
+      - run: python3 scripts/harness/test_repo_lint.py
+
   build-and-vet:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -49,6 +62,20 @@ jobs:
           # compile-check equivalent of "go build" for a test-only module.
           go vet ./...
           go test -c -o /dev/null ./...
+
+  # The product seeder is a real binary with its own tests: fixture validation, the whole
+  # committed catalogue through the client against a contract fake of product-master, and the
+  # derivation rules of the fulfilment harvester. All offline.
+  seed-products-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test ./cmd/seed-products/... ./cmd/seed-inventory/...
+      - run: python3 scripts/test_harvest_fulfilment_products.py
 
   scripts-sanity:
     runs-on: ubuntu-latest

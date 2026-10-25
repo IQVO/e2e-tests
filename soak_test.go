@@ -97,6 +97,8 @@ func soakPostJSON(client *http.Client, url string, body any) (int, []byte, error
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
+	req.Header.Set("Idempotency-Key", newIdempotencyKey()) // creating POSTs require one; never re-sent here
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("HTTP POST %s: %w", url, err)

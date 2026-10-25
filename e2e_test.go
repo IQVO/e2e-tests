@@ -9,7 +9,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,9 +49,13 @@ var (
 	orderBaseURL       = envOrDefault("ORDER_BASE_URL", "http://localhost:8086")
 	processPathBaseURL = envOrDefault("PROCESS_PATH_BASE_URL", "http://localhost:8087")
 	laborBaseURL       = envOrDefault("LABOR_BASE_URL", "http://localhost:8088")
-	inventoryDBURL     = envOrDefault("INVENTORY_DB_URL", "postgres://inventory@localhost:5442/inventory?sslmode=disable")
-	wesDBURL           = envOrDefault("WES_DB_URL", "postgres://wes@localhost:5443/wes?sslmode=disable")
-	fulfillmentDBURL   = envOrDefault("FULFILLMENT_DB_URL", "postgres://fulfillment@localhost:5444/fulfillment_execution?sslmode=disable")
+	networkBaseURL     = envOrDefault("NETWORK_BASE_URL", "http://localhost:8089")
+	// productMasterBaseURL is product-master, the owner of SKU
+	// classification and the physical profile (its ADR 0001/0003).
+	productMasterBaseURL = envOrDefault("PRODUCT_MASTER_BASE_URL", "http://localhost:8090")
+	inventoryDBURL       = envOrDefault("INVENTORY_DB_URL", "postgres://inventory@localhost:5442/inventory?sslmode=disable")
+	wesDBURL             = envOrDefault("WES_DB_URL", "postgres://wes@localhost:5443/wes?sslmode=disable")
+	fulfillmentDBURL     = envOrDefault("FULFILLMENT_DB_URL", "postgres://fulfillment@localhost:5444/fulfillment_execution?sslmode=disable")
 	// This harness's own docker-compose.yml sets each service's Postgres
 	// password equal to its own username (facility/facility,
 	// inventory/inventory, ...) -- see env.sh's DB_URL comment for why
@@ -123,10 +129,44 @@ type world struct {
 	// summary) within a single scenario. Left nil by every other
 	// feature's scenarios. See soak_test.go.
 	soak *soakState
+
+	// xfer is the inter-warehouse transfer saga's correlation (ids minted by
+	// network-inventory-planning at approval). See transfer_test.go.
+	xfer *transferState
+
+	// inb is the inbound-receiving correlation (receipt and appointment ids
+	// by run-scoped ASN number). See inbound_test.go.
+	inb *inboundState
+	// mc is the mastercase correlation (GTINs, SSCCs, bins), see mastercase_test.go.
+	mc *mastercaseState
+
+	// si is the seller-inbound cross-org correlation. See seller_inbound_test.go.
+	si *siState
+
+	// slot is the slotting-optimization correlation (plans, injected demand
+	// and placement guards by run-scoped site). See slotting_test.go.
+	slot *slottingState
+
+	// ret is the returns-processing correlation (RMA, receipt, disposition
+	// of scenario 1). See returns_test.go.
+	ret *returnsState
+
+	// exc is the exception-management correlation (the case under test in
+	// scenarios 2 and 3). See returns_test.go.
+	exc *exceptionsState
 }
 
 func newWorld() *world {
 	return &world{client: &http.Client{Timeout: 10 * time.Second}}
+}
+
+// newIdempotencyKey returns a random 128-bit hex key.
+func newIdempotencyKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }
 
 // doJSON performs method against url with an optional JSON body and
@@ -146,6 +186,14 @@ func (w *world) doJSON(method, url string, body any) error {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if method == http.MethodPost || method == http.MethodPut {
+		// Creating POSTs require an Idempotency-Key (facility-layout ADR-0019 and the fleet
+		// idempotency middleware), and the two returns/exceptions contexts demand it on
+		// their policy-declaring PUTs too. This client never re-sends a request, so a fresh
+		// key per call is the honest equivalent of a device minting one per logical action;
+		// services whose PUTs are not creating simply ignore the header.
+		req.Header.Set("Idempotency-Key", newIdempotencyKey())
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
@@ -167,6 +215,7 @@ func (w *world) doJSON(method, url string, body any) error {
 func (w *world) allServicesAreHealthy() error {
 	for name, base := range map[string]string{
 		"facility-layout":       facilityBaseURL,
+		"product-master":        productMasterBaseURL,
 		"inventory-storage":     inventoryBaseURL,
 		"wes-work-planning":     wesBaseURL,
 		"fulfillment-execution": fulfillmentBaseURL,
@@ -242,9 +291,16 @@ func (w *world) expectOKOr409(err error) error {
 	return nil
 }
 
+// ensureSite/ensureZone/ensureAisle expand w.rs() on their id args: the
+// propagation scenario's site/zones/aisles are RUN-SCOPED (its inventory-
+// storage consumer is event-sourced and must see fresh ZoneRegistered
+// events every run — see facility_layout_propagation.feature), and w.rs
+// lazily mints the suffix, so calls for the fleet's shared reference data
+// (no <run> token) cost nothing.
+
 func (w *world) ensureSite(code, name string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost, facilityBaseURL+"/sites", map[string]any{
-		"siteCode": code, "name": name,
+		"siteCode": w.rs(code), "name": name,
 	}))
 }
 
@@ -259,7 +315,7 @@ func (w *world) ensureLocationType(name string, weightKg, volumeM3 float64) erro
 
 func (w *world) ensureZone(areaCode, zoneCode, siteCode, temperatureClass string, hazmat bool) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/sites/%s/zones", facilityBaseURL, siteCode), map[string]any{
+		fmt.Sprintf("%s/sites/%s/zones", facilityBaseURL, w.rs(siteCode)), map[string]any{
 			"areaCode": areaCode, "zoneCode": zoneCode,
 			"temperatureClass": temperatureClass, "hazmat": hazmat,
 		}))
@@ -275,7 +331,7 @@ func (w *world) ensureHazmatZone(areaCode, zoneCode, siteCode, temperatureClass 
 
 func (w *world) ensureAisle(aisleCode, zoneID string, sequenceHint int, direction string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/zones/%s/aisles", facilityBaseURL, zoneID), map[string]any{
+		fmt.Sprintf("%s/zones/%s/aisles", facilityBaseURL, w.rs(zoneID)), map[string]any{
 			"aisleCode": aisleCode, "sequenceHint": sequenceHint, "direction": direction,
 		}))
 }
@@ -286,7 +342,10 @@ func (w *world) ensureAisle(aisleCode, zoneID string, sequenceHint int, directio
 // final decommission step would otherwise poison every later run.
 func (w *world) ensureLocationSlot(locationCode, locationType string) error {
 	return w.expectOKOr409(w.doJSON(http.MethodPost, facilityBaseURL+"/locations", map[string]any{
-		"locationCode": w.resolveSlot(locationCode), "locationType": locationType,
+		// w.rs FIRST (the <run> token can wrap the whole code, e.g.
+		// "WH2<run>-STOR-HAZ-A01-01-01-A"), then the <disposable>
+		// resolution for the scenario's throwaway ambient slot.
+		"locationCode": w.resolveSlot(w.rs(locationCode)), "locationType": locationType,
 	}))
 }
 
@@ -299,7 +358,9 @@ func (w *world) resolveSlot(code string) string {
 		return code
 	}
 	if w.disposableSlot == "" {
-		w.disposableSlot = runScopedSlot("WH2-STOR-AMB", "A01")
+		// Run-scoped ambient zone id, matching the site/zones this scenario
+		// registers via "WH2<run>" (see facility_layout_propagation.feature).
+		w.disposableSlot = runScopedSlot(w.rs("WH2<run>-STOR-AMB"), "A01")
 	}
 	return w.disposableSlot
 }
@@ -310,23 +371,212 @@ func (w *world) decommissionLocationSlot(locationCode string) error {
 }
 
 // ---------------------------------------------------------------------
-// inventory-storage steps
+// product-master steps (classification owner since product-master ADR
+// 0003 stage C; inventory-storage ADR 0034 hands its write path over)
 // ---------------------------------------------------------------------
 
-// classifyProduct registers a SKU's ProductClassification. handlingTags is
-// a comma-separated list of the closed HandlingTag vocabulary (e.g.
-// "Hazmat"); inventory-storage is the source of truth for this master data.
-func (w *world) classifyProduct(sku, handlingTags string) error {
+// splitTags turns a feature file's comma-separated handling-tag list (e.g.
+// "Hazmat,Fragile") into the JSON array every classification API takes.
+func splitTags(handlingTags string) []string {
 	tags := []string{}
 	for _, t := range strings.Split(handlingTags, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			tags = append(tags, t)
 		}
 	}
-	return w.expectOK2xx(w.doJSON(http.MethodPut,
-		fmt.Sprintf("%s/products/%s/classification", inventoryBaseURL, sku),
-		map[string]any{"handlingTags": tags}))
+	return tags
 }
+
+// registerProductInProductMaster registers the SKU (PUT /products/{sku}).
+// The PUT is idempotent: 201 on first registration, 200 when the product
+// already exists with this description, so a fixed reference SKU re-runs
+// cleanly against a dirty database.
+func (w *world) registerProductInProductMaster(sku string) error {
+	sku = w.rs(sku)
+	return w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s", productMasterBaseURL, sku),
+		map[string]any{"description": "e2e product " + sku}))
+}
+
+// classifyProductInProductMaster sets the SKU's ProductClassification in
+// product-master (PUT /products/{sku}/classification, the same body
+// inventory-storage's retired endpoint took). The response must say the
+// classification is product-master's own (`classificationSource=native`)
+// and carry exactly the requested tags.
+func (w *world) classifyProductInProductMaster(sku, handlingTags string) error {
+	sku = w.rs(sku)
+	want := splitTags(handlingTags)
+	if err := w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/classification", productMasterBaseURL, sku),
+		map[string]any{"handlingTags": want})); err != nil {
+		return err
+	}
+	got := w.last.json()
+	if got["classificationSource"] != "native" {
+		return fmt.Errorf("product-master classified %s with classificationSource=%v, want native (body: %s)", sku, got["classificationSource"], w.last.body)
+	}
+	if !sameTags(got["handlingTags"], want) {
+		return fmt.Errorf("product-master classified %s with handlingTags=%v, want %v (body: %s)", sku, got["handlingTags"], want, w.last.body)
+	}
+	return nil
+}
+
+// registerAndClassifyInProductMaster is the replacement for the retired
+// "SKU X is classified with handling tags Y in inventory-storage" step:
+// a product must be registered before product-master accepts a
+// classification for it.
+func (w *world) registerAndClassifyInProductMaster(sku, handlingTags string) error {
+	if err := w.registerProductInProductMaster(sku); err != nil {
+		return fmt.Errorf("register %s in product-master: %w", sku, err)
+	}
+	return w.classifyProductInProductMaster(sku, handlingTags)
+}
+
+// sameTags reports whether a decoded JSON handlingTags array holds exactly
+// the tags in want (as a set: both sides are duplicate-free by contract).
+func sameTags(raw any, want []string) bool {
+	arr, ok := raw.([]any)
+	if !ok || len(arr) != len(want) {
+		return false
+	}
+	have := map[string]bool{}
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			return false
+		}
+		have[s] = true
+	}
+	for _, t := range want {
+		if !have[t] {
+			return false
+		}
+	}
+	return len(have) == len(want)
+}
+
+// productMasterClassificationHasTags reads product-master's authoritative
+// classification (GET /products/{sku}/classification, product-master ADR
+// 0001) and compares handling tags EXACTLY with want. inventory-storage's
+// local copy has no REST surface since K21 stage E retired its read
+// (inventory-storage ADR 0034): the copy's effect is asserted by
+// stow-time placement in facility_layout_propagation.feature instead.
+func (w *world) productMasterClassificationHasTags(sku string, want []string) error {
+	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/products/%s/classification", productMasterBaseURL, sku), nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("product-master GET classification of %s: status %d (body: %s)", sku, w.last.status, w.last.body)
+	}
+	if got := w.last.json()["handlingTags"]; !sameTags(got, want) {
+		return fmt.Errorf("product-master knows %s as %v, want %v (body: %s)", sku, got, want, w.last.body)
+	}
+	return nil
+}
+
+// productMasterEventuallyClassificationHasTags polls product-master until
+// its classification holds exactly the expected tags. The write itself is
+// a synchronous idempotent PUT, so this is a short-tail wait; it exists so
+// feature files can express the post-write state uniformly.
+func (w *world) productMasterEventuallyClassificationHasTags(sku, handlingTags string) error {
+	sku = w.rs(sku)
+	want := splitTags(handlingTags)
+	return eventually(func() error { return w.productMasterClassificationHasTags(sku, want) })
+}
+
+// inventoryClassificationPutIsGone calls inventory-storage's retired
+// PUT /products/{sku}/classification. K21 stage E (inventory-storage ADR
+// 0034, executed 2026-10-17) DELETED the route outright -- the 410-with-
+// problem-type phase was the interim contract while the write moved to
+// product-master; the final contract is Go chi's plain 404 "page not
+// found", matching inventory-storage's own BDD suite ("The retired
+// classification surface is gone ... response status is 404").
+func (w *world) inventoryClassificationPutIsGone(sku, handlingTags, slug string) error {
+	sku = w.rs(sku)
+	if err := w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/classification", inventoryBaseURL, sku),
+		map[string]any{"handlingTags": splitTags(handlingTags)}); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusNotFound {
+		return fmt.Errorf("inventory-storage PUT classification of %s: status %d, want 404 (route deleted at K21 stage E; body: %s)", sku, w.last.status, w.last.body)
+	}
+	return nil
+}
+
+// declareDimensionsInProductMaster sets the declared unit dimensions and
+// weight (PUT /products/{sku}/dimensions/declared, ADR 0002).
+func (w *world) declareDimensionsInProductMaster(sku string, l, wd, h, g int) error {
+	sku = w.rs(sku)
+	return w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/dimensions/declared", productMasterBaseURL, sku),
+		map[string]any{"lengthMm": l, "widthMm": wd, "heightMm": h, "weightG": g}))
+}
+
+// measureDimensionsInProductMaster records a cubiscan reading
+// (PUT /products/{sku}/dimensions/measured). measuredAt is one minute in
+// the past: product-master rejects a future timestamp with 400, and the SKU
+// is run-scoped, so a re-run never hits 409 stale-measurement.
+func (w *world) measureDimensionsInProductMaster(sku string, l, wd, h, g int) error {
+	sku = w.rs(sku)
+	return w.expectOK2xx(w.doJSON(http.MethodPut,
+		fmt.Sprintf("%s/products/%s/dimensions/measured", productMasterBaseURL, sku),
+		map[string]any{
+			"lengthMm": l, "widthMm": wd, "heightMm": h, "weightG": g,
+			"measuredAt": time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+			"deviceId":   "CUBISCAN-E2E",
+		}))
+}
+
+// physicalProfileIs reads GET /products/{sku}/physical-profile and asserts
+// effectiveSource and the declared-vs-measured discrepancy flag exactly.
+func (w *world) physicalProfileIs(sku, source, discrepancy string) error {
+	if err := w.physicalProfileReadFor(sku); err != nil {
+		return err
+	}
+	sku = w.rs(sku)
+	got := w.last.json()
+	if got["effectiveSource"] != source {
+		return fmt.Errorf("physical profile of %s: effectiveSource=%v, want %q (body: %s)", sku, got["effectiveSource"], source, w.last.body)
+	}
+	if fmt.Sprint(got["discrepancy"]) != discrepancy {
+		return fmt.Errorf("physical profile of %s: discrepancy=%v, want %s (body: %s)", sku, got["discrepancy"], discrepancy, w.last.body)
+	}
+	return nil
+}
+
+// effectiveDimensionsAre re-reads the physical profile and asserts its
+// effective values exactly.
+func (w *world) effectiveDimensionsAre(sku string, l, wd, h, g int) error {
+	if err := w.physicalProfileReadFor(sku); err != nil {
+		return err
+	}
+	eff, ok := w.last.json()["effective"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("physical profile of %s has no effective block (body: %s)", w.rs(sku), w.last.body)
+	}
+	for field, want := range map[string]int{"lengthMm": l, "widthMm": wd, "heightMm": h, "weightG": g} {
+		if v, _ := toFloat(eff[field]); int(v) != want {
+			return fmt.Errorf("physical profile of %s: effective.%s=%v, want %d (body: %s)", w.rs(sku), field, eff[field], want, w.last.body)
+		}
+	}
+	return nil
+}
+
+func (w *world) physicalProfileReadFor(sku string) error {
+	sku = w.rs(sku)
+	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/products/%s/physical-profile", productMasterBaseURL, sku), nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("product-master GET physical-profile of %s: status %d (body: %s)", sku, w.last.status, w.last.body)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------
+// inventory-storage steps
+// ---------------------------------------------------------------------
 
 // stowIsRejected asserts a stow is REFUSED, and specifically by the
 // placement-rule check rather than by any other failure: a 409 whose RFC-7807
@@ -356,7 +606,7 @@ func (w *world) stowIsRejected(qty int, sku, binID string) error {
 // stowable only once that event has been consumed. An immediate one-shot
 // assertion would be testing the propagation delay, not the behaviour.
 func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
-	binID = w.resolveSlot(binID)
+	binID = w.resolveSlot(w.rs(binID))
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -375,7 +625,7 @@ func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
 // the placement rule, used after registering a hazmat zone (the cache must
 // LEARN the zone's attributes) or after a decommission.
 func (w *world) stowEventuallyRejected(qty int, sku, binID string) error {
-	binID = w.resolveSlot(binID)
+	binID = w.resolveSlot(w.rs(binID))
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -1303,6 +1553,92 @@ func (w *world) laborEventuallyReportsScorecard(associateID string, minTasks int
 // tests. Live consumer propagation has its own scenario.
 // ---------------------------------------------------------------------
 
+// networkFulfillmentIsHealthy is a separate Background step (rather than
+// folded into allServicesAreHealthy) for the same reason
+// opsAgentIsHealthy is: bootstrap.feature and every other existing
+// scenario's Background is unaware of network-fulfillment, and only its
+// own feature requires the service to be up.
+func (w *world) networkFulfillmentIsHealthy() error {
+	if err := w.doJSON(http.MethodGet, networkBaseURL+"/healthz", nil); err != nil {
+		return fmt.Errorf("network-fulfillment not reachable: %w", err)
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("network-fulfillment /healthz returned %d, body=%s", w.last.status, w.last.body)
+	}
+	return nil
+}
+
+// networkOrderResponse mirrors network-fulfillment's networkOrderResponse
+// DTO (internal/adapters/inbound/http/dto.go) just enough for this
+// harness's assertions — both network vocabularies per line, so the ACL
+// translation decision is directly observable over the wire.
+type networkOrderResponse struct {
+	NetworkRef string `json:"networkRef"`
+	State      string `json:"state"`
+	Lines      []struct {
+		NetworkProductId string `json:"networkProductId"`
+		SKU              string `json:"sku"`
+		Quantity         int    `json:"quantity"`
+	} `json:"lines"`
+}
+
+// networkOrderEventuallyReportsState polls GET /network-orders/{ref} until
+// network-fulfillment's poller (POLL_INTERVAL=5s, see 03-up-services.sh)
+// has picked up the seeded demand and answered it, storing the decoded
+// response on w.last so a following step can assert on its lines.
+func (w *world) networkOrderEventuallyReportsState(networkRef, wantState string) error {
+	return eventually(func() error {
+		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/network-orders/%s", networkBaseURL, networkRef), nil); err != nil {
+			return err
+		}
+		if w.last.status != http.StatusOK {
+			return fmt.Errorf("GET /network-orders/%s status = %d (body: %s)", networkRef, w.last.status, w.last.body)
+		}
+		var got networkOrderResponse
+		if err := json.Unmarshal(w.last.body, &got); err != nil {
+			return fmt.Errorf("decode network order: %w (body: %s)", err, w.last.body)
+		}
+		if got.State != wantState {
+			return fmt.Errorf("network order %s state = %q, want %q", networkRef, got.State, wantState)
+		}
+		return nil
+	})
+}
+
+// theNetworkOrderHasNoLines asserts the last-fetched network order (see
+// networkOrderEventuallyReportsState) carries no lines — the shape
+// ReceiveUntranslatable builds, proving the untranslatable product never
+// reached the domain's normal line-bearing path.
+func (w *world) theNetworkOrderHasNoLines() error {
+	var got networkOrderResponse
+	if err := json.Unmarshal(w.last.body, &got); err != nil {
+		return fmt.Errorf("decode network order: %w (body: %s)", err, w.last.body)
+	}
+	if len(got.Lines) != 0 {
+		return fmt.Errorf("network order lines = %d, want 0 (body: %s)", len(got.Lines), w.last.body)
+	}
+	return nil
+}
+
+// theNetworkOrderHasLineWithProductAndSKU asserts the last-fetched network
+// order carries a line exposing BOTH the network's product id and the
+// SKU the Anti-Corruption Layer translated it to — publishing only one
+// would make the ACL's translation decision invisible to an operator
+// reconciling a disputed order (see network-fulfillment's own dto.go doc
+// comment).
+func (w *world) theNetworkOrderHasLineWithProductAndSKU(networkProductId, sku string) error {
+	var got networkOrderResponse
+	if err := json.Unmarshal(w.last.body, &got); err != nil {
+		return fmt.Errorf("decode network order: %w (body: %s)", err, w.last.body)
+	}
+	for _, l := range got.Lines {
+		if l.NetworkProductId == networkProductId && l.SKU == sku {
+			return nil
+		}
+	}
+	return fmt.Errorf("no line with networkProductId=%q sku=%q in %+v", networkProductId, sku, got.Lines)
+}
+
 // rs ("run scope") expands the literal token "<run>" in an identifier into
 // a value unique to this test process, so a scenario creates fresh entities
 // on every run instead of colliding with, or accumulating on top of, what
@@ -1348,10 +1684,17 @@ func (w *world) resolvePathID(pathID string) string {
 	return w.rs(pathID)
 }
 
-func (w *world) definePath(pathID, matchPrefix, capabilities, cycleTimeP95 string) error {
+// processPathCycleTimeP95 is the operator-declared p95 cycle time the scenarios
+// give every path they define or revise. process-path-management requires it
+// (positive Go duration, its ADR 0010; POST and PUT answer 422
+// invalid-cycle-time-p95 without it), so the steps below must always send one.
+const processPathCycleTimeP95 = "2h"
+
+func (w *world) definePath(pathID, matchPrefix, capabilities string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPost, processPathBaseURL+"/process-paths", map[string]any{
-		"pathId": pathID, "matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","), "cycleTimeP95": cycleTimeP95,
+		"pathId": pathID, "matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"cycleTimeP95": processPathCycleTimeP95,
 	}))
 }
 
@@ -1386,7 +1729,8 @@ func (w *world) pathResponseMatchPrefixIs(want string) error {
 func (w *world) revisePath(pathID, matchPrefix, capabilities, cycleTimeP95 string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/process-paths/%s", processPathBaseURL, pathID), map[string]any{
-		"matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","), "cycleTimeP95": cycleTimeP95,
+		"matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"cycleTimeP95": processPathCycleTimeP95,
 	}))
 }
 
@@ -1510,6 +1854,14 @@ func eventually(fn func() error) error {
 
 func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
+	registerTransferSteps(sc, w)
+	registerInboundSteps(sc, w)
+	registerMastercaseSteps(sc, w)
+	registerSellerInboundSteps(sc, w)
+	registerPhase5ASteps(sc, w)
+	registerReturnsSteps(sc, w)
+	registerSlottingSteps(sc, w)
+	registerPhase5BSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
 		return ctx, nil
@@ -1517,8 +1869,18 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 
 	sc.Step(`^all warehouse-systems services are healthy$`, w.allServicesAreHealthy)
 	sc.Step(`^warehouse-ops-agent is healthy$`, w.opsAgentIsHealthy)
+	sc.Step(`^network-fulfillment is healthy$`, w.networkFulfillmentIsHealthy)
 
 	// facility-layout
+
+	// product-master (classification + physical profile owner)
+	sc.Step(`^SKU "([^"]*)" is registered in product-master$`, w.registerProductInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is classified with handling tags "([^"]*)" in product-master$`, w.classifyProductInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is registered and classified with handling tags "([^"]*)" in product-master$`, w.registerAndClassifyInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is declared in product-master as (\d+)x(\d+)x(\d+) mm and (\d+) g$`, w.declareDimensionsInProductMaster)
+	sc.Step(`^SKU "([^"]*)" is measured in product-master as (\d+)x(\d+)x(\d+) mm and (\d+) g$`, w.measureDimensionsInProductMaster)
+	sc.Step(`^product-master's physical profile of SKU "([^"]*)" has effective source "([^"]*)" and discrepancy (true|false)$`, w.physicalProfileIs)
+	sc.Step(`^product-master's effective dimensions of SKU "([^"]*)" are (\d+)x(\d+)x(\d+) mm and (\d+) g$`, w.effectiveDimensionsAre)
 
 	// inventory-storage
 	sc.Step(`^I decommission location slot "([^"]*)" in facility-layout$`, w.decommissionLocationSlot)
@@ -1533,7 +1895,9 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^location slot "([^"]*)" of type "([^"]*)" exists in facility-layout$`, w.ensureLocationSlot)
 
 	sc.Step(`^a Bin "([^"]*)" with capacity (\d+) exists in inventory-storage$`, w.binExists)
-	sc.Step(`^SKU "([^"]*)" is classified with handling tags "([^"]*)" in inventory-storage$`, w.classifyProduct)
+	sc.Step(`^product-master eventually knows SKU "([^"]*)" as "([^"]*)"$`, w.productMasterEventuallyClassificationHasTags)
+	sc.Step(`^product-master still knows SKU "([^"]*)" as "([^"]*)"$`, w.productMasterEventuallyClassificationHasTags)
+	sc.Step(`^classifying SKU "([^"]*)" with handling tags "([^"]*)" in inventory-storage is refused with 404 "([^"]*)"$`, w.inventoryClassificationPutIsGone)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage is rejected$`, w.stowIsRejected)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage eventually succeeds$`, w.stowEventuallySucceeds)
 	sc.Step(`^stowing (\d+) units of SKU "([^"]*)" into bin "([^"]*)" in inventory-storage is eventually rejected$`, w.stowEventuallyRejected)
@@ -1605,6 +1969,11 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^process-path-management's active process path listing does not include "([^"]*)"$`, w.activeListingDoesNotInclude)
 	sc.Step(`^process-path-management's full process path listing includes "([^"]*)"$`, w.fullListingIncludes)
 
+	// network-fulfillment (inbound leg, ADR 0001)
+	sc.Step(`^network-fulfillment eventually reports network order "([^"]*)" as ([A-Z]+)$`, w.networkOrderEventuallyReportsState)
+	sc.Step(`^that network order has no lines$`, w.theNetworkOrderHasNoLines)
+	sc.Step(`^that network order has a line with network product id "([^"]*)" and SKU "([^"]*)"$`, w.theNetworkOrderHasLineWithProductAndSKU)
+
 	// soak backlog ramp (features/soak_backlog_ramp.feature, @soak —
 	// excluded from the default run, see TestMain's Tags option)
 	sc.Step(`^wes-work-planning has release-fed work pools for soak process paths "([^"]*)" and "([^"]*)" with the configured WIP limit$`, w.soakSeedWorkPools)
@@ -1613,7 +1982,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the soak run summary is printed$`, w.soakSummaryIsPrinted)
 }
 
-func defaultGodogTags() string { return "~@soak && ~@setup" }
+func defaultGodogTags() string { return "~@soak && ~@blocked && ~@setup" }
 
 func TestMain(m *testing.M) {
 	if os.Getenv("E2E_UNIT_ONLY") == "1" {
@@ -1625,7 +1994,7 @@ func TestMain(m *testing.M) {
 	// default; scripts/06-run-soak.sh sets GODOG_TAGS=@soak to run ONLY
 	// that scenario. godog's Tags expression: "~@soak" means "not
 	// tagged @soak".
-	tags := envOrDefault("GODOG_TAGS", defaultGodogTags())
+	tags := envOrDefault("GODOG_TAGS", "~@soak && ~@blocked")
 
 	suite := godog.TestSuite{
 		Name:                "e2e",
