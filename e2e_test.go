@@ -1994,7 +1994,7 @@ func TestMain(m *testing.M) {
 	// default; scripts/06-run-soak.sh sets GODOG_TAGS=@soak to run ONLY
 	// that scenario. godog's Tags expression: "~@soak" means "not
 	// tagged @soak".
-	tags := envOrDefault("GODOG_TAGS", "~@soak && ~@blocked")
+	tags := envOrDefault("GODOG_TAGS", defaultGodogTags())
 
 	suite := godog.TestSuite{
 		Name:                "e2e",

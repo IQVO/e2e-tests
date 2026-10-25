@@ -45,7 +45,7 @@ class CoverageManifestTests(unittest.TestCase):
         self.assertTrue(any("unlisted-worker" in e for e in self.check()))
 
     def test_commented_inventory_is_not_runtime(self):
-        self.tree["warehouse-infra"]["terraform/locals.tf"] += '\n# "ghost" = {}\n'
+        self.tree["warehouse-infra"]["terraform/apps.yaml"] += '\n  # "ghost": {kind: other, build_image: false}\n'
         self.tree["warehouse-console"]["src/App.tsx"] += '\n// import("ghost_mfe/App")\n'
         self.assertEqual([], self.check())
 

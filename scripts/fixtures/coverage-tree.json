@@ -67,10 +67,7 @@
     }
   },
   "warehouse-infra": {
-    "terraform/locals.tf": "locals { services = { \"alpha\" = {} } analytics_services = toset([\"alpha\"]) }",
-    "terraform/mcp.tf": "locals { mcp_services = toset([\"alpha\"]) }",
-    "terraform/network-fulfillment.tf": "locals { network_fulfillment_chart_path = \"network-fulfillment\" }",
-    "terraform/ops-agent.tf": "locals { ops_agent_chart_path = \"warehouse-ops-agent\" }"
+    "terraform/apps.yaml": "applications:\n  alpha:\n    kind: service\n    database: true\n    analytics: true\n    frontend_remote: alpha_mfe\n  network-fulfillment:\n    kind: other\n    database: true\n  warehouse-ops-agent:\n    kind: other\n  warehouse-console:\n    kind: other\n    build_image: false\n    site: true\n"
   },
   "warehouse-console": {
     "src/App.tsx": "const Alpha = lazy(() => import(\"alpha_mfe/App\"));\n<Route path=\"/alpha/*\" element={<RemoteBoundary component={Alpha} />} />"

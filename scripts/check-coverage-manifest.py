@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Compare coverage with committed deployment/source trees, never sibling worktrees."""
+"""Compare coverage with committed deployment/source trees, never sibling worktrees.
+
+The deployed truth is warehouse-infra's application registry
+(terraform/apps.yaml, ADR 0007): one entry per application, with the
+flags that decide which surfaces exist (kind, database, analytics,
+frontend_remote, site). Binary names are verified against each repo's
+own committed cmd/ tree at origin/develop (or an exact-SHA snapshot via
+--refs, as the cluster-acceptance release gate does).
+"""
 import argparse
 import io
 import json
@@ -9,7 +17,6 @@ import subprocess
 import sys
 import tarfile
 
-import hcl2
 import yaml
 
 
@@ -20,32 +27,16 @@ def read_git_tree(repo, ref):
                 for m in archive.getmembers() if m.isfile()}
 
 
-def locals_from(source):
-    result = {}
-    for block in hcl2.loads(source).get("locals", []):
-        result.update(block)
-    return result
+def registry_from(infra):
+    apps = yaml.safe_load(infra["terraform/apps.yaml"]).get("applications")
+    if not apps:
+        raise ValueError("terraform/apps.yaml: no applications registry")
+    return apps
 
 
-def literal_set(source, name):
-    # Inspect the HCL AST: hcl2's dict transform discards quotes inside toset().
-    for attr in hcl2.parses(source).find_data("attribute"):
-        if str(attr.children[0].children[0]) != name:
-            continue
-        calls = list(attr.find_data("function_call"))
-        tuples = list(attr.find_data("tuple"))
-        if len(calls) != 1 or str(calls[0].children[0].children[0]) != "toset" or len(tuples) != 1:
-            break
-        values = []
-        for expr in tuples[0].children:
-            if getattr(expr, "data", None) == "new_line_or_comment":
-                continue
-            strings = list(expr.find_data("string"))
-            if len(strings) != 1 or list(expr.find_data("interpolation")):
-                raise ValueError(f"{name}: inventory must contain literal strings")
-            values.append("".join(str(p.children[0]) for p in strings[0].children))
-        return set(values)
-    raise ValueError(f"{name}: expected a literal toset inventory")
+def cmd_dirs(tree):
+    # cmd directories with Go source are independent executables in this fleet.
+    return {p.split("/")[1] for p in tree if re.match(r"^cmd/[^/]+/[^/]+\.go$", p) and not p.endswith("_test.go")}
 
 
 def without_comments(source):
@@ -54,26 +45,42 @@ def without_comments(source):
                   lambda m: m.group(1) or "", source)
 
 
+def expected_kinds(app, cmds):
+    kinds = set()
+    if cmds:
+        # Every backend application in this fleet ships its runtime as
+        # cmd/<name> binaries (registry-image or not); sites ship none.
+        kinds.add("backend")
+    if app.get("kind") == "service" and app.get("database"):
+        kinds.add("oltp")
+    if app.get("analytics"):
+        kinds.update(("projector", "reports"))
+    if "mcp" in cmds:
+        kinds.add("mcp")
+    if app.get("frontend_remote"):
+        kinds.add("mfe")
+    if app.get("site"):
+        kinds.add("shell")
+    return kinds
+
+
 def check(manifest, trees):
     components = manifest["components"]
     infra = trees["warehouse-infra"]
-    deployed = locals_from(infra["terraform/locals.tf"])
-    core = set(deployed["services"])
-    analytics = literal_set(infra["terraform/locals.tf"], "analytics_services")
-    mcps = literal_set(infra["terraform/mcp.tf"], "mcp_services")
-    backends = set(core)
-    for file, key, owner in [("network-fulfillment.tf", "network_fulfillment_chart_path", "network-fulfillment"),
-                              ("ops-agent.tf", "ops_agent_chart_path", "warehouse-ops-agent")]:
-        if key in locals_from(infra["terraform/" + file]):
-            backends.add(owner)
-    expected = {name: {"backend", "oltp"} for name in core}
-    for name in backends - core:
-        expected[name] = {"backend"}
-    for kind, names in [("mcp", mcps), ("projector", analytics), ("reports", analytics)]:
-        for name in names:
-            expected.setdefault(name, set()).add(kind)
-    expected["warehouse-console"] = {"shell"}
-    app = without_comments(trees["warehouse-console"]["src/App.tsx"])
+    registry = registry_from(infra)
+    console_name = "warehouse-console"
+    expected = {}
+    backends = set()
+    for name, app in registry.items():
+        cmds = cmd_dirs(trees.get(name, {}))
+        kinds = expected_kinds(app, cmds)
+        if not kinds and name not in components:
+            continue
+        expected[name] = kinds
+        if "backend" in kinds:
+            backends.add(name)
+    expected.setdefault(console_name, {"shell"})
+    app = without_comments(trees[console_name]["src/App.tsx"])
     imports = dict(re.findall(r'const\s+(\w+)\s*=\s*lazy\(\(\)\s*=>\s*import\(["\x27]([^"\x27]+)["\x27]\)', app))
     errors = []
     for symbol, remote in imports.items():
@@ -95,9 +102,7 @@ def check(manifest, trees):
     for name in sorted(backends):
         row = components.get(name, {})
         binaries = row.get("commands", {})
-        tree = trees.get(name, {})
-        # cmd directories with Go source are independent executables in this fleet.
-        actual = {p.split('/')[1] for p in tree if re.match(r'^cmd/[^/]+/[^/]+\.go$', p) and not p.endswith('_test.go')}
+        actual = cmd_dirs(trees.get(name, {}))
         for cmd in sorted(actual - set(binaries.values())):
             errors.append(f"{name}: unlisted cmd/{cmd} runtime")
         for kind, cmd in binaries.items():
@@ -117,12 +122,9 @@ def main():
     args = parser.parse_args()
     manifest = yaml.safe_load(args.manifest.read_text())
     refs = json.loads(args.refs.read_text()) if args.refs else None
-    names = set(manifest["components"]) | {"warehouse-infra", "warehouse-console"}
-    # Infrastructure owns the set of backend repositories, even if a manifest row is deleted.
     infra = read_git_tree(args.repos_root / "warehouse-infra", refs["warehouse-infra"] if refs else "origin/develop")
-    names.update(locals_from(infra["terraform/locals.tf"])["services"])
-    names.update(["network-fulfillment", "warehouse-ops-agent"])
-    trees = {}
+    names = set(manifest["components"]) | set(registry_from(infra)) | {"warehouse-console"}
+    trees = {"warehouse-infra": infra}
     for name in sorted(names):
         ref = refs[name] if refs else "origin/develop"
         if refs and not re.fullmatch(r"[0-9a-f]{40}", ref):

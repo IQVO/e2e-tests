@@ -586,18 +586,3 @@ wait_for_http "${OPS_AGENT_BASE_URL}/healthz"
 
 log "warehouse-ops-agent up"
 printf '  %-24s %s\n' warehouse-ops-agent "${OPS_AGENT_BASE_URL}"
-
-# Seed the run-scoped inventory before starting the immediate poller.
-GODOG_TAGS=@network-seed bash "${SCRIPT_DIR}/04-run-tests.sh"
-start_service network-fulfillment "${BIN_DIR}/network-fulfillment" \
-  PORT="${NETWORK_FULFILLMENT_HTTP_PORT}" \
-  DATABASE_URL="${NETWORK_FULFILLMENT_DB_URL}" \
-  PGPASSWORD=network_fulfillment \
-  MIGRATIONS_PATH="${NETWORK_FULFILLMENT_REPO}/migrations" \
-  NETWORK_MODE=stub \
-  POLL_INTERVAL=1s \
-  ORDER_MANAGEMENT_URL="${ORDER_BASE_URL}" \
-  PRODUCT_TRANSLATION_FILE="${PRODUCT_TRANSLATION_FILE}" \
-  NETWORK_SEED_FILE="${NETWORK_SEED_FILE}"
-wait_for_http "${NETWORK_FULFILLMENT_BASE_URL}/healthz"
-wait_for_http "${NETWORK_FULFILLMENT_BASE_URL}/inbound-status"
