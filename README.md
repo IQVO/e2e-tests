@@ -597,3 +597,20 @@ returns-processing, exception-management and inventory-storage (with its
 `RETURN_LINE_CONSUMER_GROUP`); the feature injects the upstream facts
 itself, so no order-management, fulfillment-execution or product-master
 checkout is needed.
+
+### Order fulfillment site (`@order-site`)
+
+`features/phase5_order_site.feature` proves order-management ADR 0044 through the real
+`POST /orders` and the real `warehouse.order-management.events` topic: an order that names a
+`fulfillmentSiteId` projects its `SiteSkuDemandChanged` to THAT site (`order-site-v1`), an order
+that names none goes to the static site (`static-site-v1`), a malformed site is refused with
+`400 invalid-fulfillment-site-id`, and `GET /orders/{id}` returns the site.
+
+- Demand is emitted only for lines that **allocate** (order-management ADR 0035), so the scenario
+  first puts 10 loose units into a seeded forward bin (`ABE8`, the same helper as `@mastercase`).
+- No new environment variables: it uses the existing `ORDER_BASE_URL`, `INVENTORY_BASE_URL`,
+  `FACILITY_BASE_URL` and `KAFKA_BROKERS`.
+- If every plain order answers `422 line-ineligible-for-resolved-path`, order-management's path
+  cache (rebuilt from the process-path-management events topic on every start) has lost a path
+  definition, usually because the topic's retention expired it. Revising the path (PUT
+  `/process-paths/{id}` with a real change, then back) republishes it.
