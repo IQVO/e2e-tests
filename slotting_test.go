@@ -48,9 +48,11 @@ const (
 	typeSiteSkuDemandChanged = "com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged"
 
 	// slotLocationType is the facility-layout location type of every forward
-	// slot the feature registers: 1000 kg / 2 m3, far above one unit of the
-	// feature's SKUs (205x121x82 mm, 1720 g).
-	slotLocationType = "SlotFwdRack"
+	// slot the feature registers. facility-layout's placement rules
+	// (RULE-ALLOW-FWD-*) allow only CartonFlow, Shelf and ToteWall in a FWD
+	// zone; Shelf is a seeded type whose default capacity is far above one
+	// unit of the feature's SKUs (205x121x82 mm, 1720 g).
+	slotLocationType = "Shelf"
 	// slotLookbackDays is the demand window of every plan; the injected
 	// demand is due one hour ago, well inside it.
 	slotLookbackDays = 7
@@ -114,9 +116,6 @@ func (w *world) slotsExist(site string, hazmat bool, codes ...string) error {
 	site = w.rs(site)
 	if err := w.ensureSite(site, "Slotting E2E "+site); err != nil {
 		return fmt.Errorf("site %s: %w", site, err)
-	}
-	if err := w.ensureLocationType(slotLocationType, 1000, 2.0); err != nil {
-		return fmt.Errorf("location type %s: %w", slotLocationType, err)
 	}
 	for _, raw := range codes {
 		code := w.rs(raw)
