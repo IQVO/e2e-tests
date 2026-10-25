@@ -1300,10 +1300,7 @@ func (w *world) laborEventuallyReportsScorecard(associateID string, minTasks int
 // on this service's OWN read model after each write — proving the
 // write side and the resulting state transition work against a real,
 // independently running process, not just its own unit/integration
-// tests. (No sibling context in this harness runs with
-// PATH_CATALOGUE_SOURCE=kafka today — see 03-up-services.sh's own
-// comment — so a cross-service consumption proof is a separate,
-// future scenario once one does.)
+// tests. Live consumer propagation has its own scenario.
 // ---------------------------------------------------------------------
 
 // rs ("run scope") expands the literal token "<run>" in an identifier into
@@ -1338,23 +1335,23 @@ func (w *world) rs(id string) string {
 		return id
 	}
 	if w.runSuffix == "" {
-		w.runSuffix = fmt.Sprintf("%d", time.Now().UnixNano()%100000000)
+		w.runSuffix = envOrDefault("E2E_RUN_ID", fmt.Sprintf("%d", time.Now().UnixNano()))
 	}
 	return strings.ReplaceAll(id, "<run>", w.runSuffix)
 }
 
 // resolvePathID is rs with a process-path-shaped default for the bare token.
 func (w *world) resolvePathID(pathID string) string {
-	if !strings.Contains(pathID, "<run>") {
-		return pathID
+	if pathID == "<run>" {
+		pathID = "E2E-PROCESS-PATH-<run>"
 	}
-	return w.rs("E2E-PROCESS-PATH-<run>")
+	return w.rs(pathID)
 }
 
-func (w *world) definePath(pathID, matchPrefix, capabilities string) error {
+func (w *world) definePath(pathID, matchPrefix, capabilities, cycleTimeP95 string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPost, processPathBaseURL+"/process-paths", map[string]any{
-		"pathId": pathID, "matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"pathId": pathID, "matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","), "cycleTimeP95": cycleTimeP95,
 	}))
 }
 
@@ -1386,10 +1383,10 @@ func (w *world) pathResponseMatchPrefixIs(want string) error {
 	return nil
 }
 
-func (w *world) revisePath(pathID, matchPrefix, capabilities string) error {
+func (w *world) revisePath(pathID, matchPrefix, capabilities, cycleTimeP95 string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/process-paths/%s", processPathBaseURL, pathID), map[string]any{
-		"matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
+		"matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","), "cycleTimeP95": cycleTimeP95,
 	}))
 }
 
@@ -1598,11 +1595,11 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^labor-performance eventually reports a scorecard for associate "([^"]*)" with at least (\d+) tasks? scored$`, w.laborEventuallyReportsScorecard)
 
 	// process-path-management
-	sc.Step(`^I define process path "([^"]*)" with match prefix "([^"]*)" and required capabilities "([^"]*)" in process-path-management$`, w.definePath)
+	sc.Step(`^I define process path "([^"]*)" with match prefix "([^"]*)" and required capabilities "([^"]*)" and cycle time P95 "([^"]*)" in process-path-management$`, w.definePath)
 	sc.Step(`^I get process path "([^"]*)" from process-path-management$`, w.getPath)
 	sc.Step(`^process path "([^"]*)" in process-path-management has status "([^"]*)"$`, w.pathStatusIs)
 	sc.Step(`^the process path response match prefix is "([^"]*)"$`, w.pathResponseMatchPrefixIs)
-	sc.Step(`^I revise process path "([^"]*)" to match prefix "([^"]*)" and required capabilities "([^"]*)" in process-path-management$`, w.revisePath)
+	sc.Step(`^I revise process path "([^"]*)" to match prefix "([^"]*)" and required capabilities "([^"]*)" and cycle time P95 "([^"]*)" in process-path-management$`, w.revisePath)
 	sc.Step(`^I deactivate process path "([^"]*)" in process-path-management$`, w.deactivatePath)
 	sc.Step(`^process-path-management's active process path listing includes "([^"]*)"$`, w.activeListingIncludes)
 	sc.Step(`^process-path-management's active process path listing does not include "([^"]*)"$`, w.activeListingDoesNotInclude)
@@ -1616,14 +1613,19 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the soak run summary is printed$`, w.soakSummaryIsPrinted)
 }
 
+func defaultGodogTags() string { return "~@soak && ~@setup" }
+
 func TestMain(m *testing.M) {
+	if os.Getenv("E2E_UNIT_ONLY") == "1" {
+		os.Exit(m.Run())
+	}
 	// @soak (features/soak_backlog_ramp.feature) is a long, ramping
 	// load run — potentially an hour — and must never run as part of an
 	// ordinary `go test`/scripts/04-run-tests.sh invocation. Excluded by
 	// default; scripts/06-run-soak.sh sets GODOG_TAGS=@soak to run ONLY
 	// that scenario. godog's Tags expression: "~@soak" means "not
 	// tagged @soak".
-	tags := envOrDefault("GODOG_TAGS", "~@soak")
+	tags := envOrDefault("GODOG_TAGS", defaultGodogTags())
 
 	suite := godog.TestSuite{
 		Name:                "e2e",

@@ -4,7 +4,7 @@
 
 # ---- repo layout -------------------------------------------------
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPOS_ROOT="$(cd "${WORKSPACE_ROOT}/.." && pwd)"
+REPOS_ROOT="${REPOS_ROOT:-$(cd "${WORKSPACE_ROOT}/.." && pwd)}"
 
 FACILITY_REPO="${REPOS_ROOT}/facility-layout"
 INVENTORY_REPO="${REPOS_ROOT}/inventory-storage"
@@ -38,7 +38,7 @@ LABOR_REPO="${REPOS_ROOT}/labor-performance"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
-RUN_DIR="${WORKSPACE_ROOT}/run"
+RUN_DIR="${RUN_DIR:-${WORKSPACE_ROOT}/run}"
 
 # ---- HTTP ports (offset from each repo's own default :8080 so all
 #      five can run side by side on one machine) -------------------
@@ -94,21 +94,11 @@ WORKFORCE_MCP_URL="http://localhost:${WORKFORCE_MCP_PORT}/mcp"
 LABOR_MCP_URL="http://localhost:${LABOR_MCP_PORT}/mcp"
 ORDER_MCP_URL="http://localhost:${ORDER_MCP_PORT}/mcp"
 
-# Fixed test-only bearer read keys, one per context's own MCP server —
-# same static-bearer-key scheme every context uses in prod (ADR-0008),
-# just a throwaway value for this local harness.
-FACILITY_MCP_READ_KEY="e2e-facility-mcp-read-key"
-INVENTORY_MCP_READ_KEY="e2e-inventory-mcp-read-key"
-WES_MCP_READ_KEY="e2e-wes-mcp-read-key"
-FULFILLMENT_MCP_READ_KEY="e2e-fulfillment-mcp-read-key"
-WORKFORCE_MCP_READ_KEY="e2e-workforce-mcp-read-key"
-LABOR_MCP_READ_KEY="e2e-labor-mcp-read-key"
-ORDER_MCP_READ_KEY="e2e-order-mcp-read-key"
+# MCP servers expose unauthenticated Streamable HTTP on the local harness.
 
 # ---- warehouse-ops-agent (the agentic decision-support layer, T5) --
 OPS_AGENT_HTTP_PORT=8096
 OPS_AGENT_BASE_URL="http://localhost:${OPS_AGENT_HTTP_PORT}"
-OPS_AGENT_MCP_READ_KEY="e2e-ops-agent-mcp-read-key"
 
 # ---- Analytics *-reports ports (each context's separate read-only reports
 #      binary -- cmd/<svc>-reports, backed by its own analytical Postgres,
@@ -187,7 +177,7 @@ LABOR_DB_URL="postgres://labor@localhost:5448/labor?sslmode=disable"
 #      kind cluster and exposed to the host at localhost:9092 via a
 #      Bitnami externalAccess NodePort (warehouse-infra PR #6). This
 #      harness does not start its own broker -- see scripts/02-up-infra.sh.
-KAFKA_BROKERS="localhost:9092"
+KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:19092}"
 
 # ---- Kafka consumer-group isolation --------------------------------
 # Consumer-group offsets are SHARED infrastructure state, not per-process
@@ -215,3 +205,13 @@ LABOR_CONSUMER_GROUP="labor-performance-${E2E_CONSUMER_GROUP_SUFFIX}"
 
 # ---- misc -----------------------------------------------------------
 HEALTH_TIMEOUT_SECS=60
+
+# network-fulfillment is the ninth database / tenth backend application.
+NETWORK_FULFILLMENT_REPO="${REPOS_ROOT}/network-fulfillment"
+NETWORK_FULFILLMENT_HTTP_PORT=8089
+NETWORK_FULFILLMENT_BASE_URL="http://localhost:${NETWORK_FULFILLMENT_HTTP_PORT}"
+NETWORK_FULFILLMENT_DB_URL="postgres://network_fulfillment@localhost:5449/network_fulfillment?sslmode=disable"
+PRODUCT_TRANSLATION_FILE="${RUN_DIR}/network/product-translation.json"
+NETWORK_SEED_FILE="${RUN_DIR}/network/demand.json"
+# Separate site for the network's required deadline; ordinary fallback orders use e2e-native.
+NATIVE_SITE_ID=e2e-native

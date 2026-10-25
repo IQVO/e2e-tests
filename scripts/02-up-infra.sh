@@ -23,19 +23,14 @@ source "${SCRIPT_DIR}/lib.sh"
 command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
 docker info >/dev/null 2>&1 || die "the Docker daemon is not reachable — start Docker Desktop first"
 
-if nc -z localhost 9092 2>/dev/null; then
-  ok "shared Kafka broker reachable at localhost:9092 (warehouse-infra kind cluster)"
-else
-  die "Kafka is not reachable at localhost:9092. This harness no longer starts its own broker -- bring up the warehouse-infra kind cluster first (cd ../warehouse-infra && scripts/up.sh), which exposes Kafka to the host via externalAccess."
-fi
-wait_for_tcp localhost 9092 30
+wait_for_tcp "${KAFKA_BROKERS%:*}" "${KAFKA_BROKERS##*:}" 30
 
 log "starting per-service Postgres instances (docker compose, project warehouse-e2e)"
 docker compose -f "${WORKSPACE_ROOT}/docker-compose.yml" up -d
 
-log "waiting for all 8 Postgres instances to report healthy"
+log "waiting for all 9 Postgres instances to report healthy"
 deadline=$((SECONDS + 60))
-for svc in postgres-facility postgres-inventory postgres-wes postgres-fulfillment postgres-workforce postgres-order postgres-process-path postgres-labor; do
+for svc in postgres-facility postgres-inventory postgres-wes postgres-fulfillment postgres-workforce postgres-order postgres-process-path postgres-labor postgres-network-fulfillment; do
   while true; do
     status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
     if [[ "${status}" == "healthy" ]]; then

@@ -1,0 +1,215 @@
+# Declared surfaces; clusterChecks are Phase 4+ obligations, not executed native coverage.
+suites:
+  native-smoke: ~@cluster && ~@resilience && ~@soak
+  cluster-acceptance: '@cluster'
+  resilience: '@resilience'
+  soak: '@soak'
+components:
+  order-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: order
+      mcp: mcp
+      projector: order-projector
+      reports: order-reports
+    remote: order_mgmt_mfe/App
+    nativeScenarios:
+    - order-release
+    - promise-repromise
+    - capability-promise
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  inventory-storage:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: inventory
+      mcp: mcp
+      projector: inventory-projector
+      reports: inventory-reports
+    remote: inventory_mfe/App
+    nativeScenarios:
+    - bootstrap
+    - network-fulfillment
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  wes-work-planning:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: wes
+      mcp: mcp
+      projector: wes-projector
+      reports: wes-reports
+    remote: planning_mfe/App
+    nativeScenarios:
+    - order-release
+    - process-path-propagation
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  fulfillment-execution:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: execution
+      mcp: mcp
+      projector: fulfillment-projector
+      reports: fulfillment-reports
+    remote: fulfillment_mfe/App
+    nativeScenarios:
+    - bootstrap
+    - network-fulfillment
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  workforce-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: workforce
+      mcp: mcp
+      projector: workforce-projector
+      reports: workforce-reports
+    remote: workforce_mfe/App
+    nativeScenarios:
+    - bootstrap
+    - process-path-propagation
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  facility-layout:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: facility
+      mcp: mcp
+      projector: facility-projector
+      reports: facility-reports
+    remote: facility_mfe/App
+    nativeScenarios:
+    - facility-layout-propagation
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  process-path-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: pathmgmt
+      mcp: mcp
+      projector: pathmgmt-projector
+      reports: pathmgmt-reports
+    remote: process_path_mfe/App
+    nativeScenarios:
+    - process-path-management
+    - process-path-propagation
+    - capability-promise
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  labor-performance:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    - mfe
+    commands:
+      backend: labor
+      mcp: mcp
+      projector: labor-projector
+      reports: labor-reports
+    remote: labor_mfe/App
+    nativeScenarios:
+    - labor-performance
+    - mcp-smoke
+    clusterChecks:
+    - api
+    - mcp
+    - reports
+    - browser
+  warehouse-ops-agent:
+    kinds:
+    - backend
+    commands:
+      backend: agent
+    nativeScenarios:
+    - flow-balance-exception
+    clusterChecks:
+    - api
+  network-fulfillment:
+    kinds:
+    - backend
+    commands:
+      backend: netfulfil
+    nativeScenarios:
+    - network-fulfillment
+    clusterChecks:
+    - api
+  warehouse-console:
+    kinds:
+    - shell
+    nativeScenarios: []
+    clusterChecks:
+    - browser

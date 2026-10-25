@@ -66,7 +66,7 @@ bash scripts/05-down-services.sh # stops only what this harness started
 ```
 
 `env.sh` is the single source of truth for every port, DB URL, and MCP
-bearer key `scripts/*.sh` uses — edit ports there only.
+endpoint `scripts/*.sh` uses — edit ports there only. MCP is unauthenticated.
 
 ## Sustained backlog-ramp soak (`features/soak_backlog_ramp.feature`, `@soak`)
 

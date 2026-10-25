@@ -49,5 +49,7 @@ build_one order-mcp        "${ORDER_REPO}"        mcp
 log "building warehouse-ops-agent (cmd/agent — the agentic analyze/act layer, T5)"
 build_one ops-agent "${OPS_AGENT_REPO}" agent
 
-log "all 16 binaries built"
+build_one network-fulfillment "${NETWORK_FULFILLMENT_REPO}" netfulfil
+
+log "all backend and MCP binaries built"
 ls -la "${BIN_DIR}"

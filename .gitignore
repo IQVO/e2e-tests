@@ -2,3 +2,8 @@
 run/
 logs/
 bin/
+
+# Generated run diagnostics and language caches.
+artifacts/
+__pycache__/
+*.pyc

@@ -1,0 +1,90 @@
+{
+  "manifest": {
+    "components": {
+      "alpha": {
+        "kinds": [
+          "backend",
+          "oltp",
+          "mcp",
+          "projector",
+          "reports",
+          "mfe"
+        ],
+        "commands": {
+          "backend": "alpha",
+          "mcp": "mcp",
+          "projector": "alpha-projector",
+          "reports": "alpha-reports"
+        },
+        "remote": "alpha_mfe/App",
+        "nativeScenarios": [
+          "fixture"
+        ],
+        "clusterChecks": [
+          "api",
+          "mcp",
+          "reports",
+          "browser"
+        ]
+      },
+      "network-fulfillment": {
+        "kinds": [
+          "backend"
+        ],
+        "commands": {
+          "backend": "netfulfil"
+        },
+        "nativeScenarios": [
+          "network-fulfillment"
+        ],
+        "clusterChecks": [
+          "api"
+        ]
+      },
+      "warehouse-ops-agent": {
+        "kinds": [
+          "backend"
+        ],
+        "commands": {
+          "backend": "agent"
+        },
+        "nativeScenarios": [
+          "flow-balance-exception"
+        ],
+        "clusterChecks": [
+          "api"
+        ]
+      },
+      "warehouse-console": {
+        "kinds": [
+          "shell"
+        ],
+        "nativeScenarios": [],
+        "clusterChecks": [
+          "browser"
+        ]
+      }
+    }
+  },
+  "warehouse-infra": {
+    "terraform/locals.tf": "locals { services = { \"alpha\" = {} } analytics_services = toset([\"alpha\"]) }",
+    "terraform/mcp.tf": "locals { mcp_services = toset([\"alpha\"]) }",
+    "terraform/network-fulfillment.tf": "locals { network_fulfillment_chart_path = \"network-fulfillment\" }",
+    "terraform/ops-agent.tf": "locals { ops_agent_chart_path = \"warehouse-ops-agent\" }"
+  },
+  "warehouse-console": {
+    "src/App.tsx": "const Alpha = lazy(() => import(\"alpha_mfe/App\"));\n<Route path=\"/alpha/*\" element={<RemoteBoundary component={Alpha} />} />"
+  },
+  "alpha": {
+    "cmd/alpha/main.go": "package main",
+    "cmd/mcp/main.go": "package main",
+    "cmd/alpha-projector/main.go": "package main",
+    "cmd/alpha-reports/main.go": "package main"
+  },
+  "network-fulfillment": {
+    "cmd/netfulfil/main.go": "package main"
+  },
+  "warehouse-ops-agent": {
+    "cmd/agent/main.go": "package main"
+  }
+}
