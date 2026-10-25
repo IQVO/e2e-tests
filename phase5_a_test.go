@@ -8,10 +8,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -191,6 +193,7 @@ func (w *world) p5ScorecardRefused(seller, window string, status int, slug strin
 // ---------------------------------------------------------------------
 
 func registerPhase5ASteps(sc *godog.ScenarioContext, w *world) {
+	registerPhase5APathSteps(sc, w)
 	registerPhase5ALaborSteps(sc, w)
 	// 1. seller scorecard
 	sc.Step(`^the 30d scorecard of the seller eventually reports (\d+) shipment received with (\d+) cartons reported and (\d+) received$`, w.p5ScorecardCounts)
@@ -441,4 +444,283 @@ func registerPhase5ALaborSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^defining a PICK standard of (\d+) expected seconds (with no handling unit|for handling unit \w+) and a team lift above (\d+) g of (\d+) seconds is refused with (\d+) problem "([^"]*)"$`, w.p5TeamLiftRefused)
 	sc.Step(`^defining a PICK standard of (\d+) expected seconds for handling unit (\w+) is refused with (\d+) problem "([^"]*)"$`, w.p5UnknownUnitDefineRefused)
 	sc.Step(`^reading the PICK standard for handling unit (\w+) is refused with (\d+) problem "([^"]*)"$`, w.p5UnknownUnitReadRefused)
+}
+
+// ---------------------------------------------------------------------
+// 3. case-flow process paths
+// ---------------------------------------------------------------------
+
+// The declared catalogue entries (process-path-management catalogue/paths.json, ADR 0038).
+var p5CaseFlowPaths = map[string]map[string]any{
+	"FULL_CASE": {"pathId": "FULL_CASE", "matchPrefix": "full-case", "direct": true, "requiredCapabilities": []string{"pick"},
+		"cycleTimeP95": "1h30m", "eligibility": map[string]any{"requiredProductAttributes": []string{"fullCase"}}, "intake": []string{"CUSTOMER_ORDER"}},
+	"CROSS_DOCK": {"pathId": "CROSS_DOCK", "matchPrefix": "cross-dock", "direct": true, "requiredCapabilities": []string{"dispatch"},
+		"destinationLocationRole": "Shipping", "cycleTimeP95": "1h", "eligibility": map[string]any{"requiredProductAttributes": []string{"crossDock"}},
+		"intake": []string{"CUSTOMER_ORDER", "STOCK_TRANSFER"}},
+	"BREAK_CASE": {"pathId": "BREAK_CASE", "matchPrefix": "break", "direct": true, "requiredCapabilities": []string{"break"},
+		"cycleTimeP95": "2h", "intake": []string{}},
+}
+
+func (w *world) p5PathsHealthy() error {
+	if err := w.doJSON(http.MethodGet, processPathMgmtBaseURL+"/healthz", nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("process-path-management /healthz = %d (%s)", w.last.status, w.last.body)
+	}
+	return nil
+}
+
+func (w *world) p5ApplyEntry(id string) (int, error) {
+	if err := w.doJSON(http.MethodPost, processPathMgmtBaseURL+"/process-paths", p5CaseFlowPaths[id]); err != nil {
+		return 0, err
+	}
+	return w.last.status, nil
+}
+
+func (w *world) p5ApplyCatalogue() error {
+	for _, id := range []string{"FULL_CASE", "CROSS_DOCK", "BREAK_CASE"} {
+		st, err := w.p5ApplyEntry(id)
+		if err != nil {
+			return err
+		}
+		if st != http.StatusCreated && st != http.StatusConflict {
+			return fmt.Errorf("applying %s = %d, want 201 (new) or 409 (already seeded) (%s)", id, st, w.last.body)
+		}
+	}
+	return nil
+}
+
+func (w *world) p5ReapplyRefused(id string, status int) error {
+	st, err := w.p5ApplyEntry(id)
+	if err != nil {
+		return err
+	}
+	if st != status {
+		return fmt.Errorf("re-applying %s = %d, want %d (%s)", id, st, status, w.last.body)
+	}
+	return w.p5IsProblem(status, "path-already-exists")
+}
+
+func csvSet(s string) []string {
+	if s == "" {
+		return []string{}
+	}
+	return strings.Split(s, ",")
+}
+
+func strSlice(v any) []string {
+	out := []string{}
+	for _, x := range anySlice(v) {
+		out = append(out, fmt.Sprint(x))
+	}
+	return out
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := map[string]int{}
+	for _, x := range a {
+		m[x]++
+	}
+	for _, x := range b {
+		m[x]--
+	}
+	for _, n := range m {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *world) p5PathIs(id, prefix, caps, cycle, dest, attrs, intake string) error {
+	if err := w.doJSON(http.MethodGet, processPathMgmtBaseURL+"/process-paths/"+id, nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("GET /process-paths/%s = %d (%s)", id, w.last.status, w.last.body)
+	}
+	p := w.last.json()
+	gotCycle, _ := p["cycleTimeP95"].(string)
+	gd, e1 := time.ParseDuration(gotCycle)
+	wd, e2 := time.ParseDuration(cycle)
+	elig, _ := p["eligibility"].(map[string]any)
+	gotDest, _ := p["destinationLocationRole"].(string)
+	switch {
+	case p["pathId"] != id || p["status"] != "ACTIVE" || p["direct"] != true:
+		return fmt.Errorf("%s: pathId/status/direct = %v/%v/%v (%s)", id, p["pathId"], p["status"], p["direct"], w.last.body)
+	case p["matchPrefix"] != prefix:
+		return fmt.Errorf("%s: matchPrefix = %v, want %s", id, p["matchPrefix"], prefix)
+	case !sameSet(strSlice(p["requiredCapabilities"]), csvSet(caps)):
+		return fmt.Errorf("%s: requiredCapabilities = %v, want %s", id, p["requiredCapabilities"], caps)
+	case e1 != nil || e2 != nil || gd != wd:
+		return fmt.Errorf("%s: cycleTimeP95 = %q, want %s", id, gotCycle, cycle)
+	case gotDest != dest:
+		return fmt.Errorf("%s: destinationLocationRole = %q, want %q", id, gotDest, dest)
+	case !sameSet(strSlice(elig["requiredProductAttributes"]), csvSet(attrs)):
+		return fmt.Errorf("%s: eligibility.requiredProductAttributes = %v, want %q", id, elig["requiredProductAttributes"], attrs)
+	case !sameSet(strSlice(p["intake"]), csvSet(intake)):
+		return fmt.Errorf("%s: intake = %v, want %q", id, p["intake"], intake)
+	}
+	return nil
+}
+
+func (w *world) p5ActivePaths() ([]map[string]any, error) {
+	if err := w.doJSON(http.MethodGet, processPathMgmtBaseURL+"/process-paths", nil); err != nil {
+		return nil, err
+	}
+	if w.last.status != http.StatusOK {
+		return nil, fmt.Errorf("GET /process-paths = %d (%s)", w.last.status, w.last.body)
+	}
+	var out []map[string]any
+	for _, x := range anySlice(jsonAny(w.last.body)) {
+		if m, ok := x.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (w *world) p5ListingHasCaseFlowBesideOthers() error {
+	ps, err := w.p5ActivePaths()
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, p := range ps {
+		id, _ := p["pathId"].(string)
+		seen[id] = true
+		if p["status"] != "ACTIVE" {
+			return fmt.Errorf("the default listing carries non-ACTIVE path %s", id)
+		}
+		if _, isCaseFlow := p5CaseFlowPaths[id]; !isCaseFlow {
+			// An order / WMS path: not gated on the new case-flow attributes.
+			elig, _ := p["eligibility"].(map[string]any)
+			for _, a := range strSlice(elig["requiredProductAttributes"]) {
+				if a == "fullCase" || a == "crossDock" {
+					return fmt.Errorf("path %s is gated on %s: the case-flow gate leaked onto another path", id, a)
+				}
+			}
+		}
+	}
+	for id := range p5CaseFlowPaths {
+		if !seen[id] {
+			return fmt.Errorf("active listing lacks %s", id)
+		}
+	}
+	if len(ps) < 4 {
+		return fmt.Errorf("listing has %d paths, want the case-flow three plus the existing ones", len(ps))
+	}
+	return nil
+}
+
+func (w *world) p5Select(desc string, match func(map[string]any) bool, wantExact bool, want ...string) error {
+	ps, err := w.p5ActivePaths()
+	if err != nil {
+		return err
+	}
+	var got []string
+	for _, p := range ps {
+		if match(p) {
+			got = append(got, fmt.Sprint(p["pathId"]))
+		}
+	}
+	if wantExact && !sameSet(got, want) {
+		return fmt.Errorf("active paths %s = %v, want exactly %v", desc, got, want)
+	}
+	for _, x := range want {
+		found := false
+		for _, g := range got {
+			found = found || g == x
+		}
+		if !found {
+			return fmt.Errorf("active paths %s = %v, want to include %s", desc, got, x)
+		}
+	}
+	return nil
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *world) p5ByAttribute(attr, exact string) error {
+	return w.p5Select("requiring attribute "+attr, func(p map[string]any) bool {
+		elig, _ := p["eligibility"].(map[string]any)
+		return contains(strSlice(elig["requiredProductAttributes"]), attr)
+	}, true, exact)
+}
+
+func (w *world) p5ByCapability(c, exact string) error {
+	return w.p5Select("requiring capability "+c, func(p map[string]any) bool {
+		return contains(strSlice(p["requiredCapabilities"]), c)
+	}, true, exact)
+}
+
+func (w *world) p5ByDest(role, id string) error {
+	return w.p5Select("ending at "+role, func(p map[string]any) bool { return p["destinationLocationRole"] == role }, false, id)
+}
+
+func (w *world) p5ByIntake(src, a, b string) error {
+	return w.p5Select("taking intake "+src, func(p map[string]any) bool { return contains(strSlice(p["intake"]), src) }, false, a, b)
+}
+
+func (w *world) p5InvalidDefinition(id, base, field, value string, status int, slug string) error {
+	body := map[string]any{}
+	for k, v := range p5CaseFlowPaths[base] {
+		body[k] = v
+	}
+	body["pathId"] = w.rs(id)
+	switch field {
+	case "destination role":
+		body["destinationLocationRole"] = value
+	case "cycleTimeP95":
+		body["cycleTimeP95"] = value
+	case "matchPrefix":
+		body["matchPrefix"] = value
+	case "intake":
+		body["intake"] = []string{value}
+	}
+	if err := w.doJSON(http.MethodPost, processPathMgmtBaseURL+"/process-paths", body); err != nil {
+		return err
+	}
+	return w.p5IsProblem(status, slug)
+}
+
+func (w *world) p5PathAbsent(id string) error {
+	if err := w.doJSON(http.MethodGet, processPathMgmtBaseURL+"/process-paths/"+w.rs(id), nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusNotFound {
+		return fmt.Errorf("GET %s = %d, want 404: a refused definition stored something (%s)", id, w.last.status, w.last.body)
+	}
+	return nil
+}
+
+func registerPhase5APathSteps(sc *godog.ScenarioContext, w *world) {
+	sc.Step(`^process-path-management is healthy$`, w.p5PathsHealthy)
+	sc.Step(`^the declared case-flow catalogue entries FULL_CASE, CROSS_DOCK and BREAK_CASE are applied$`, w.p5ApplyCatalogue)
+	sc.Step(`^process path "([^"]*)" is ACTIVE and direct with matchPrefix "([^"]*)", capabilities "([^"]*)", cycleTimeP95 (\S+), (?:no destination role|destination role "([^"]*)"), required product attributes "([^"]*)" and intake "([^"]*)"$`, w.p5PathIs)
+	sc.Step(`^applying the declared entry "([^"]*)" again is refused with (\d+) \(path-already-exists\)$`, w.p5ReapplyRefused)
+	sc.Step(`^the active process path listing has FULL_CASE, CROSS_DOCK and BREAK_CASE and every other path keeps its own definition$`, w.p5ListingHasCaseFlowBesideOthers)
+	sc.Step(`^the active paths requiring product attribute "([^"]*)" are exactly "([^"]*)"$`, w.p5ByAttribute)
+	sc.Step(`^the active paths ending at destination role "([^"]*)" include "([^"]*)"$`, w.p5ByDest)
+	sc.Step(`^the active paths requiring capability "([^"]*)" are exactly "([^"]*)"$`, w.p5ByCapability)
+	sc.Step(`^the active paths taking intake "([^"]*)" include "([^"]*)" and "([^"]*)"$`, w.p5ByIntake)
+	sc.Step(`^defining path "([^"]*)" like (FULL_CASE|CROSS_DOCK) but with (destination role|cycleTimeP95|matchPrefix|intake) "([^"]*)" is refused with (\d+) problem "([^"]*)"$`, w.p5InvalidDefinition)
+	sc.Step(`^process path "([^"]*)" does not exist$`, w.p5PathAbsent)
+}
+
+func jsonAny(b []byte) any {
+	var v any
+	_ = json.Unmarshal(b, &v)
+	return v
 }

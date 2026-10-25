@@ -99,3 +99,41 @@ Feature: Phase 5 part A - seller scorecard, labor standards per handling unit, F
     Then the PICK standard resolved without a handling unit is 43 seconds declared for no handling unit
     And the PICK standard resolved for handling unit CASE is 32 seconds declared for CASE
     And that standard carries a team lift above 18000 g of 75 seconds for 2 operators
+
+  # 3. CASE-FLOW PROCESS PATHS (process-path-management, ADR 0038). The FULL_CASE, CROSS_DOCK and BREAK_CASE paths are
+  #    catalogue DATA (catalogue/paths.json in that repo) applied by scripts/seed_catalogue.py through POST /process-paths.
+  #    SHARED STATE: path ids are permanent and cluster-wide, so the scenario applies the declared entries exactly as the
+  #    seed script does (201 when new, 409 when a previous seeding or run already did) and then asserts what the API
+  #    exposes. The three ids stay defined afterwards, which is the intended end state of the catalogue.
+  #    NOT EXERCISABLE through the public REST, so not faked: (a) the step lists (a ProcessPath carries capabilities,
+  #    intake, eligibility and a destination role, not steps - the put-away / each-handling absence is therefore asserted
+  #    only as the declared capabilities, which are the exact lists below); (b) a "select the path for these criteria"
+  #    endpoint: none exists (routing is done by the consumers, which replay the events), so selection is asserted as the
+  #    documented criteria (eligibility attribute, intake source, capability) matching the listing.
+  #    The invalid definitions use a throw-away pathId and are refused before anything is stored.
+
+  @e2e @phase5 @process-paths
+  Scenario: Case-flow process paths: FULL_CASE, CROSS_DOCK and BREAK_CASE are declared with their documented definitions and selectable by their criteria
+    Given process-path-management is healthy
+    When the declared case-flow catalogue entries FULL_CASE, CROSS_DOCK and BREAK_CASE are applied
+    Then process path "FULL_CASE" is ACTIVE and direct with matchPrefix "full-case", capabilities "pick", cycleTimeP95 1h30m0s, no destination role, required product attributes "fullCase" and intake "CUSTOMER_ORDER"
+    And process path "CROSS_DOCK" is ACTIVE and direct with matchPrefix "cross-dock", capabilities "dispatch", cycleTimeP95 1h0m0s, destination role "Shipping", required product attributes "crossDock" and intake "CUSTOMER_ORDER,STOCK_TRANSFER"
+    And process path "BREAK_CASE" is ACTIVE and direct with matchPrefix "break", capabilities "break", cycleTimeP95 2h0m0s, no destination role, required product attributes "" and intake ""
+    And applying the declared entry "FULL_CASE" again is refused with 409 (path-already-exists)
+    # The order paths are untouched: the new flows sit beside them.
+    And the active process path listing has FULL_CASE, CROSS_DOCK and BREAK_CASE and every other path keeps its own definition
+    # Selection by the documented criteria.
+    And the active paths requiring product attribute "fullCase" are exactly "FULL_CASE"
+    And the active paths requiring product attribute "crossDock" are exactly "CROSS_DOCK"
+    And the active paths ending at destination role "Shipping" include "CROSS_DOCK"
+    And the active paths requiring capability "break" are exactly "BREAK_CASE"
+    And the active paths taking intake "STOCK_TRANSFER" include "CROSS_DOCK" and "DISPATCH"
+
+  @e2e @phase5 @process-paths
+  Scenario: Case-flow process paths: invalid definitions are refused with their documented problem and store nothing
+    Given process-path-management is healthy
+    Then defining path "E2E-BAD-<run>" like CROSS_DOCK but with destination role "Dock" is refused with 422 problem "invalid-destination-location-role"
+    And defining path "E2E-BAD-<run>" like FULL_CASE but with cycleTimeP95 "0s" is refused with 422 problem "invalid-cycle-time-p95"
+    And defining path "E2E-BAD-<run>" like FULL_CASE but with matchPrefix "Full-Case" is refused with 422 problem "match-prefix-not-lowercase"
+    And defining path "E2E-BAD-<run>" like FULL_CASE but with intake "NOPE" is refused with 422 problem "invalid-intake"
+    And process path "E2E-BAD-<run>" does not exist
