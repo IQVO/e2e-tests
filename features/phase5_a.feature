@@ -50,3 +50,52 @@ Feature: Phase 5 part A - seller scorecard, labor standards per handling unit, F
     And the 7d scorecard of the seller is the empty shape: zero counts, no rates, no NaN, empty discrepanciesByKind, tier GOOD
     And the scorecard of unknown seller "SELLER-SC-GHOST-<run>" is refused with 404 problem "not-found"
     And the scorecard of the seller with window "1d" is refused with 400 problem "invalid-window"
+
+  # 2. LABOR STANDARDS PER HANDLING UNIT (labor-performance, POST /standards, GET /standards/{taskType}?handlingUnit=).
+  #    SHARED STATE: the PICK/PACK/SLAM task types are a closed enum and labor-performance keeps ONE open standard
+  #    per (taskType, handlingUnit), so a run necessarily revises the cluster's PICK standards: the scenario
+  #    remembers the task-type-only PICK standard and re-declares it at the end (a new revision with the old
+  #    seconds). The CASE standard it opens cannot be closed through the API and stays as the open (PICK, CASE)
+  #    standard. The PALLET fallback assertion assumes nobody declared (PICK, PALLET): this scenario never does.
+  #    No history endpoint exists, so "the same pair revises the prior one" is asserted through what the API
+  #    exposes: the second CASE definition is accepted (not a standard-conflict 409), GET resolves to the newer
+  #    one, and the task-type-only standard keeps its effectiveFrom (it is never closed by a unit definition).
+
+  @e2e @phase5 @labor-standards
+  Scenario: Labor standards per handling unit: the most specific standard wins, a team lift needs CASE, unit-less behaviour is unchanged
+    Given labor-performance is healthy
+    And the task-type-only PICK standard of labor-performance is remembered
+    When a PICK standard of 41 expected seconds with no handling unit is defined
+    Then the PICK standard resolved without a handling unit is 41 seconds declared for no handling unit
+    And that standard carries no team lift
+    # Nothing is declared for CASE yet: the lookup falls back to the task-type-only standard.
+    And the PICK standard resolved for handling unit CASE is 41 seconds declared for no handling unit
+
+    When a PICK standard of 30 expected seconds for handling unit CASE is defined
+    Then the PICK standard resolved for handling unit CASE is 30 seconds declared for CASE
+    And that standard carries no team lift
+    # Defining a CASE standard never closes the task-type-only one.
+    And the PICK standard resolved without a handling unit is 41 seconds declared for no handling unit
+    And the task-type-only PICK standard kept its effectiveFrom
+    And the PICK standard resolved for handling unit PALLET is 41 seconds declared for no handling unit
+
+    When a PICK standard of 32 expected seconds for handling unit CASE with a team lift above 18000 g of 75 seconds is defined
+    Then the PICK standard resolved for handling unit CASE is 32 seconds declared for CASE
+    And that standard carries a team lift above 18000 g of 75 seconds for 2 operators
+    And the CASE standard is not older than the first one
+    And the task-type-only PICK standard kept its effectiveFrom
+    And the PICK standard resolved without a handling unit is 41 seconds declared for no handling unit
+
+    # Refusals leave everything as it was.
+    Then defining a PICK standard of 20 expected seconds with no handling unit and a team lift above 18000 g of 75 seconds is refused with 422 problem "team-lift-requires-case-unit"
+    And defining a PICK standard of 20 expected seconds for handling unit EACH and a team lift above 18000 g of 75 seconds is refused with 422 problem "team-lift-requires-case-unit"
+    And defining a PICK standard of 20 expected seconds for handling unit BOX is refused with 400 problem "unknown-handling-unit"
+    And reading the PICK standard for handling unit BOX is refused with 400 problem "unknown-handling-unit"
+    And the PICK standard resolved for handling unit CASE is 32 seconds declared for CASE
+    And the PICK standard resolved without a handling unit is 41 seconds declared for no handling unit
+
+    # The unit-less standard still revises exactly as before, and leaves the CASE one alone.
+    When a PICK standard of 43 expected seconds with no handling unit is defined
+    Then the PICK standard resolved without a handling unit is 43 seconds declared for no handling unit
+    And the PICK standard resolved for handling unit CASE is 32 seconds declared for CASE
+    And that standard carries a team lift above 18000 g of 75 seconds for 2 operators
