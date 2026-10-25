@@ -56,7 +56,7 @@ Feature: Phase 5 part A - seller scorecard, labor standards per handling unit, F
   #    per (taskType, handlingUnit), so a run necessarily revises the cluster's PICK standards: the scenario
   #    remembers the task-type-only PICK standard and re-declares it at the end (a new revision with the old
   #    seconds). The CASE standard it opens cannot be closed through the API and stays as the open (PICK, CASE)
-  #    standard. The PALLET fallback assertion assumes nobody declared (PICK, PALLET): this scenario never does.
+  #    standard. The EACH and PALLET fallback assertions assume nobody declared (PICK, EACH) or (PICK, PALLET): this scenario never does (and, because its CASE standard stays open, it cannot assert a CASE fallback on a re-run).
   #    No history endpoint exists, so "the same pair revises the prior one" is asserted through what the API
   #    exposes: the second CASE definition is accepted (not a standard-conflict 409), GET resolves to the newer
   #    one, and the task-type-only standard keeps its effectiveFrom (it is never closed by a unit definition).
@@ -68,8 +68,8 @@ Feature: Phase 5 part A - seller scorecard, labor standards per handling unit, F
     When a PICK standard of 41 expected seconds with no handling unit is defined
     Then the PICK standard resolved without a handling unit is 41 seconds declared for no handling unit
     And that standard carries no team lift
-    # Nothing is declared for CASE yet: the lookup falls back to the task-type-only standard.
-    And the PICK standard resolved for handling unit CASE is 41 seconds declared for no handling unit
+    # Nothing is declared for EACH: the lookup falls back to the task-type-only standard.
+    And the PICK standard resolved for handling unit EACH is 41 seconds declared for no handling unit
 
     When a PICK standard of 30 expected seconds for handling unit CASE is defined
     Then the PICK standard resolved for handling unit CASE is 30 seconds declared for CASE
