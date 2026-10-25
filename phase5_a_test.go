@@ -193,6 +193,7 @@ func (w *world) p5ScorecardRefused(seller, window string, status int, slug strin
 // ---------------------------------------------------------------------
 
 func registerPhase5ASteps(sc *godog.ScenarioContext, w *world) {
+	registerPhase5AEstimateSteps(sc, w)
 	registerPhase5APathSteps(sc, w)
 	registerPhase5ALaborSteps(sc, w)
 	// 1. seller scorecard
@@ -723,4 +724,186 @@ func jsonAny(b []byte) any {
 	var v any
 	_ = json.Unmarshal(b, &v)
 	return v
+}
+
+// ---------------------------------------------------------------------
+// 4. pack-aware charge estimate (wes-work-planning)
+// ---------------------------------------------------------------------
+
+type estimateState struct {
+	sku     string
+	pathID  string
+	buckets []map[string]any // response buckets in request order: CASE, EACH, no pickUnit, plain
+	total   float64
+}
+
+var p5Est *estimateState
+
+func (w *world) p5est() *estimateState {
+	if p5Est == nil {
+		p5Est = &estimateState{}
+	}
+	return p5Est
+}
+
+func (w *world) p5EstimateHealthy() error {
+	for name, base := range map[string]string{"wes-work-planning": workPlanningBaseURL, "product-master": productMasterBaseURL} {
+		if err := w.doJSON(http.MethodGet, base+"/healthz", nil); err != nil {
+			return fmt.Errorf("%s not reachable: %w", name, err)
+		}
+		if w.last.status != http.StatusOK {
+			return fmt.Errorf("%s /healthz = %d (%s)", name, w.last.status, w.last.body)
+		}
+	}
+	return nil
+}
+
+func (w *world) p5SkuWithDims(sku string, eL, eW, eH, eG, perCase, cL, cW, cH, cG int) error {
+	sku = w.rs(sku)
+	st := w.p5est()
+	st.sku = sku
+	if err := w.registerProductInProductMaster(sku); err != nil {
+		return fmt.Errorf("register %s: %w", sku, err)
+	}
+	each, cs := w.siGtin("0"), w.siGtin("1")
+	if err := w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/products/%s/pack-levels/EACH", productMasterBaseURL, sku),
+		map[string]any{"gtin": each, "isOrderable": true, "isDespatchUnit": false,
+			"dims": map[string]any{"lengthMm": eL, "widthMm": eW, "heightMm": eH, "weightG": eG}})); err != nil {
+		return fmt.Errorf("declare EACH %s: %w", each, err)
+	}
+	if err := w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/products/%s/pack-levels/CASE", productMasterBaseURL, sku),
+		map[string]any{"gtin": cs, "childGtin": each, "qtyOfChild": perCase, "isOrderable": true, "isDespatchUnit": true,
+			"dims": map[string]any{"lengthMm": cL, "widthMm": cW, "heightMm": cH, "weightG": cG}})); err != nil {
+		return fmt.Errorf("declare CASE %s: %w", cs, err)
+	}
+	return nil
+}
+
+func (w *world) p5ChargeURL(pathID string) string {
+	return fmt.Sprintf("%s/paths/%s/charge", workPlanningBaseURL, pathID)
+}
+
+func (w *world) p5AcceptsForecast(pathID string) error {
+	st := w.p5est()
+	st.pathID = w.rs(pathID)
+	cpt := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Hour)
+	at := func(h int) string { return cpt.Add(time.Duration(h) * time.Hour).Format(time.RFC3339) }
+	body := map[string]any{"buckets": []map[string]any{
+		{"cpt": at(0), "quantity": 36, "sku": st.sku, "pickUnit": "CASE"},
+		{"cpt": at(1), "quantity": 36, "sku": st.sku, "pickUnit": "EACH"},
+		{"cpt": at(2), "quantity": 36, "sku": st.sku},
+		{"cpt": at(3), "quantity": 36},
+	}}
+	err := siEventually(func() error {
+		if err := w.doJSON(http.MethodPost, w.p5ChargeURL(st.pathID), body); err != nil {
+			return err
+		}
+		if w.last.status == http.StatusCreated {
+			return nil
+		}
+		// Only "the pack copy has not arrived yet" is awaited.
+		return fmt.Errorf("charge forecast = %d (%s)", w.last.status, w.last.body)
+	})
+	if err != nil {
+		return err
+	}
+	res := w.last.json()
+	st.total, _ = toFloat(res["totalQuantity"])
+	for _, b := range anySlice(res["buckets"]) {
+		if m, ok := b.(map[string]any); ok {
+			st.buckets = append(st.buckets, m)
+		}
+	}
+	if len(st.buckets) != 4 {
+		return fmt.Errorf("response has %d buckets, want 4 (%s)", len(st.buckets), w.last.body)
+	}
+	return nil
+}
+
+func (w *world) p5CheckBucket(i int, handles, cube, weight int, hasPack bool) error {
+	st := w.p5est()
+	if len(st.buckets) <= i {
+		return fmt.Errorf("no bucket %d", i)
+	}
+	b := st.buckets[i]
+	q, _ := toFloat(b["quantity"])
+	if int(q) != 36 {
+		return fmt.Errorf("bucket %d quantity = %v, want 36 eaches (%v)", i, b["quantity"], b)
+	}
+	if !hasPack {
+		for _, k := range []string{"handles", "cubeMm3", "weightG"} {
+			if _, present := b[k]; present {
+				return fmt.Errorf("plain bucket carries %s: %v", k, b)
+			}
+		}
+		return nil
+	}
+	for k, want := range map[string]int{"handles": handles, "cubeMm3": cube, "weightG": weight} {
+		got, ok := toFloat(b[k])
+		if !ok || int(got) != want {
+			return fmt.Errorf("bucket %d %s = %v, want %d (%v)", i, k, b[k], want, b)
+		}
+	}
+	return nil
+}
+
+func (w *world) p5CaseBucket(handles, cube, weight int) error {
+	if err := w.p5CheckBucket(0, handles, cube, weight, true); err != nil {
+		return err
+	}
+	if w.p5ls2()[0]["pickUnit"] != "CASE" && w.p5ls2()[0]["pickUnit"] != nil {
+		return fmt.Errorf("CASE bucket echoes pickUnit %v", w.p5ls2()[0]["pickUnit"])
+	}
+	return nil
+}
+
+func (w *world) p5ls2() []map[string]any { return w.p5est().buckets }
+
+func (w *world) p5EachBucket(handles, cube, weight int) error {
+	return w.p5CheckBucket(1, handles, cube, weight, true)
+}
+
+func (w *world) p5DefaultUnitBucket() error {
+	// Same estimate as the explicit EACH bucket: 36 handles.
+	return w.p5CheckBucket(2, 36, 17280000, 10800, true)
+}
+
+func (w *world) p5PlainBucket() error { return w.p5CheckBucket(3, 0, 0, 0, false) }
+
+func (w *world) p5Total(want int) error {
+	if int(w.p5est().total) != want {
+		return fmt.Errorf("totalQuantity = %v, want %d eaches", w.p5est().total, want)
+	}
+	return nil
+}
+
+func (w *world) p5RefusedBucket(bucket map[string]any, status int, slug string) error {
+	st := w.p5est()
+	bucket["cpt"] = time.Now().UTC().Add(72 * time.Hour).Truncate(time.Hour).Format(time.RFC3339)
+	bucket["quantity"] = 36
+	if err := w.doJSON(http.MethodPost, w.p5ChargeURL(st.pathID), map[string]any{"buckets": []map[string]any{bucket}}); err != nil {
+		return err
+	}
+	return w.p5IsProblem(status, slug)
+}
+
+func registerPhase5AEstimateSteps(sc *godog.ScenarioContext, w *world) {
+	sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
+		p5Est = nil
+		return ctx, nil
+	})
+	sc.Step(`^wes-work-planning and product-master are healthy$`, w.p5EstimateHealthy)
+	sc.Step(`^SKU "([^"]*)" declares an EACH of (\d+)x(\d+)x(\d+) mm and (\d+) g and a CASE of (\d+) eaches of (\d+)x(\d+)x(\d+) mm and (\d+) g in product-master$`, w.p5SkuWithDims)
+	sc.Step(`^wes-work-planning eventually accepts the charge forecast of path "([^"]*)" with four buckets of 36 eaches: SKU as CASE, SKU as EACH, SKU without pickUnit and a plain one$`, w.p5AcceptsForecast)
+	sc.Step(`^the CASE bucket is still 36 eaches and stands for (\d+) handles, (\d+) mm3 and (\d+) g$`, w.p5CaseBucket)
+	sc.Step(`^the EACH bucket is still 36 eaches and stands for (\d+) handles, (\d+) mm3 and (\d+) g$`, w.p5EachBucket)
+	sc.Step(`^the bucket with a SKU and no pickUnit is the EACH estimate$`, w.p5DefaultUnitBucket)
+	sc.Step(`^the plain bucket without a SKU is 36 eaches with no handles, no cube and no weight$`, w.p5PlainBucket)
+	sc.Step(`^the forecast total is (\d+) eaches$`, w.p5Total)
+	sc.Step(`^a CASE bucket for a SKU with no CASE level is refused with (\d+) problem "([^"]*)"$`, func(st int, slug string) error {
+		return w.p5RefusedBucket(map[string]any{"sku": "SKU-P5-NOCASE-" + w.rs("<run>"), "pickUnit": "CASE"}, st, slug)
+	})
+	sc.Step(`^a bucket with pickUnit "BOX" is refused with (\d+) problem "([^"]*)"$`, func(st int, slug string) error {
+		return w.p5RefusedBucket(map[string]any{"sku": w.p5est().sku, "pickUnit": "BOX"}, st, slug)
+	})
 }

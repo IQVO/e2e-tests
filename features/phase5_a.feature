@@ -137,3 +137,25 @@ Feature: Phase 5 part A - seller scorecard, labor standards per handling unit, F
     And defining path "E2E-BAD-<run>" like FULL_CASE but with matchPrefix "Full-Case" is refused with 422 problem "match-prefix-not-lowercase"
     And defining path "E2E-BAD-<run>" like FULL_CASE but with intake "NOPE" is refused with 422 problem "invalid-intake"
     And process path "E2E-BAD-<run>" does not exist
+
+  # 4. PACK-AWARE CHARGE ESTIMATE (wes-work-planning, POST /paths/{pathId}/charge with sku + pickUnit, ADR 0045).
+  #    A CPT bucket stays in EACHES; with a sku the response adds handles (cases for pickUnit CASE), cubeMm3 and weightG
+  #    from the pack levels product-master declared (wes-work-planning keeps a local copy fed over Kafka, so the scenario
+  #    polls the estimate until it is there: the service answers 422 no-active-case-level until then). A plain bucket is
+  #    unchanged. NOTE: apis/openapi.yaml of wes-work-planning does not document sku / pickUnit / handles / cubeMm3 /
+  #    weightG on CPTBucket yet (ADR 0045 and the DTOs do), so the contract asserted here is the ADR's.
+  #    SHARED STATE: POST /paths/{pathId}/charge REPLACES the forecast of a path, so the scenario uses a run-scoped path id
+  #    that resolves to the pick family by matchPrefix ("pick-e2e-p5-<run>") and never touches a seeded path's forecast.
+
+  @e2e @phase5 @pack-aware-estimate
+  Scenario: Pack-aware charge estimate: 36 eaches of a 12-per-case SKU are 3 case handles with the case cube and weight, 36 as eaches, a plain bucket unchanged
+    Given wes-work-planning and product-master are healthy
+    And SKU "SKU-P5-EST-<run>" declares an EACH of 100x80x60 mm and 300 g and a CASE of 12 eaches of 400x300x200 mm and 6500 g in product-master
+    When wes-work-planning eventually accepts the charge forecast of path "pick-e2e-p5-<run>" with four buckets of 36 eaches: SKU as CASE, SKU as EACH, SKU without pickUnit and a plain one
+    Then the CASE bucket is still 36 eaches and stands for 3 handles, 72000000 mm3 and 19500 g
+    And the EACH bucket is still 36 eaches and stands for 36 handles, 17280000 mm3 and 10800 g
+    And the bucket with a SKU and no pickUnit is the EACH estimate
+    And the plain bucket without a SKU is 36 eaches with no handles, no cube and no weight
+    And the forecast total is 144 eaches
+    And a CASE bucket for a SKU with no CASE level is refused with 422 problem "no-active-case-level"
+    And a bucket with pickUnit "BOX" is refused with 400 problem "unknown-pick-unit"
