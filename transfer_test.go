@@ -287,13 +287,20 @@ func (w *world) injectSiteCapability(site string) error {
 // due_at must fall inside the capacity plan's window. The harness therefore
 // states the facts directly.
 func (w *world) injectSiteDemand(site string, units int, sku string, hours int) error {
+	return w.injectSiteDemandAt(site, units, sku, hours, time.Now())
+}
+
+// injectSiteDemandAt is injectSiteDemand with an explicit event time: NIP
+// stores the CloudEvent time as the fact's as_of watermark, so a past time
+// states a fact that is already stale (used to prove per-site staleness).
+func (w *world) injectSiteDemandAt(site string, units int, sku string, hours int, at time.Time) error {
 	site, sku = w.rs(site), w.rs(sku)
 	due := time.Now().UTC().Add(time.Duration(hours) * time.Hour)
 	return publishInjectedCloudEvent(topicOrderEvents,
 		"/warehouse/order-management",
 		"com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged",
 		"urn:warehouse:order-management:events:SiteSkuDemandChanged:v1",
-		fmt.Sprintf("ORD-E2E-%s-%s", w.rs("<run>"), site), time.Now(), map[string]any{
+		fmt.Sprintf("ORD-E2E-%s-%s", w.rs("<run>"), site), at, map[string]any{
 			"source_order_id":    fmt.Sprintf("ORD-E2E-%s-%s", w.rs("<run>"), site),
 			"line_no":            1,
 			"site_id":            site,
@@ -312,8 +319,11 @@ func (w *world) injectSiteDemand(site string, units int, sku string, hours int) 
 // outbox relay emits CapacityPlanPublished onto Kafka for NIP to ingest.
 func (w *world) planningPublishesCapacityPlan(site string, ratePerHour, hours int) error {
 	site = w.rs(site)
-	start := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
-	end := time.Now().UTC().Add(time.Duration(hours) * time.Hour).Truncate(time.Second)
+	// ONE clock reading, so the window is exactly hours+1 long and the plan's
+	// capacity over it (rate x window hours) is an exact integer.
+	now := time.Now().UTC()
+	start := now.Add(-1 * time.Hour).Truncate(time.Second)
+	end := now.Add(time.Duration(hours) * time.Hour).Truncate(time.Second)
 	const pathID = "e2e-transfer-path"
 
 	if err := w.expectOK2xx(w.doJSON(http.MethodPost, warehousePlanningBaseURL+"/process-paths", map[string]any{
