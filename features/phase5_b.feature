@@ -1,42 +1,58 @@
 Feature: Phase 5 part B - case-multiple transfers and ship-in-own-container
   Two contracts of the mastercase programme that ride on product-master's CASE
   pack level, proven black-box over REST through the Kong gateway of the live
-  kind cluster (no Kafka injection, no database access):
+  kind cluster (no database access; ONE injected fact, named below):
 
   1. network-inventory-planning ADR 0017 (case-multiple transfers). A SKU with an
      ACTIVE CASE level is planned in whole cases: the requested quantity is
      rounded to the NEAREST multiple of the case size (a tie goes UP), never below
      one case, never above what the origin can supply; the demand stays visible as
      caseMultiple, cases, requestedQtyEaches, roundedQtyEaches and a SIGNED
-     remainderEaches. A plain SKU is planned exactly as before.
+     remainderEaches. A plain SKU is planned exactly as before. Approval
+     (POST /v1/transfers:approve, GET /v1/transfers/{id}) applies the same rule, and
+     ADR 0018 (per-site staleness): a stale fact excludes only ITS site, so an
+     approval fails closed (422 facts-incomplete) only when the transfer's own origin
+     or destination is excluded, never because of another site's stale facts.
   2. fulfillment-execution ADR 0056 (ship in own container). A pack line that is
      EXACTLY one full active CASE is sealed in the case itself, with the case's
      GTIN, dimensions and weight and containerSource CASE; any other quantity, or a
      SKU without a CASE level, is a 422 problem that seals nothing; sealing
      without the option is unchanged.
 
-  Run it against the live cluster (base URLs are the only configuration):
+  Run it against the live cluster (base URLs are the only configuration; the
+  approval scenarios also need the kind broker for the injected demand fact and
+  warehouse-planning's REST):
 
     P=http://localhost:8000/api
     PRODUCT_MASTER_BASE_URL=$P/product-master FACILITY_BASE_URL=$P/facility-layout \
     NETWORK_INVENTORY_PLANNING_BASE_URL=$P/network-inventory-planning \
-    FULFILLMENT_BASE_URL=$P/fulfillment-execution GODOG_TAGS=@phase5 \
-      go test -count=1 -v -run TestMain -timeout 15m .
+    NIP_BASE_URL=$P/network-inventory-planning WAREHOUSE_PLANNING_BASE_URL=$P/warehouse-planning \
+    FULFILLMENT_BASE_URL=$P/fulfillment-execution KAFKA_BROKERS=localhost:9092 \
+    GODOG_TAGS=@phase5 go test -count=1 -v -run TestMain -timeout 15m .
 
-  How each fact is produced (all through the owning service's own REST):
+  How each fact is produced:
   - The CASE pack level (valid GTIN-14s computed per run, declared dimensions) is
-    declared in product-master. It reaches NIP and fulfillment-execution over Kafka
-    into their own local pack views; neither view is readable over REST, so the
+    declared in product-master REST. It reaches NIP and fulfillment-execution over
+    Kafka into their own local pack views; neither view is readable over REST, so the
     "eventually" steps probe the behaviour itself (a proposal that carries the case
     multiple; a refused own-container seal that no longer says no-case-level).
   - Proposals come from POST /v1/transfer-proposals:generate over an explicit
     snapshot (positions, policies, lane): the diagnostic boundary of NIP, which
     still consults NIP's pack view.
+  - Approvals run on TWO RUN-SCOPED SITES per scenario (P5O<run> origin, P5D<run>
+    destination), whose three planning facts are all fresh: capability through
+    facility-layout REST (PUT /sites/{code}/transfer-capability), the published
+    capacity plan through warehouse-planning REST, and the site-sku demand as the
+    CloudEvent order-management would emit, INJECTED into Kafka with the suite's
+    existing helper (the inter_warehouse_transfer feature's step): order-management
+    projects demand to ONE statically configured site per deployment, so no REST route
+    states a demand fact for two arbitrary sites. The origin's availability is not a
+    stock level: NIP derives it as the origin's published capacity over the window
+    minus its own in-window demand (OriginHeadroom), so a plan of 1 order/hour over a
+    12 hour window (the window opens an hour in the past) with 1 unit of origin demand
+    leaves exactly 11 eaches.
   - The PACK task is created with POST /tasks and claimed with claim-next by a
     station that has a private run-scoped capability (so no other task is touched).
-
-  Blocked (tag @blocked): approval (POST /v1/transfers:approve) cannot be driven today. See the
-  scenario's own header for the two exact reasons.
 
   Background:
     Given network-inventory-planning and fulfillment-execution are healthy
@@ -83,45 +99,81 @@ Feature: Phase 5 part B - case-multiple transfers and ship-in-own-container
     When I generate a transfer proposal for SKU "SKU-P5B-CM3-<run>" with a destination deficit of 25 eaches and an origin supply of 11 eaches in network-inventory-planning
     Then no transfer is proposed because the origin cannot supply one whole case
 
-  # BLOCKED, with the exact reasons (checked against the live cluster, 2026-10-24):
-  #
-  # (a) Demand facts. The snapshot needs ACTIVE site-sku demand at the destination for
-  #     the SKU AND a demand fact at the origin. The only producer is order-management,
-  #     which projects demand to ONE statically configured site per deployment
-  #     (DEMAND_PROJECTION_SITE_ID=AUS3 here): there is no REST route that states a
-  #     demand fact for two arbitrary sites. The existing inter_warehouse_transfer
-  #     feature injects the CloudEvent into Kafka instead; this suite does not fake a
-  #     producing service.
-  # (b) Fail-closed staleness is cluster-global. BuildSnapshot refuses the WHOLE
-  #     snapshot when ANY capability / demand / capacity fact in the read models is
-  #     older than PLANNING_MAX_STALENESS (10m), not just the sites of the transfer.
-  #     Live: POST /v1/transfers:approve for ANY sites answers 422 facts-incomplete
-  #     "stale site capability for ABE8 (as of 2026-10-19T00:10:49Z, older than 10m0s)"
-  #     and so does GET /v1/transfer-simulations (503). facility-layout publishes
-  #     SiteCapabilityChanged only on CHANGE (PUT of the current snapshot is a no-op,
-  #     ADR 0035), and ~60 sites of the cluster hold a capability fact that can only
-  #     be refreshed by toggling it. See the PR description (product finding).
-  #
-  # The steps below are real (capability via facility-layout PUT, capacity plan via
-  # warehouse-planning REST, approve, GET transfer); the demand step is pending. Run
-  # with GODOG_TAGS=@blocked once both are resolved.
-  @e2e @blocked @phase5-approve @network-inventory-planning
+  # Approval over two run-scoped sites with fresh facts. 25 -> 24 (+1) and 18 -> 24 (-6);
+  # the transfer quantity is the ROUNDED eaches on the approval AND on GET.
+  @e2e @phase5 @network-inventory-planning
   Scenario Outline: An approved transfer of a CASE SKU is rounded to whole cases and GET shows the demand
     Given SKU "SKU-P5B-AP-<run>" declares an EACH GTIN and a CASE pack level of 12 eaches with case dimensions 400x300x200 mm and 6500 g in product-master
     And network-inventory-planning eventually plans SKU "SKU-P5B-AP-<run>" in cases of 12 eaches
-    And order-management has projected site-sku demand for SKU "SKU-P5B-AP-<run>" at destination "P5B-D-<run>" and for another SKU at origin "P5B-O-<run>"
-    And facility-layout enables site "P5B-O-<run>" as transfer origin and destination
-    And facility-layout enables site "P5B-D-<run>" as transfer origin and destination
-    And warehouse-planning publishes a capacity plan for site "P5B-O-<run>" of 1000 orders per hour covering the next 48 hours
-    And warehouse-planning publishes a capacity plan for site "P5B-D-<run>" of 1000 orders per hour covering the next 48 hours
-    When an operator approves a transfer of <requested> eaches of SKU "SKU-P5B-AP-<run>" from "P5B-O-<run>" to "P5B-D-<run>" in network-inventory-planning
+    And facility-layout enables site "P5O<run>" as transfer origin and destination
+    And facility-layout enables site "P5D<run>" as transfer origin and destination
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5D<run>": 100 units of SKU "SKU-P5B-AP-<run>" due in 2 hours
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5O<run>": 1 units of SKU "SKU-P5B-AP-OTHER-<run>" due in 2 hours
+    And warehouse-planning publishes a capacity plan for site "P5O<run>" of 1000 orders per hour covering the next 48 hours
+    And warehouse-planning publishes a capacity plan for site "P5D<run>" of 1000 orders per hour covering the next 48 hours
+    When an operator approves a transfer of <requested> eaches of SKU "SKU-P5B-AP-<run>" from "P5O<run>" to "P5D<run>" in network-inventory-planning
     Then the approval is accepted for <cases> cases of 12 eaches: requested <requested>, rounded <rounded>, remainder <remainder>
     And GET of that transfer in network-inventory-planning shows <cases> cases of 12 eaches: requested <requested>, rounded <rounded>, remainder <remainder>
+    And replaying that approval with the same Idempotency-Key answers replayed true for the same transfer
 
     Examples:
       | requested | cases | rounded | remainder |
       | 25        | 2     | 24      | 1         |
       | 18        | 2     | 24      | -6        |
+
+  @e2e @phase5 @network-inventory-planning
+  Scenario: An approved transfer of a plain SKU is not rounded and carries no case fields
+    # The CASE SKU proves NIP's pack view is live, so the absence below is not a view that
+    # has not arrived yet.
+    Given SKU "SKU-P5B-APP-<run>" declares only an EACH GTIN in product-master
+    And SKU "SKU-P5B-CM4-<run>" declares an EACH GTIN and a CASE pack level of 12 eaches with case dimensions 400x300x200 mm and 6500 g in product-master
+    And network-inventory-planning eventually plans SKU "SKU-P5B-CM4-<run>" in cases of 12 eaches
+    And facility-layout enables site "P5O<run>" as transfer origin and destination
+    And facility-layout enables site "P5D<run>" as transfer origin and destination
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5D<run>": 100 units of SKU "SKU-P5B-APP-<run>" due in 2 hours
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5O<run>": 1 units of SKU "SKU-P5B-AP-OTHER-<run>" due in 2 hours
+    And warehouse-planning publishes a capacity plan for site "P5O<run>" of 1000 orders per hour covering the next 48 hours
+    And warehouse-planning publishes a capacity plan for site "P5D<run>" of 1000 orders per hour covering the next 48 hours
+    When an operator approves a transfer of 25 eaches of SKU "SKU-P5B-APP-<run>" from "P5O<run>" to "P5D<run>" in network-inventory-planning
+    Then the approval is accepted for 25 eaches and carries no case fields
+    And GET of that transfer in network-inventory-planning shows 25 eaches and carries no case fields
+
+  # The origin's availability is 12 (1 order/hour over a 12 hour window) minus 1 unit of its own
+  # demand = 11 eaches: not one whole case of 12.
+  @e2e @phase5 @network-inventory-planning
+  Scenario: An approval whose origin can send only 11 eaches of a case of 12 is refused below-one-case
+    Given SKU "SKU-P5B-BC-<run>" declares an EACH GTIN and a CASE pack level of 12 eaches with case dimensions 400x300x200 mm and 6500 g in product-master
+    And network-inventory-planning eventually plans SKU "SKU-P5B-BC-<run>" in cases of 12 eaches
+    And facility-layout enables site "P5O<run>" as transfer origin and destination
+    And facility-layout enables site "P5D<run>" as transfer origin and destination
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5D<run>": 100 units of SKU "SKU-P5B-BC-<run>" due in 2 hours
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5O<run>": 1 units of SKU "SKU-P5B-AP-OTHER-<run>" due in 2 hours
+    And warehouse-planning publishes a capacity plan for site "P5O<run>" of 1 orders per hour covering the next 11 hours
+    And warehouse-planning publishes a capacity plan for site "P5D<run>" of 1000 orders per hour covering the next 48 hours
+    When an operator approves a transfer of 25 eaches of SKU "SKU-P5B-BC-<run>" from "P5O<run>" to "P5D<run>" in network-inventory-planning
+    Then the approval is refused with status 422 and problem "below-one-case"
+
+  # ADR 0018 (per-site staleness). A third site holds a demand fact stated 2 hours ago (the
+  # CloudEvent time is the fact's watermark; the limit is 10 minutes), so a stale fact of
+  # ANOTHER site is in NIP's read models while the fresh pair is approved. Stale facts of other
+  # sites in the cluster (AUS3, E2E-ORIGIN, ...) are in the same position. An origin that is
+  # the stale site, or a site with no facts at all, is refused naming that site.
+  @e2e @phase5 @network-inventory-planning
+  Scenario: A stale fact excludes only its own site: the fresh pair is approved and a site without fresh facts is refused by name
+    Given SKU "SKU-P5B-ST-<run>" declares an EACH GTIN and a CASE pack level of 12 eaches with case dimensions 400x300x200 mm and 6500 g in product-master
+    And network-inventory-planning eventually plans SKU "SKU-P5B-ST-<run>" in cases of 12 eaches
+    And facility-layout enables site "P5O<run>" as transfer origin and destination
+    And facility-layout enables site "P5D<run>" as transfer origin and destination
+    And facility-layout enables site "P5S<run>" as transfer origin and destination
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5S<run>": 1 units of SKU "SKU-P5B-AP-OTHER-<run>" due in 2 hours, stated 2 hours ago
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5D<run>": 100 units of SKU "SKU-P5B-ST-<run>" due in 2 hours
+    And the harness injects order-management's SiteSkuDemandChanged for site "P5O<run>": 1 units of SKU "SKU-P5B-AP-OTHER-<run>" due in 2 hours
+    And warehouse-planning publishes a capacity plan for site "P5O<run>" of 1000 orders per hour covering the next 48 hours
+    And warehouse-planning publishes a capacity plan for site "P5D<run>" of 1000 orders per hour covering the next 48 hours
+    When an operator approves a transfer of 25 eaches of SKU "SKU-P5B-ST-<run>" from "P5O<run>" to "P5D<run>" in network-inventory-planning
+    Then the approval is accepted for 2 cases of 12 eaches: requested 25, rounded 24, remainder 1
+    When an operator approves a transfer of 25 eaches of SKU "SKU-P5B-ST-<run>" from "P5S<run>" to "P5D<run>" and network-inventory-planning eventually refuses it as facts-incomplete naming site "P5S<run>" as stale
+    And an operator approves a transfer of 25 eaches of SKU "SKU-P5B-ST-<run>" from "P5N<run>" to "P5D<run>" and network-inventory-planning eventually refuses it as facts-incomplete naming site "P5N<run>"
 
   # ---------------------------------------------------------------------
   # 2. fulfillment-execution: ship in own container (ADR 0056)

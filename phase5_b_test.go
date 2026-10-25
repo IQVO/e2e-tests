@@ -5,18 +5,22 @@ package main
 //  1. network-inventory-planning ADR 0017: case-multiple transfers.
 //  2. fulfillment-execution ADR 0056: ship in own container.
 //
-// Black-box, REST only, through the Kong gateway of the kind cluster. Nothing
-// is injected and no database is touched: every fact the scenarios depend on
-// is produced by the owning services through their public REST contracts.
-// What cannot be produced that way is NOT faked: see the @blocked scenario's
-// header in the feature file and the README "Phase 5 part B" section.
+// Black-box, REST only, through the Kong gateway of the kind cluster, no
+// database touched. Every fact is produced by its owning service's REST
+// contract EXCEPT the approval scenarios' site-sku demand, which has no REST
+// producer for an arbitrary site and is injected as the exact CloudEvent
+// through the suite's existing Kafka helper (transfer_test.go); see the
+// feature header and the README "Phase 5 part B" section.
 //
 // State lives in a closure (registerPhase5BSteps) and is reset before every
 // scenario, so this file adds no field to the shared world struct.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -50,6 +54,8 @@ type p5State struct {
 	prop     map[string]any // proposal under test (nil = none proposed)
 	propBody string
 	xfer     map[string]any // approval response
+	apprKey  string         // Idempotency-Key of the approval under test
+	apprReq  map[string]any // its request body (fixed, so a replay is the same request)
 	station  string
 	taskID   string
 	pkgID    string
@@ -150,13 +156,17 @@ func registerPhase5BSteps(sc *godog.ScenarioContext, w *world) {
 		return nil
 	})
 
-	// ---- network-inventory-planning: approval (@blocked) -------------
-	sc.Step(`^order-management has projected site-sku demand for SKU "([^"]*)" at destination "([^"]*)" and for another SKU at origin "([^"]*)"$`,
-		func(string, string, string) error {
-			// No REST route produces this fact for an arbitrary site: order-management
-			// projects demand only to its one DEMAND_PROJECTION_SITE_ID (AUS3 in this
-			// cluster) and NIP's snapshot needs demand facts at BOTH sites. Not faked.
-			return godog.ErrPending
+	// ---- network-inventory-planning: approval (live, ADR 0017 + ADR 0018) ----
+	//
+	// Facts come from their owners: the CASE level from product-master REST, the
+	// transfer capability from facility-layout REST (PUT /sites/{code}/transfer-capability),
+	// the capacity plan from warehouse-planning REST, and the site-sku demand from the
+	// harness's injected CloudEvent (the ONE injected fact: order-management has no
+	// route that states demand for an arbitrary site; see the feature header). It is
+	// the existing inter_warehouse_transfer step, reused as is.
+	sc.Step(`^the harness injects order-management's SiteSkuDemandChanged for site "([^"]*)": (\d+) units of SKU "([^"]*)" due in (\d+) hours?, stated (\d+) hours ago$`,
+		func(site string, units int, sku string, due, ago int) error {
+			return w.injectSiteDemandAt(site, units, sku, due, time.Now().Add(-time.Duration(ago)*time.Hour))
 		})
 	sc.Step(`^facility-layout enables site "([^"]*)" as transfer origin and destination$`, func(site string) error {
 		site = w.rs(site)
@@ -166,44 +176,62 @@ func registerPhase5BSteps(sc *godog.ScenarioContext, w *world) {
 		return w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/sites/%s/transfer-capability", facilityBaseURL, site),
 			map[string]any{"transferOriginEnabled": true, "transferDestinationEnabled": true}))
 	})
-	sc.Step(`^warehouse-planning publishes a capacity plan for site "([^"]*)" of (\d+) orders per hour covering the next (\d+) hours$`,
-		func(site string, rate, hours int) error { return w.planningPublishesCapacityPlan(site, rate, hours) })
+	// "warehouse-planning publishes a capacity plan for site ..." is transfer_test.go's step.
 	sc.Step(`^an operator approves a transfer of (\d+) eaches of SKU "([^"]*)" from "([^"]*)" to "([^"]*)" in network-inventory-planning$`,
-		func(qty int, sku, origin, dest string) error {
-			body := map[string]any{
-				"originSiteId": w.rs(origin), "destinationSiteId": w.rs(dest), "sku": w.rs(sku), "quantity": qty,
-				"policyVersion": p5DemandPlan, "operatorReason": "e2e phase5 case-multiple",
-				"proposalAsOf": time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := w.doJSON(http.MethodPost, p5NipBase+"/v1/transfers:approve", body); err != nil {
-				return err
-			}
-			if w.last.status == http.StatusOK {
-				st.xfer = w.last.json()
-			}
-			return nil
+		func(qty int, sku, origin, dest string) error { return st.approve(w, qty, sku, origin, dest) })
+	sc.Step(`^an operator approves a transfer of (\d+) eaches of SKU "([^"]*)" from "([^"]*)" to "([^"]*)" and network-inventory-planning eventually refuses it as facts-incomplete naming site "([^"]*)"( as stale)?$`,
+		func(qty int, sku, origin, dest, site, stale string) error {
+			return st.approveRefusedNaming(w, qty, sku, origin, dest, w.rs(site), stale != "")
 		})
 	sc.Step(`^the approval is accepted for (\d+) cases of (\d+) eaches: requested (\d+), rounded (\d+), remainder (-?\d+)$`,
 		func(cases, mult, req, rounded, rem int) error {
 			if w.last.status != http.StatusOK || st.xfer == nil {
 				return fmt.Errorf("approval answered %d (body: %s)", w.last.status, w.last.body)
 			}
+			// The transfer quantity is the ROUNDED eaches, never the request.
 			return caseFieldsAre(st.xfer, rounded, cases, mult, req, rounded, rem, w.last.body)
 		})
+	sc.Step(`^the approval is accepted for (\d+) eaches and carries no case fields$`, func(qty int) error {
+		if w.last.status != http.StatusOK || st.xfer == nil {
+			return fmt.Errorf("approval answered %d (body: %s)", w.last.status, w.last.body)
+		}
+		return noCaseFields(st.xfer, qty, w.last.body)
+	})
 	sc.Step(`^GET of that transfer in network-inventory-planning shows (\d+) cases of (\d+) eaches: requested (\d+), rounded (\d+), remainder (-?\d+)$`,
 		func(cases, mult, req, rounded, rem int) error {
-			id, _ := st.xfer["transferId"].(string)
-			if id == "" {
-				return fmt.Errorf("no transfer approved")
-			}
-			if err := w.doJSON(http.MethodGet, p5NipBase+"/v1/transfers/"+id, nil); err != nil {
+			got, raw, err := st.getTransfer(w)
+			if err != nil {
 				return err
 			}
-			if w.last.status != http.StatusOK {
-				return fmt.Errorf("GET transfer %s = %d (%s)", id, w.last.status, w.last.body)
-			}
-			return caseFieldsAre(w.last.json(), rounded, cases, mult, req, rounded, rem, w.last.body)
+			return caseFieldsAre(got, rounded, cases, mult, req, rounded, rem, raw)
 		})
+	sc.Step(`^GET of that transfer in network-inventory-planning shows (\d+) eaches and carries no case fields$`, func(qty int) error {
+		got, raw, err := st.getTransfer(w)
+		if err != nil {
+			return err
+		}
+		return noCaseFields(got, qty, raw)
+	})
+	sc.Step(`^replaying that approval with the same Idempotency-Key answers replayed true for the same transfer$`, func() error {
+		first, _ := st.xfer["transferId"].(string)
+		if first == "" || st.apprKey == "" {
+			return fmt.Errorf("no approval to replay")
+		}
+		if err := st.postApprove(w, st.apprKey, st.apprReq); err != nil {
+			return err
+		}
+		if w.last.status != http.StatusOK {
+			return fmt.Errorf("replay answered %d, want 200 (body: %s)", w.last.status, w.last.body)
+		}
+		got := w.last.json()
+		if got["replayed"] != true {
+			return fmt.Errorf("replay: replayed = %v, want true (body: %s)", got["replayed"], w.last.body)
+		}
+		if id, _ := got["transferId"].(string); id != first {
+			return fmt.Errorf("replay minted transfer %q, want the first %q (body: %s)", id, first, w.last.body)
+		}
+		return nil
+	})
 	sc.Step(`^the approval is refused with status (\d+) and problem "([^"]*)"$`, func(status int, slug string) error {
 		return problemIs(w, status, slug)
 	})
@@ -467,6 +495,123 @@ func (st *p5State) packageIsOwnContainer(got map[string]any, sku string, l, wd, 
 	for k, want := range map[string]int{"lengthMm": l, "widthMm": wd, "heightMm": h, "weightG": g} {
 		if f, _ := toFloat(c[k]); int(f) != want {
 			return fmt.Errorf("container %s = %v, want %d (%v)", k, c[k], want, raw)
+		}
+	}
+	return nil
+}
+
+// postApprove POSTs /v1/transfers:approve with an explicit Idempotency-Key (doJSON
+// mints a fresh key per call, which cannot express a replay).
+func (st *p5State) postApprove(w *world, key string, body map[string]any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, p5NipBase+"/v1/transfers:approve", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", key)
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP POST approve: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	w.last = httpResult{status: resp.StatusCode, header: resp.Header, body: raw}
+	return nil
+}
+
+func (st *p5State) newApproval(w *world, qty int, sku, origin, dest string) {
+	st.apprKey = newIdempotencyKey()
+	st.xfer = nil
+	st.apprReq = map[string]any{
+		"originSiteId": w.rs(origin), "destinationSiteId": w.rs(dest), "sku": w.rs(sku), "quantity": qty,
+		"policyVersion": p5DemandPlan, "operatorReason": "e2e phase5 case-multiple",
+		"proposalAsOf": time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
+	}
+}
+
+func isFactsIncomplete(w *world) bool {
+	return w.last.status == http.StatusUnprocessableEntity && strings.HasSuffix(problemType(w), "/facts-incomplete")
+}
+
+// approve drives the approval the way an operator would while the facts are still
+// travelling over Kafka: 422 facts-incomplete means "NIP has not ingested them yet"
+// and persists nothing, so the SAME request (same Idempotency-Key, so a retry that
+// races a success can only replay) is repeated until NIP answers anything else.
+func (st *p5State) approve(w *world, qty int, sku, origin, dest string) error {
+	st.newApproval(w, qty, sku, origin, dest)
+	err := eventually(func() error {
+		if err := st.postApprove(w, st.apprKey, st.apprReq); err != nil {
+			return err
+		}
+		if isFactsIncomplete(w) {
+			return fmt.Errorf("NIP does not have the facts yet: %s", w.last.body)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if w.last.status == http.StatusOK {
+		st.xfer = w.last.json()
+	}
+	return nil
+}
+
+// approveRefusedNaming repeats the approval until NIP refuses it 422 facts-incomplete
+// with a detail that names the site (ADR 0018 ValidateApproval wording); an approval
+// that is ACCEPTED is a product bug and fails at once.
+func (st *p5State) approveRefusedNaming(w *world, qty int, sku, origin, dest, site string, stale bool) error {
+	st.newApproval(w, qty, sku, origin, dest)
+	deadline := time.Now().Add(eventualWaitTimeout)
+	for {
+		if err := st.postApprove(w, st.apprKey, st.apprReq); err != nil {
+			return err
+		}
+		if w.last.status == http.StatusOK {
+			return fmt.Errorf("approval from %s was ACCEPTED, want 422 facts-incomplete (body: %s)", site, w.last.body)
+		}
+		detail, _ := w.last.json()["detail"].(string)
+		named := strings.Contains(detail, "origin site "+site+" ")
+		if isFactsIncomplete(w) && named && (!stale || strings.Contains(detail, "stale") && strings.Contains(detail, "excluded from the planning snapshot")) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no 422 facts-incomplete naming origin site %s (stale=%v) within %s; last answer %d: %s",
+				site, stale, eventualWaitTimeout, w.last.status, w.last.body)
+		}
+		time.Sleep(eventualWaitPoll)
+	}
+}
+
+func (st *p5State) getTransfer(w *world) (map[string]any, string, error) {
+	id, _ := st.xfer["transferId"].(string)
+	if id == "" {
+		return nil, "", fmt.Errorf("no transfer approved")
+	}
+	if err := w.doJSON(http.MethodGet, p5NipBase+"/v1/transfers/"+id, nil); err != nil {
+		return nil, "", err
+	}
+	if w.last.status != http.StatusOK {
+		return nil, "", fmt.Errorf("GET transfer %s = %d (%s)", id, w.last.status, w.last.body)
+	}
+	return w.last.json(), string(w.last.body), nil
+}
+
+// noCaseFields asserts a plain SKU's transfer: the plain quantity, none of the ADR 0017 fields.
+func noCaseFields(m map[string]any, quantity int, raw any) error {
+	if q, _ := toFloat(m["quantity"]); int(q) != quantity {
+		return fmt.Errorf("quantity = %v, want %d (%v)", m["quantity"], quantity, raw)
+	}
+	for _, k := range []string{"caseMultiple", "cases", "requestedQtyEaches", "roundedQtyEaches", "remainderEaches"} {
+		if _, has := m[k]; has {
+			return fmt.Errorf("plain SKU transfer carries %q (%v)", k, raw)
 		}
 	}
 	return nil

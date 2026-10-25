@@ -351,8 +351,8 @@ WORK_PLANNING_BASE_URL=$P/wes-work-planning GODOG_TAGS=@phase5 \
 
 ## Phase 5 part B: case-multiple transfers and ship-in-own-container (`@phase5`, live cluster)
 
-`features/phase5_b.feature` + `phase5_b_test.go`, black-box REST through Kong, nothing injected and
-no database touched. Valid GTIN-14s are computed per run (prefix `9502`), every id is run-scoped.
+`features/phase5_b.feature` + `phase5_b_test.go`, black-box REST through Kong, no database touched
+(one injected Kafka fact in the approval scenarios, below). Valid GTIN-14s are computed per run (prefix `9502`), every id is run-scoped.
 
 - **network-inventory-planning ADR 0017**: with an ACTIVE CASE of 12 in product-master, a
   proposal (`POST /v1/transfer-proposals:generate`) is rounded to the nearest whole case, a tie
@@ -367,18 +367,30 @@ no database touched. Valid GTIN-14s are computed per run (prefix `9502`), every 
   `ship-in-own-container-quantity-mismatch`; SKU without CASE -> 422
   `ship-in-own-container-no-case-level`; refusals seal nothing; no option = ordinary carton;
   option without `lineQuantity` = 400.
-- **`@blocked @phase5-approve`** (`POST /v1/transfers:approve` + `GET /v1/transfers/{id}`, incl.
-  422 `below-one-case`): not drivable on the live cluster: order-management projects demand only
-  to its one `DEMAND_PROJECTION_SITE_ID`, and NIP's fail-closed snapshot refuses ALL approvals
-  while any capability/demand/plan fact in its read models is older than 10 minutes (live:
-  `stale site capability for ABE8`). Reasons are written on the scenario; steps are real except
-  the demand fact (pending).
+- **Approval, live (`POST /v1/transfers:approve` + `GET /v1/transfers/{id}`)**: two RUN-SCOPED sites per
+  scenario (`P5O<run>` origin, `P5D<run>` destination; facility-layout site codes are uppercase
+  letters and digits) with FRESH facts: transfer capability through facility-layout REST, the capacity
+  plan through warehouse-planning REST (set `WAREHOUSE_PLANNING_BASE_URL`), the CASE of 12 through
+  product-master REST. The ONE injected fact is `SiteSkuDemandChanged` (order-management projects demand
+  to a single configured site, so no REST route states it for two arbitrary sites): the existing
+  `inter_warehouse_transfer` step publishes the CloudEvent to `warehouse.order-management.events` on the
+  kind broker (`KAFKA_BROKERS`, default `localhost:9092`). Asserted: 25 -> 24 (2 cases, +1) and 18 -> 24
+  (-6) on the approval AND on GET, the transfer quantity is the rounded eaches, a replay with the same
+  `Idempotency-Key` answers `replayed: true` for the same transfer, a plain SKU approves with no case
+  fields, an origin that can send 11 eaches (availability is NIP's `OriginHeadroom` = published capacity
+  over the window minus the origin's own in-window demand: 1 order/hour over a 12 h window, 1 unit of
+  origin demand) is refused 422 `below-one-case`. **ADR 0018 (per-site staleness)**: a third site holds a
+  demand fact stated 2 hours ago (the CloudEvent time is the watermark, limit 10 min) while the fresh pair
+  is approved; an origin that is that stale site, or a site with no facts, is refused 422
+  `facts-incomplete` naming it. After approval the real saga continues (inventory-storage does not know
+  the run-scoped sites, so the transfer ends `UNFULFILLABLE`); the assertions are on the case fields only.
 
 ```sh
 P=http://localhost:8000/api
 PRODUCT_MASTER_BASE_URL=$P/product-master FACILITY_BASE_URL=$P/facility-layout \
 NETWORK_INVENTORY_PLANNING_BASE_URL=$P/network-inventory-planning \
-FULFILLMENT_BASE_URL=$P/fulfillment-execution GODOG_TAGS=@phase5 \
+NIP_BASE_URL=$P/network-inventory-planning WAREHOUSE_PLANNING_BASE_URL=$P/warehouse-planning \
+FULFILLMENT_BASE_URL=$P/fulfillment-execution KAFKA_BROKERS=localhost:9092 GODOG_TAGS=@phase5 \
   go test -count=1 -v -run TestMain -timeout 15m .
 ```
 
@@ -388,6 +400,8 @@ FULFILLMENT_BASE_URL=$P/fulfillment-execution GODOG_TAGS=@phase5 \
 | `PROCESS_PATH_BASE_URL` | `http://localhost:8000/api/process-path-management` here (the harness default is `:8087`) | `/process-paths` |
 | `WORK_PLANNING_BASE_URL` | `http://localhost:8000/api/wes-work-planning` | `POST /paths/{pathId}/charge` |
 | `PRODUCT_MASTER_BASE_URL` | the existing variable | pack levels with dims |
+| `NETWORK_INVENTORY_PLANNING_BASE_URL` | `NIP_BASE_URL` | NIP approval, GET transfer, proposals (the approval steps also use `NIP_BASE_URL` and `WAREHOUSE_PLANNING_BASE_URL`) |
+| `KAFKA_BROKERS` | `localhost:9092` | the kind broker the injected `SiteSkuDemandChanged` is published to |
 
 Plus the seller-inbound variables above. Tags: `@e2e @phase5` plus the one in the table.
 
