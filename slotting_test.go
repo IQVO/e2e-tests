@@ -183,11 +183,21 @@ func (w *world) skuRegisteredClassifiedAndMeasured(sku, tags string) error {
 // ---------------------------------------------------------------------
 
 func (w *world) demandIsStated(lines, units int, sku, site string) error {
+	each := make([]int, lines)
+	for i := range each {
+		each[i] = units
+	}
+	return w.demandLinesAreStated(each, sku, site)
+}
+
+// demandLinesAreStated publishes one SiteSkuDemandChanged per entry of units
+// (one order line each), so a SKU can have lines of different sizes.
+func (w *world) demandLinesAreStated(units []int, sku, site string) error {
 	sku, site = w.rs(sku), w.rs(site)
 	st := w.sl()
 	key := site + "|" + sku
 	due := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	for i := 0; i < lines; i++ {
+	for i, u := range units {
 		st.demandSeq[key]++
 		order := fmt.Sprintf("ORD-%s-%s-%d", site, sku, st.demandSeq[key])
 		subject := order + "/line/1"
@@ -199,7 +209,7 @@ func (w *world) demandIsStated(lines, units int, sku, site string) error {
 				"line_no":            1,
 				"site_id":            site,
 				"sku":                sku,
-				"demanded_units":     units,
+				"demanded_units":     u,
 				"due_at":             due.Format(time.RFC3339),
 				"state":              "ACTIVE",
 				"assignment_version": "static-site-v1",

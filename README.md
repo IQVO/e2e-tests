@@ -413,6 +413,38 @@ Both pack levels reach NIP and fulfillment-execution over Kafka into local views
 read, so the "eventually" steps probe the behaviour (a proposal carrying `caseMultiple`; a refused
 own-container seal that no longer answers `no-case-level`).
 
+## Phase 5: case-pick faces and the CASE pick unit (`@phase5 @case-pick`, live cluster)
+
+`features/phase5_case_pick.feature` + `phase5_case_pick_test.go`: one black-box scenario for slotting-optimization
+ADR 0012, REST through Kong plus the injected demand and the `SlotPlanApproved` read, on a RUN-SCOPED site
+(`CP<run>`). The cluster's slotting-optimization must run with `CASE_PICK_ZONE_CODES=CPK` and `PACK_LEVEL_MODE=kafka`
+(it does in the kind cluster); facility-layout has no "behavioural class" field apart from the zone code, so the
+case-pick zone is a zone registered with `zoneCode: CPK` and the each-pick zone one with `zoneCode: FWD`; a slot's
+volume/weight limits are `capacityOverride` on `POST /locations`. facility-layout's placement rules allow only
+CartonFlow, Shelf and ToteWall in a FWD zone, so every slot is a `Shelf`.
+
+- Layout: two CPK faces (40 kg / 0.2 m3 = 8 cases by volume, 6 by weight; 100 kg / 0.1 m3 = 4 by volume, 15 by
+  weight) and two FWD faces. A case is 400x300x200 mm (0.024 m3), 6500 g, 12 eaches.
+- SKUs: `CASE` (demand lines 24 + 36, gcd 12) and `CASEB` (one line of 24) with a CASE level, `MIXED` (CASE level, lines
+  5 + 7, gcd 1) and `EACH` (no CASE level, lines 5 + 7).
+- Asserted on the generated Draft (POST and GET by id): `CASE` and `CASEB` are `pickUnit: CASE` on the CPK faces with
+  `casesCapacity` 6 and 4 (also recomputed as floor(min(volume, weight)) from the declared limits), `MIXED` and `EACH`
+  are EACH (absent or `EACH`, no `casesCapacity`) on FWD faces, nothing unassigned, one Assign move per SKU; after
+  approval `GET /forward-slots?siteId=` and the `SlotPlanApproved` event (`pick_unit`/`cases_capacity` on the CASE
+  assignments only) carry the same.
+- Slotting builds four local copies from Kafka (layout, product profiles, pack levels, demand) and only the demand one
+  is readable over REST, so the plan is drafted until it matches (up to 2 minutes), rejecting each incomplete Draft.
+
+```sh
+P=http://localhost:8000/api
+PRODUCT_MASTER_BASE_URL=$P/product-master FACILITY_BASE_URL=$P/facility-layout \
+SLOTTING_BASE_URL=$P/slotting-optimization KAFKA_BROKERS=localhost:9092 GODOG_TAGS=@case-pick \
+  go test -count=1 -v -run TestMain -timeout 10m .
+```
+
+No new environment variable: `SLOTTING_BASE_URL`, `FACILITY_BASE_URL`, `PRODUCT_MASTER_BASE_URL` and `KAFKA_BROKERS` are the
+existing ones (`SLOTTING_BASE_URL` defaults to `http://localhost:8109`, so through Kong it must be set as above).
+
 ## Real product catalogue (`cmd/seed-products`)
 
 Registers **at least 10,000 real products** in product-master through its
