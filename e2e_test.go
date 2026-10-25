@@ -1862,6 +1862,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerReturnsSteps(sc, w)
 	registerSlottingSteps(sc, w)
 	registerPhase5BSteps(sc, w)
+	registerPhase5CasePickSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
 		return ctx, nil
