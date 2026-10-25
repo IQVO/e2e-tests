@@ -326,6 +326,29 @@ behaviour (plan accepted, first carton accepted, poll returns the shipment); onl
 refusals are awaited, any other refusal fails at once. Requires the Kafka topic
 `retailnetwork.seller-inbound.events` to exist before vendor-connectivity starts (see the PR notes).
 
+## Phase 5 part A (`@phase5`, live cluster)
+
+`features/phase5_a.feature` + `phase5_a_test.go`: six small black-box scenarios over the Phase 5 capabilities,
+through Kong. Each creates its own run-scoped data; the shared-state limits are stated in the feature file.
+
+| Tag | Context | Proves |
+|---|---|---|
+| `@seller-scorecard` | seller-inbound | `GET /sellers/{id}/scorecard`: a shipment closed with a short and a missing carton gives `receiptAccuracyRate` = RECEIVED / reported, `discrepanciesByKind`, the documented `complianceTier`, and the seller still plans/confirms (informational); empty shape without NaN, 404, `invalid-window` 400. Reuses the `seller_inbound` steps for the shipment flow |
+| `@labor-standards` | labor-performance | `POST /standards` per handling unit: most-specific resolution with fallback, team lift only on CASE (`team-lift-requires-case-unit`), `unknown-handling-unit`, unit-less standard untouched. Restores the task-type-only PICK standard afterwards |
+| `@process-paths` | process-path-management | FULL_CASE / CROSS_DOCK / BREAK_CASE declared as in `catalogue/paths.json` (applied like `seed_catalogue.py`: 201 or 409), their definitions, selection by the declared criteria, invalid definitions refused |
+| `@pack-aware-estimate` | wes-work-planning + product-master | `POST /paths/{pathId}/charge` with `sku` + `pickUnit`: 36 eaches of a 12-per-case SKU are 3 handles with the case cube/weight; EACH is 36 handles; a plain bucket is unchanged |
+
+Not exercisable through the public REST (not faked): process-path *step lists* (a ProcessPath has no steps) and a
+"select the path for these criteria" endpoint (none exists; selection is asserted on the listing).
+
+```sh
+P=http://localhost:8000/api
+SELLER_INBOUND_BASE_URL=$P/seller-inbound VENDOR_CONNECTIVITY_BASE_URL=$P/vendor-connectivity \
+NODE_TOPOLOGY_BASE_URL=$P/node-topology OFFER_AVAILABILITY_BASE_URL=$P/offer-availability \
+NODE_PERFORMANCE_BASE_URL=$P/node-performance PRODUCT_MASTER_BASE_URL=$P/product-master \
+LABOR_PERFORMANCE_BASE_URL=$P/labor-performance PROCESS_PATH_BASE_URL=$P/process-path-management \
+WORK_PLANNING_BASE_URL=$P/wes-work-planning GODOG_TAGS=@phase5 \
+
 ## Phase 5 part B: case-multiple transfers and ship-in-own-container (`@phase5`, live cluster)
 
 `features/phase5_b.feature` + `phase5_b_test.go`, black-box REST through Kong, nothing injected and
@@ -361,6 +384,13 @@ FULFILLMENT_BASE_URL=$P/fulfillment-execution GODOG_TAGS=@phase5 \
 
 | Env var | Default | Context |
 |---|---|---|
+| `LABOR_PERFORMANCE_BASE_URL` | `http://localhost:8000/api/labor-performance` | `/standards` (the older `LABOR_BASE_URL` serves the local-harness scenarios) |
+| `PROCESS_PATH_BASE_URL` | `http://localhost:8000/api/process-path-management` here (the harness default is `:8087`) | `/process-paths` |
+| `WORK_PLANNING_BASE_URL` | `http://localhost:8000/api/wes-work-planning` | `POST /paths/{pathId}/charge` |
+| `PRODUCT_MASTER_BASE_URL` | the existing variable | pack levels with dims |
+
+Plus the seller-inbound variables above. Tags: `@e2e @phase5` plus the one in the table.
+
 | `NETWORK_INVENTORY_PLANNING_BASE_URL` | `NIP_BASE_URL` (`http://localhost:8099`) | proposals, approval, transfers |
 | `FULFILLMENT_BASE_URL` | `http://localhost:8084` | tasks, stations, seal-package, packages |
 | `PRODUCT_MASTER_BASE_URL`, `FACILITY_BASE_URL` | as elsewhere | pack levels; site transfer capability |
