@@ -614,3 +614,14 @@ that names none goes to the static site (`static-site-v1`), a malformed site is 
   cache (rebuilt from the process-path-management events topic on every start) has lost a path
   definition, usually because the topic's retention expired it. Revising the path (PUT
   `/process-paths/{id}` with a real change, then back) republishes it.
+
+### Running the whole suite against the kind cluster
+
+Every base URL has a per-service default (`localhost:81xx`) that only exists when each service runs
+standalone. Against the kind cluster set them all to the Kong routes, including the ones that are
+easy to forget: `RETURNS_BASE_URL=$P/returns-processing` (the returns scenarios otherwise fail on a
+refused connection to `localhost:8110`) and `INBOUND_BASE_URL`, `EXCEPTIONS_BASE_URL`,
+`SLOTTING_BASE_URL`, `NIP_BASE_URL`. `INVENTORY_DB_URL` and the other `*_DB_URL` defaults point at
+standalone containers, not at the cluster's databases; scenarios must reach the service through its
+REST API wherever it offers one (bins are registered with `PUT /bins/{binId}`), because a direct SQL
+write lands in a database the running service never reads.
