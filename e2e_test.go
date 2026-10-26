@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -645,17 +646,20 @@ func (w *world) stowEventuallyRejected(qty int, sku, binID string) error {
 // every consumer of this service — including this e2e harness — seeds
 // bins the same way its own unit/integration tests do: a direct insert.
 func (w *world) binExists(binID string, capacity int) error {
-	binID = w.rs(binID)
-	binID = w.resolveSlot(binID)
-	db, err := dbOpen(inventoryDBURL, inventoryDBPassword)
-	if err != nil {
+	binID = w.resolveSlot(w.rs(binID))
+	// Through inventory-storage's own registerBin (PUT /bins/{binId}, ADR 0025),
+	// not a direct INSERT: a direct insert only reaches the database named by
+	// INVENTORY_DB_URL, which on the kind cluster is NOT the database the
+	// running service reads (its default points at a standalone container), so
+	// the later stow answered 404 bin-not-found. PUT is idempotent: an existing
+	// bin of the same capacity is left untouched, a different one is resized.
+	if err := w.doJSON(http.MethodPut, inventoryBaseURL+"/bins/"+url.PathEscape(binID), map[string]any{"capacity": capacity}); err != nil {
 		return err
 	}
-	defer db.Close()
-	_, err = db.ExecContext(context.Background(),
-		`INSERT INTO bins (id, capacity, occupied) VALUES ($1, $2, 0)
-		 ON CONFLICT (id) DO NOTHING`, binID, capacity)
-	return err
+	if w.last.status != http.StatusOK && w.last.status != http.StatusCreated {
+		return fmt.Errorf("register bin %s: status %d, body=%s", binID, w.last.status, w.last.body)
+	}
+	return nil
 }
 
 func (w *world) receiveStock(qty int, sku string) error {
