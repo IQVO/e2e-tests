@@ -20,6 +20,13 @@ under the same `warehouse-systems/` workspace root — see `env.sh`'s
 `REPOS_ROOT=/path/to/repos`, so a git worktree of this repo can build the
 siblings).
 
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with,
+endorsed by or affiliated with any company, and it uses no company's code,
+data, logos or trademarks. All names, figures and examples are illustrative
+or synthetic.
+
 ## Services the harness runs
 
 Ports and DSNs live in `env.sh` only; this table mirrors it.
@@ -226,6 +233,20 @@ bash scripts/05-down-services.sh # stops only what this harness started
 
 `env.sh` is the single source of truth for every port, DB URL, and MCP
 endpoint `scripts/*.sh` uses — edit ports there only. MCP is unauthenticated.
+
+## Configuration
+
+The harness binaries are driven by flags and Makefile variables; only two
+environment variables are read directly by `cmd/`:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `KAFKA_BROKERS` | `localhost:9092` | Broker list `cmd/ensure-topics` creates the contract topics on (comma-separated; the first entry is used) |
+| `STOREFRONT_NETWORK_DATA` | path relative to the repo root | `cmd/seed-storefront`: warehouse-infra retail-network data file (SKU -> catalogue title); the CHECK step fails before any write when a storefront SKU is missing from it |
+
+Sibling service base URLs are passed inline by `scripts/lib.sh` and the
+Makefile (the `make run` block above); no `cmd/` binary reads them from the
+environment.
 
 ## Sustained backlog-ramp soak (`features/soak_backlog_ramp.feature`, `@soak`)
 
@@ -596,6 +617,22 @@ make provision-storefront-verify    # read-only verification
   assertion from NIP's own table (default, `db`) to `GET /v1/transfers/{id}`
   once that endpoint is on NIP's develop.
 
+## Tests
+
+- `make seed-tests` — `go test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/...`:
+  the seeders against contract fakes of their siblings that enforce the real
+  invariants (capacity, hazmat, DOT segregation, idempotency keys; a second
+  seed run writes nothing, an interrupted run and a lost response are covered).
+- `make harness-test` — unit tests for the agent harness hooks
+  (`scripts/harness/test_hook.py`); `make test-compile` compiles the suite.
+- `make scripts-sanity` — bash syntax check plus invariants over every
+  `scripts/*.sh`.
+- `make soak` — the sustained backlog-ramp soak (see above).
+
+In `.github/workflows/ci.yml` these run as the `build-and-vet`,
+`seed-products-tests`, `scripts-sanity` and `guide-lint` jobs; the godog
+suite itself is not a CI job (see CI below).
+
 ## CI
 
 `.github/workflows/ci.yml` runs `gofmt`, `go build`/`go vet`, a shell
@@ -654,3 +691,26 @@ refused connection to `localhost:8110`) and `INBOUND_BASE_URL`, `EXCEPTIONS_BASE
 standalone containers, not at the cluster's databases; scenarios must reach the service through its
 REST API wherever it offers one (bins are registered with `PUT /bins/{binId}`), because a direct SQL
 write lands in a database the running service never reads.
+
+## Documentation
+
+The harness scenarios are documented in warehouse-docs (fleet-operations
+pages, the e2e section) and in the feature files themselves
+(<https://iqvo.github.io/warehouse-docs/>).
+
+## Architecture
+
+A Go/godog BDD harness over the fleet's real deployments: `cmd/warehouse-day`
+simulates an operating day, `cmd/seed-products`/`cmd/seed-inventory` seed real
+catalogues, `cmd/ensure-topics` provisions Kafka topics; features run against
+docker compose locally or the kind cluster live.
+
+## Local development / quality gate
+
+`make check-fast` (fmt + vet + guide-lint), `make check` adds the
+compose-config and scripts sanity gates; CI jobs: `build-and-vet`,
+`seed-products-tests`, `scripts-sanity`, `guide-lint`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
