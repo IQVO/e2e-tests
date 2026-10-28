@@ -20,6 +20,13 @@ under the same `warehouse-systems/` workspace root — see `env.sh`'s
 `REPOS_ROOT=/path/to/repos`, so a git worktree of this repo can build the
 siblings).
 
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with,
+endorsed by or affiliated with any company, and it uses no company's code,
+data, logos or trademarks. All names, figures and examples are illustrative
+or synthetic.
+
 ## Services the harness runs
 
 Ports and DSNs live in `env.sh` only; this table mirrors it.
@@ -625,3 +632,26 @@ refused connection to `localhost:8110`) and `INBOUND_BASE_URL`, `EXCEPTIONS_BASE
 standalone containers, not at the cluster's databases; scenarios must reach the service through its
 REST API wherever it offers one (bins are registered with `PUT /bins/{binId}`), because a direct SQL
 write lands in a database the running service never reads.
+
+## Documentation
+
+The harness scenarios are documented in warehouse-docs (fleet-operations
+pages, the e2e section) and in the feature files themselves
+(<https://iqvo.github.io/warehouse-docs/>).
+
+## Architecture
+
+A Go/godog BDD harness over the fleet's real deployments: `cmd/warehouse-day`
+simulates an operating day, `cmd/seed-products`/`cmd/seed-inventory` seed real
+catalogues, `cmd/ensure-topics` provisions Kafka topics; features run against
+docker compose locally or the kind cluster live.
+
+## Local development / quality gate
+
+`make check-fast` (fmt + vet + guide-lint), `make check` adds the
+compose-config and scripts sanity gates; CI jobs: `build-and-vet`,
+`seed-products-tests`, `scripts-sanity`, `guide-lint`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
