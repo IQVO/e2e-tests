@@ -84,6 +84,19 @@ func (c *client) write(ctx context.Context, kind, path string, body, keyMaterial
 	return nil
 }
 
+// put sends an idempotent PUT (a wholesale replacement: no Idempotency-Key in the contract, a
+// retry re-applies the same state) and counts it under kind.
+func (c *client) put(ctx context.Context, kind, path string, body, out any, ok ...int) error {
+	if c.readOnly {
+		return errDryRun
+	}
+	if _, err := c.do(ctx, http.MethodPut, c.base+path, body, "", out, ok...); err != nil {
+		return err
+	}
+	c.writes[kind]++
+	return nil
+}
+
 // do sends one request, retrying transport errors, 429 and 5xx with the SAME key (a retry after a
 // dropped response replays the stored answer instead of writing twice).
 func (c *client) do(ctx context.Context, method, url string, body any, key string, out any, ok ...int) (int, error) {
@@ -156,7 +169,7 @@ func (c *client) totalWrites() int {
 
 // writeSummary renders the write counters in a stable order.
 func (c *client) writeSummary() string {
-	kinds := []string{"tax-table", "charge-schedule", "category", "item-price", "content-create", "content-revise", "content-publish"}
+	kinds := []string{"cpt-schedule", "tax-table", "charge-schedule", "category", "item-price", "content-create", "content-revise", "content-publish"}
 	seen := map[string]bool{}
 	var parts []string
 	for _, k := range kinds {

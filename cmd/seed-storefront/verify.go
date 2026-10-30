@@ -31,7 +31,8 @@ type VerifyReport struct {
 	NotPurchasable        []string
 	QuoteSKU, QuotePrefix string
 	QuoteTiers            []string
-	DepartmentHits        []string // "<department> <n>"
+	DepartmentHits        []string     // "<department> <n>"
+	Offers                *OfferReport // network-fulfillment capability offers (nil: not read)
 	Warnings              []string
 	Failures              []string
 }
@@ -43,6 +44,9 @@ func (r *VerifyReport) OK() bool { return len(r.Failures) == 0 }
 func (r *VerifyReport) Lines() []string {
 	out := []string{
 		fmt.Sprintf("verify: %d/%d products purchasable in product-discovery (%s)", r.Purchasable, r.Products, r.Elapsed.Round(100*time.Millisecond)),
+	}
+	if r.Offers != nil {
+		out = append([]string{r.Offers.Line()}, out...)
 	}
 	for i, n := range r.NotPurchasable {
 		if i == 20 {
@@ -126,7 +130,7 @@ func verify(ctx context.Context, c *client, d *Desired, fx *Fixture, tree Catego
 		default:
 			var miss []string
 			if !v.InStock {
-				miss = append(miss, "out of stock (WMS usable stock -> network-fulfillment ACL -> listing feed)")
+				miss = append(miss, "out of stock (WMS usable stock -> network-fulfillment ACL, capped by the CPT schedule's pre-cutoff capacity -> listing feed)")
 			}
 			if v.EffectivePrice == nil {
 				miss = append(miss, "no ACTIVE price")

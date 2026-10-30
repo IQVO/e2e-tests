@@ -83,6 +83,7 @@ type Observed struct {
 	Tree     CategoryTree
 	Prices   map[string]*ItemPrice      // by catalogItemId; nil: none (404)
 	Contents map[string]*ProductContent // by catalogItemId; nil: none (404)
+	CPT      *CPTSchedule               // the fulfilment site's CPT schedule; nil: none (404)
 }
 
 // ---- desired state ----
@@ -105,6 +106,7 @@ type Desired struct {
 	Charges    []DeliveryCharge
 	Categories []CategorySpec // departments first, then subcategories, each sorted by path
 	Products   []DesiredProduct
+	Site       *SiteFixture // the fulfilment site's CPT schedule (WMS); nil: not managed
 }
 
 // CategorySpec is one category of the desired tree; the natural key is the path.
@@ -118,9 +120,13 @@ type CategorySpec struct {
 
 // Plan is the diff between Desired and Observed: only what must be written.
 type Plan struct {
-	TaxTable       *TaxTable       // publish this version; nil = current table already matches
-	ChargeSchedule *ChargeSchedule // publish this version; nil = current schedule already matches
-	Categories     []CategorySpec  // to create, parents before children
+	CPTSchedule    *DefineCPTScheduleRequest // PUT this schedule (WMS step); nil = current schedule already matches (or not managed)
+	CPTSite        string                    // the fulfilment site ("" = not managed)
+	CPTCurrent     string                    // the observed schedule, rendered ("none" when absent)
+	WMSOnly        bool                      // a -wms-only plan: the CPT schedule and nothing else
+	TaxTable       *TaxTable                 // publish this version; nil = current table already matches
+	ChargeSchedule *ChargeSchedule           // publish this version; nil = current schedule already matches
+	Categories     []CategorySpec            // to create, parents before children
 	Prices         []PriceAction
 	Contents       []ContentAction
 	Blocked        []string // products the seeder must not (cannot) converge: WITHDRAWN price, RETIRED content
@@ -156,9 +162,12 @@ type ContentAction struct {
 	CategoryPath  string
 }
 
-// Writes is the number of POSTs the plan sends.
+// Writes is the number of writes (the CPT schedule PUT and the POSTs) the plan sends.
 func (p *Plan) Writes() int {
 	n := len(p.Categories) + len(p.Prices)
+	if p.CPTSchedule != nil {
+		n++
+	}
 	if p.TaxTable != nil {
 		n++
 	}
@@ -191,6 +200,10 @@ func BuildPlan(d Desired, o Observed) *Plan {
 	p := &Plan{}
 	cur := d.Currency
 
+	// WMS: the fulfilment site's CPT schedule, compared by timezone and cutoffs (order-insensitive)
+	if d.Site != nil {
+		planCPT(p, d.Site, o.CPT)
+	}
 	// tax table: compared as a set of bands
 	if o.Tax != nil {
 		p.TaxCurrent = o.Tax.Version
@@ -358,6 +371,17 @@ func sameContent(pc *ProductContent, dp DesiredProduct, idx map[string]Category,
 
 // Summary renders the plan per kind with counts.
 func (p *Plan) Summary() []string {
+	var cpt []string
+	switch {
+	case p.CPTSite == "":
+	case p.CPTSchedule == nil:
+		cpt = append(cpt, fmt.Sprintf("cpt schedule (WMS): %s current %s matches, skip", p.CPTSite, p.CPTCurrent))
+	default:
+		cpt = append(cpt, fmt.Sprintf("cpt schedule (WMS): %s define %s (current %s differs or is missing)", p.CPTSite, describeSchedule(p.CPTSchedule.Timezone, p.CPTSchedule.Cutoffs), p.CPTCurrent))
+	}
+	if p.WMSOnly {
+		return append(cpt, fmt.Sprintf("writes planned    : %d", p.Writes()))
+	}
 	tax := fmt.Sprintf("tax table         : current v%d matches, skip", p.TaxCurrent)
 	if p.TaxTable != nil {
 		tax = fmt.Sprintf("tax table         : publish v%d (current v%d differs or is missing)", p.TaxTable.Version, p.TaxCurrent)
@@ -366,12 +390,12 @@ func (p *Plan) Summary() []string {
 	if p.ChargeSchedule != nil {
 		ch = fmt.Sprintf("delivery charges  : publish v%d (current v%d differs or is missing)", p.ChargeSchedule.Version, p.ChargesCurrent)
 	}
-	return []string{
+	return append(cpt, []string{
 		tax,
 		ch,
 		fmt.Sprintf("categories        : %d to create, %d present", len(p.Categories), p.CategoriesPresent),
 		fmt.Sprintf("item prices       : %d to create, %d to change, %d unchanged, %d WITHDRAWN (left alone)", p.PricesToCreate, p.PricesToChange, p.PricesUnchanged, p.PricesWithdrawn),
 		fmt.Sprintf("product contents  : %d to create+publish, %d to revise+publish, %d to publish, %d unchanged, %d RETIRED (left alone)", p.ContentsToCreate, p.ContentsToRevise, p.ContentsToPublish, p.ContentsUnchanged, p.ContentsRetired),
 		fmt.Sprintf("writes planned    : %d", p.Writes()),
-	}
+	}...)
 }

@@ -1,0 +1,21 @@
+{
+  "_comment": "WMS side of the storefront promise (cmd/seed-storefront, WMS step). The CPT (critical pull time) schedule of the fulfilment site in process-path-management (PUT /sites/{siteId}/cpt-schedule). network-fulfillment (SITE_ID site-1) caps every listing's advertised quantity at the process-path capacity before the site's NEXT cutoff of this schedule, and the network declares the same node with the cutoffs and timezone of warehouse-infra scripts/data/retail-network-seed.json (fulfillmentNodes[vendorNodeCode=site-1].profile): the two MUST agree (fixture_test.go and the seeder's CHECK enforce it). CURATED: the cutoff ids, every day of the week, shipMethod ground (the fleet's only method) and the PICK path (the path of customer orders, intake CUSTOMER_ORDER). make warehouse-day overwrites this schedule with its simulated truck times; make provision-storefront restores it.",
+  "siteId": "site-1",
+  "timezone": "America/Chicago",
+  "cutoffs": [
+    {
+      "cptId": "aus-1100",
+      "localTime": "11:00",
+      "daysOfWeek": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      "shipMethod": "ground",
+      "eligiblePathIds": ["PICK"]
+    },
+    {
+      "cptId": "aus-1700",
+      "localTime": "17:00",
+      "daysOfWeek": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      "shipMethod": "ground",
+      "eligiblePathIds": ["PICK"]
+    }
+  ]
+}

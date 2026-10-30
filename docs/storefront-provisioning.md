@@ -12,10 +12,13 @@ make provision-storefront-verify    # read-only: is the storefront still sellabl
 
 `scripts/10-provision-storefront.sh` runs, in this order: **preflight** (Kong answers, the sibling
 `../warehouse-infra` checkout exists, one real read per layer, WMS usable stock of every storefront
-SKU) -> **network tier** (`warehouse-infra/scripts/seed-retail-network.py`, then its 12-check verify)
--> **product dictionary check** (`seed-retail-network.py --check-translation
+SKU) -> **WMS** (`go run ./cmd/seed-storefront -wms-only`: site-1's CPT schedule in
+process-path-management, first because everything that reads stock through network-fulfillment
+depends on it) -> **network tier** (`warehouse-infra/scripts/seed-retail-network.py`, then its
+12-check verify) -> **product dictionary check** (`seed-retail-network.py --check-translation
 helm-values/network-fulfillment.yaml`) -> **storefront tier** (`go run ./cmd/seed-storefront`:
-CHECK, PLAN, APPLY, VERIFY) -> **summary** (storefront URL, deliverable postal codes).
+CHECK, PLAN, APPLY, VERIFY; it re-checks the CPT schedule, equal by then) -> **summary** (storefront
+URL, deliverable postal codes).
 Environment: `WAREHOUSE_INFRA_DIR` (default `<repos root>/warehouse-infra`), `KONG_URL`
 (`http://localhost:8000`), `STOREFRONT_URL` (`http://storefront.localhost`),
 `STOREFRONT_VERIFY_TIMEOUT` (`3m`), `STOREFRONT_SKIP_NETWORK=1` (skip the network steps when you just
@@ -45,7 +48,28 @@ The preflight reads `GET /api/inventory-storage/inventory/<sku>/usable` for ever
 fails with the commands above when one has no usable stock. It never stocks anything: stocking is
 heavy and one-way.
 
-### Network tier (the retail network) - `warehouse-infra/scripts/seed-retail-network.py`, step 2
+### WMS side of the promise - `cmd/seed-storefront -wms-only`, step 2 (re-checked in step 5)
+
+| Layer | Owning context | What | API | Provisioned by | Natural key / idempotency | Real or curated |
+|---|---|---|---|---|---|---|
+| WMS | process-path-management | CPT schedule of the fulfilment site `site-1` (network-fulfillment's `SITE_ID`): timezone **America/Chicago**, cutoffs `aus-1100` **11:00** and `aus-1700` **17:00**, every day, ship method `ground`, eligible path `PICK` (the customer-order path, intake `CUSTOMER_ORDER`) | `GET /sites/{siteId}/cpt-schedule`, `PUT /sites/{siteId}/cpt-schedule` (wholesale replacement; no `Idempotency-Key`, no version) | seed-storefront, from `fixtures/storefront/fulfilment-site.json` | siteId; PUT only when the timezone or the cutoffs differ (compared order-insensitively), so a rerun sends nothing | curated ids; times and timezone = the network node profile (`warehouse-infra/scripts/data/retail-network-seed.json`, `fulfillmentNodes[site-1].profile`) |
+
+Why it matters: network-fulfillment advertises each listing's quantity as `min(usable stock,
+process-path capacity before site-1's NEXT CPT cutoff)` (`GET
+/api/network-fulfillment/capability-offers`, recomputed every minute) and the network declares the
+same node with the cutoffs of its profile. The two must agree: CHECK fails, before any write, when
+the fixture and the network data file disagree (and `fixture_test.go` pins it in the unit tests), or
+when an eligible path is not Active in process-path-management. VERIFY then reads the capability
+offers of the 81 SKUs: after a PUT it waits (within `-verify-timeout`) for a recompute and prints a
+WARNING, not a failure, for SKUs that stay `THROUGHPUT_CONSTRAINED 0`.
+
+> **`make warehouse-day` overwrites site-1's CPT schedule** (`cmd/warehouse-day/sim.go`
+> `publishCPTSchedule`: timezone UTC, cutoffs `sim-1200/1600/2000` a few minutes apart, the
+> simulated trucks compressed onto the wall clock). After it, every capability offer is
+> `THROUGHPUT_CONSTRAINED 0` and every product shows unavailable in the storefront. Re-running
+> `make provision-storefront` restores the schedule (one PUT).
+
+### Network tier (the retail network) - `warehouse-infra/scripts/seed-retail-network.py`, step 3
 
 | Layer | Owning context | What | API | Provisioned by | Natural key / idempotency | Real or curated |
 |---|---|---|---|---|---|---|
@@ -60,10 +84,10 @@ heavy and one-way.
 | network | offer-availability | 86 catalogue items (81 storefront + 5 legacy whose titles start with their SKU; the storefront never touches the legacy ones) | `POST /catalog-items` | network seed | **title** (the network generates the id) | real products, shopper-facing titles |
 | network | offer-availability | one LIVE listing per item at site-1 | `POST /listings` | network seed | item + node (409 duplicate-listing = exists) | n/a |
 | network | vendor-connectivity | inventory feed of site-1: seeded once, then fed LIVE by network-fulfillment's ACL from WMS usable stock (every 5 min, ADR 0027) | `POST /vendor/inventory` | network seed (first feed) + network-fulfillment (continuous) | a listing that already carries a feed is not overwritten (unless `--restock`) | real WMS stock |
-| network | network-fulfillment (helm values) | product dictionary: listing id -> SKU, `productTranslation` of `helm-values/network-fulfillment.yaml` | none (GitOps values) | a person: `make seed-network-translation` in warehouse-infra, values PR, ArgoCD | listing id; checked by step 3 | generated from the network |
+| network | network-fulfillment (helm values) | product dictionary: listing id -> SKU, `productTranslation` of `helm-values/network-fulfillment.yaml` | none (GitOps values) | a person: `make seed-network-translation` in warehouse-infra, values PR, ArgoCD | listing id; checked by step 4 | generated from the network |
 | network | delivery-promise | promise policy | read only | nothing (built-in default v0) | n/a | code default |
 
-### Storefront tier - `cmd/seed-storefront`, step 4
+### Storefront tier - `cmd/seed-storefront`, step 5
 
 | Layer | Owning context | What | API | Provisioned by | Natural key / idempotency | Real or curated |
 |---|---|---|---|---|---|---|
@@ -102,11 +126,21 @@ plans only differences; against an unchanged cluster it prints `writes planned 0
 `apply: 0 writes`, then verifies. An interrupted run (Ctrl-C, a lost connection) is resumed by
 running it again: it plans what is left. A changed fixture price becomes one `:set-list-price`; a
 changed derivation rule becomes `:revise` + `:publish` of the affected contents; a changed tax table
-or charge schedule is published as the next version.
+or charge schedule is published as the next version; site-1's CPT schedule rewritten by `make
+warehouse-day` becomes one `PUT /sites/site-1/cpt-schedule`.
 
 **Live evidence** (2026-10-29): first run `apply: 306 writes` (63 categories, 81 prices, 81 contents
 created and 81 published; tax table and charge schedule v1 already equal, skipped), 81/81
 purchasable; second run `writes planned 0, writes sent 0`, verify PASS.
+
+**Live evidence, WMS step** (2026-10-30, after `make warehouse-day` had left UTC `sim-*` cutoffs):
+first run, step 2 `writes planned 1, writes sent 1` (`PUT /sites/site-1/cpt-schedule`, America/Chicago
+11:00/17:00); second run, step 2 `matches, skip`, `writes sent 0`; the storefront tier
+(`STOREFRONT_SKIP_NETWORK=1`) `writes planned 0` with the schedule `matches, skip`. Both runs then
+stopped at step 3 (`listings of site-1 LIVE with stock` FAIL): after two recomputes with the correct
+schedule all 81 capability offers stayed `THROUGHPUT_CONSTRAINED 0`, the pre-cutoff gap of
+network-fulfillment's next-feasible-cutoff defect (fixed in network-fulfillment, separate PR), so the
+storefront showed 0/81 purchasable.
 
 ## Deliverable postal codes
 
@@ -132,9 +166,9 @@ through inbound-receiving; the ACL feeds the new figure within its interval (5 m
 A new kind cluster has new ids everywhere. In order:
 
 1. warehouse-infra up; facility layouts (`provisioning`), `make seed-products`, `make seed-inventory`.
-2. `make provision-storefront`: the network seed creates the network again (new listing ids), and
-   step 3 then FAILS on purpose: the product dictionary in `helm-values/network-fulfillment.yaml`
-   still names the old listing ids.
+2. `make provision-storefront`: the WMS step defines site-1's CPT schedule, the network seed creates
+   the network again (new listing ids), and step 4 then FAILS on purpose: the product dictionary in
+   `helm-values/network-fulfillment.yaml` still names the old listing ids.
 3. In warehouse-infra: `make seed-network-translation > block.yaml`, replace the `productTranslation`
    block of `helm-values/network-fulfillment.yaml`, `make seed-network-translation-check`, open the
    values PR into develop; once merged, ArgoCD rolls network-fulfillment.
@@ -148,6 +182,8 @@ A new kind cluster has new ids everywhere. In order:
 | delivery dates answer `DESTINATION_NOT_SERVED` | a full ZIP (78701) sent where a prefix is expected, or a prefix outside 786/787 | send the first 3 characters (`787`); only 786xx/787xx are served |
 | `422 currency-mismatch` from pricing | pricing runs with another `PRICING_CURRENCY` than the fixture's USD | `config.currency: "USD"` in `warehouse-infra/helm-values/pricing.yaml` (merged), then rerun |
 | `purchasable: false` after a run | VERIFY names the missing part: out of stock (WMS stock -> ACL feed), no ACTIVE price, no PUBLISHED content; or the projection is still catching up | stock: see Stock depletion; a WITHDRAWN price or RETIRED content is reported as BLOCKED and needs a deliberate decision (neither can be undone); otherwise rerun `make provision-storefront-verify` |
-| step 3 fails: `wrong` / `missing` mappings | stale product dictionary after a reseed: orders never reach the warehouse | Cluster rebuild, step 3 |
+| every product shows unavailable (out of stock) although the WMS has usable stock | `GET /api/network-fulfillment/capability-offers` shows `THROUGHPUT_CONSTRAINED` with `advertisedQuantity: 0`: the ACL caps the offer at the process-path capacity before site-1's next CPT cutoff. Either site-1's CPT schedule is wrong (`GET /api/process-path-management/sites/site-1/cpt-schedule` shows UTC `sim-*` cutoffs: `make warehouse-day` ran) or the PICK path's cycle time (`cycleTimeP95`, `GET /api/process-path-management/process-paths/PICK`) does not fit before the next cutoff | `make provision-storefront` (restores the schedule; VERIFY prints the offers). If they stay `THROUGHPUT_CONSTRAINED 0` with the correct schedule, the remaining pre-cutoff gap is network-fulfillment's next-feasible-cutoff defect (separate PR, `fix/next-feasible-cutoff`); the listing feed refreshes within 5 min of a good offer |
+| step 3 fails on `listings of site-1 LIVE with stock` (`availableQty ...=0`) | the same cause seen from the network: the ACL feeds the advertised quantity, 0 while the offers are `THROUGHPUT_CONSTRAINED 0` | if step 2 just redefined the schedule (`apply: wms: CPT schedule of site-1 defined`), the ACL feeds the new figure within its interval (5 min): rerun. If step 2 reported the schedule as matching and the offers stay constrained, see the row above |
+| step 4 fails: `wrong` / `missing` mappings | stale product dictionary after a reseed: orders never reach the warehouse | Cluster rebuild, step 3 |
 | CHECK fails: `no catalogue item titled ...` | the network seed did not run, or warehouse-infra's data file is older than the fixture | update warehouse-infra (`git pull`), run `make provision-storefront` (it runs the network seed first) |
 | product page without a picture | `storefront-web` does not serve `/media/departments/<slug>.svg` yet (VERIFY prints a WARNING) | ship the department images in storefront-web; the content needs no change |
