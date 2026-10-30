@@ -16,7 +16,7 @@
 
 GO ?= go
 
-.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products seed-inventory down
+.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products seed-inventory seed-tests provision-storefront provision-storefront-dry-run provision-storefront-verify down
 
 help:
 	@echo "e2e-tests — local quality gate (targets mirror .github/workflows/ci.yml)"
@@ -39,6 +39,12 @@ help:
 	@echo "  warehouse-day   scripts/07-run-warehouse-day.sh — simulate a full operating day, KPI + cross-context audit"
 	@echo "  seed-products   scripts/08-seed-products.sh — register >= 10,000 real products (real dimensions, weight, handling classes) in product-master, verified"
 	@echo "  seed-inventory  scripts/09-seed-inventory.sh — stock the pilot sites with >= 100,000 units of the registered products (bins + stow), verified"
+	@echo "  seed-tests      go test the seeders (seed-products, seed-inventory, seed-storefront) against their contract fakes, offline"
+	@echo ""
+	@echo "  Storefront (kind cluster via Kong; see docs/storefront-provisioning.md):"
+	@echo "  provision-storefront          WRITES: network seed + dictionary check + cmd/seed-storefront, verified; a rerun writes nothing"
+	@echo "  provision-storefront-dry-run  the same checks and plans, nothing written"
+	@echo "  provision-storefront-verify   read-only: network verify, dictionary check, purchasable/quote/search verify"
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:
@@ -94,6 +100,21 @@ seed-products:
 
 seed-inventory:
 	bash scripts/09-seed-inventory.sh
+
+# Storefront provisioning (scripts/10-provision-storefront.sh, docs/storefront-provisioning.md):
+# WRITES to the kind cluster through Kong (network tier + storefront tier), idempotent; NOT part of check.
+provision-storefront:
+	bash scripts/10-provision-storefront.sh
+
+provision-storefront-dry-run:
+	bash scripts/10-provision-storefront.sh --dry-run
+
+provision-storefront-verify:
+	bash scripts/10-provision-storefront.sh --verify-only
+
+# Offline tests of the seeders (contract fakes; no cluster), as in CI's seed-products-tests job.
+seed-tests:
+	$(GO) test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/...
 
 down:
 	bash scripts/05-down-services.sh
