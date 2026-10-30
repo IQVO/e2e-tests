@@ -520,6 +520,35 @@ INVENTORY_STORAGE_BASE_URL=http://localhost:8000/api/inventory-storage \
   against a contract fake of inventory-storage that enforces its invariants (capacity, hazmat zone,
   temperature class, DOT segregation, idempotency keys).
 
+## Storefront (`make provision-storefront`)
+
+Provisions everything a shopper needs to buy a product in the storefront
+(<http://storefront.localhost>) and see its delivery promise, on the kind cluster through Kong, and
+verifies it; a second run writes nothing. **The register of what is provisioned, by whom, why, and
+how to rerun or rebuild: [docs/storefront-provisioning.md](docs/storefront-provisioning.md).**
+
+```sh
+make provision-storefront-dry-run   # preflight + network plan + dictionary check + storefront plan, writes nothing
+make provision-storefront           # scripts/10-provision-storefront.sh: provisions, then verifies
+make provision-storefront-verify    # read-only verification
+```
+
+- **Order:** preflight (Kong, the sibling `../warehouse-infra` checkout, one read per layer, WMS
+  usable stock of the 81 storefront SKUs; the WMS seeders are NOT re-run) -> warehouse-infra's
+  `seed-retail-network.py` (network tier; waves are dated, so it runs every time) -> its
+  `--check-translation` of network-fulfillment's product dictionary -> `go run ./cmd/seed-storefront`.
+- **`cmd/seed-storefront`:** CHECK (fixture vs real data, SKU -> network title -> catalogue item,
+  fails before any write when one is missing) -> PLAN (pure diff, printed per kind) -> APPLY (only
+  the diffs: tax table, delivery charges, categories, prices, content create/revise/publish; every
+  POST under a deterministic `Idempotency-Key`) -> VERIFY (all products purchasable, a delivery quote
+  for prefix 787 through the BFF, a search hit per department). Content is derived from real data
+  only (title, real size and weight, handling tags, department); department, subcategory and price
+  are curated in `fixtures/storefront/catalogue.json`.
+- **Tests:** `go test ./cmd/seed-storefront/...` (also `make seed-tests`) seeds the whole fixture
+  twice against a contract fake of offer-availability, pricing, product-content, product-discovery
+  and the BFF that enforces their invariants (second run: zero writes), plus an interrupted run, a
+  lost response, a missing catalogue title, WITHDRAWN/RETIRED handling and the content rules.
+
 ## Service lifecycle notes
 
 - `scripts/lib.sh`'s `start_service_in`/`start_service` launch each binary
