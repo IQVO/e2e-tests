@@ -68,12 +68,35 @@ func writeNetwork(t *testing.T, titles map[string]string) string {
 		SKU   string `json:"sku"`
 		Title string `json:"title"`
 	}
+	type cutoff struct {
+		LocalTime string `json:"localTime"`
+	}
+	type profile struct {
+		Timezone string   `json:"timezone"`
+		Cutoffs  []cutoff `json:"cutoffs"`
+	}
+	type node struct {
+		VendorNodeCode string  `json:"vendorNodeCode"`
+		Profile        profile `json:"profile"`
+	}
 	var doc struct {
-		Catalog []row `json:"catalog"`
+		Catalog          []row  `json:"catalog"`
+		FulfillmentNodes []node `json:"fulfillmentNodes"`
 	}
 	for sku, title := range titles {
 		doc.Catalog = append(doc.Catalog, row{sku, title})
 	}
+	// the node profile the network declares for the fulfilment site: the committed site fixture's
+	// (fixture_test.go pins the fixture to the REAL network data file)
+	site, err := LoadSiteFixture(filepath.Join(repoRoot, "fixtures/storefront/fulfilment-site.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := node{VendorNodeCode: site.SiteID, Profile: profile{Timezone: site.Timezone}}
+	for _, c := range site.Cutoffs {
+		n.Profile.Cutoffs = append(n.Profile.Cutoffs, cutoff{c.LocalTime})
+	}
+	doc.FulfillmentNodes = []node{n}
 	raw, _ := json.Marshal(doc)
 	path := filepath.Join(t.TempDir(), "retail-network-seed.json")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
@@ -84,13 +107,17 @@ func writeNetwork(t *testing.T, titles map[string]string) string {
 
 // clusterLike is the fake in the state of the live cluster before the first storefront seed:
 // the network's items (ACTIVE, in stock), 5 legacy items, tax table and charge schedule v1 equal
-// to the fixture, and the top-level Jewelry category.
+// to the fixture, the top-level Jewelry category, and site-1's CPT schedule as make
+// warehouse-day leaves it (UTC, simulated truck minutes), so every capability offer is
+// THROUGHPUT_CONSTRAINED 0 until the WMS step redefines it.
 func clusterLike(in inputs) (*fakeCluster, map[string]string) {
 	f := newFakeCluster()
 	ids := map[string]string{}
 	for _, p := range in.fx.Products {
 		ids[p.SKU] = f.addItem(in.titles[p.SKU], "ACTIVE")
+		f.offerSKUs = append(f.offerSKUs, p.SKU)
 	}
+	f.cpt["site-1"] = simLeftoverSchedule()
 	for _, legacy := range []string{"LEG-0001 legacy item one", "LEG-0002 legacy item two", "LEG-0003 legacy item three", "LEG-0004 legacy item four", "LEG-0005 legacy item five"} {
 		ids[legacy] = f.addItem(legacy, "ACTIVE")
 	}
@@ -105,10 +132,12 @@ func config(base string, in inputs, out *bytes.Buffer) Config {
 	return Config{
 		BaseURL: base + "/api", StorefrontURL: base + "/api/storefront",
 		FixturePath:     filepath.Join(repoRoot, "fixtures/storefront/catalogue.json"),
+		SitePath:        filepath.Join(repoRoot, "fixtures/storefront/fulfilment-site.json"),
 		ProductsPath:    filepath.Join(repoRoot, "fixtures/products/fulfilment-products.json"),
 		NetworkDataPath: in.network, MediaBase: base + "/media/departments",
 		VerifyTimeout: 5 * time.Second, VerifyInterval: time.Millisecond, QuotePrefix: "787",
-		HTTP: nil, Out: out,
+		OfferRecomputeInterval: time.Millisecond,
+		HTTP:                   nil, Out: out,
 	}
 }
 
@@ -143,10 +172,17 @@ func TestSeedsTheWholeFixtureTwiceSecondRunWritesNothing(t *testing.T) {
 	for _, p := range in.fx.Products {
 		subcats[p.Department+"/"+p.Subcategory] = true
 	}
-	// Jewelry exists: departments - 1 + subcategories; tax and charges equal: skipped
-	wantWrites := (len(in.fx.Departments) - 1) + len(subcats) + n + 2*n
+	// the WMS step: site-1's CPT schedule (1 PUT); Jewelry exists: departments - 1 +
+	// subcategories; tax and charges equal: skipped
+	wantWrites := 1 + (len(in.fx.Departments) - 1) + len(subcats) + n + 2*n
 	if res.Writes != wantWrites || res.Plan.Writes() != wantWrites || f.mutations != wantWrites {
 		t.Fatalf("first run: %d writes sent, %d planned, %d applied by the fake; want %d\n%s", res.Writes, res.Plan.Writes(), f.mutations, wantWrites, out.String())
+	}
+	if s := f.cpt["site-1"]; f.puts != 1 || f.cptChanges != 1 || s.Timezone != "America/Chicago" || describeSchedule(s.Timezone, s.Cutoffs) != "America/Chicago [aus-1100 11:00, aus-1700 17:00]" {
+		t.Fatalf("site-1's CPT schedule: %d PUTs, %d changes, now %+v", f.puts, f.cptChanges, s)
+	}
+	if res.Verify.Offers == nil || res.Verify.Offers.Advertising != n || len(res.Verify.Offers.Constrained) != 0 {
+		t.Fatalf("capability offers after the CPT write: %+v\n%s", res.Verify.Offers, out.String())
 	}
 	if f.tax.Version != 1 || f.charges.Version != 1 {
 		t.Fatalf("an equal tax table / charge schedule must be skipped, got v%d / v%d", f.tax.Version, f.charges.Version)
@@ -186,11 +222,11 @@ func TestSeedsTheWholeFixtureTwiceSecondRunWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second run: %v\n%s", err, out.String())
 	}
-	if res.Writes != 0 || res.Plan.Writes() != 0 || f.posts != posts {
-		t.Fatalf("second run must write nothing: %d sent, %d planned, %d POSTs reached the fake\n%s", res.Writes, res.Plan.Writes(), f.posts-posts, out.String())
+	if res.Writes != 0 || res.Plan.Writes() != 0 || f.posts != posts || f.puts != 1 {
+		t.Fatalf("second run must write nothing: %d sent, %d planned, %d POSTs and %d PUTs reached the fake\n%s", res.Writes, res.Plan.Writes(), f.posts-posts, f.puts-1, out.String())
 	}
-	if !strings.Contains(out.String(), "apply: 0 writes") {
-		t.Fatalf("the second run must print 0 writes:\n%s", out.String())
+	if !strings.Contains(out.String(), "apply: 0 writes") || !strings.Contains(out.String(), "cpt schedule (WMS): site-1 current America/Chicago [aus-1100 11:00, aus-1700 17:00] matches, skip") {
+		t.Fatalf("the second run must print 0 writes and a matching CPT schedule:\n%s", out.String())
 	}
 }
 
@@ -394,13 +430,13 @@ func TestDryRunAndVerifyOnlyWriteNothing(t *testing.T) {
 	cfg := config("", in, &out)
 	cfg.DryRun = true
 	res, err := run(t, context.Background(), cfg, f)
-	if err != nil || f.posts != 0 || res.Plan.Writes() == 0 {
-		t.Fatalf("dry run: err %v, %d POSTs, %d planned", err, f.posts, res.Plan.Writes())
+	if err != nil || f.posts != 0 || f.puts != 0 || res.Plan.Writes() == 0 || res.Plan.CPTSchedule == nil {
+		t.Fatalf("dry run: err %v, %d POSTs, %d PUTs, %d planned (CPT %v)", err, f.posts, f.puts, res.Plan.Writes(), res.Plan.CPTSchedule)
 	}
 	cfg.DryRun, cfg.VerifyOnly = false, true
 	cfg.VerifyTimeout = 50 * time.Millisecond
-	if _, err := run(t, context.Background(), cfg, f); err == nil || f.posts != 0 {
-		t.Fatalf("verify-only on an unseeded storefront must fail without writing: err %v, %d POSTs", err, f.posts)
+	if _, err := run(t, context.Background(), cfg, f); err == nil || f.posts != 0 || f.puts != 0 {
+		t.Fatalf("verify-only on an unseeded storefront must fail without writing: err %v, %d POSTs, %d PUTs", err, f.posts, f.puts)
 	}
 }
 

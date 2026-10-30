@@ -35,7 +35,15 @@ import (
 //   - offer-availability: keyset paging by catalogItemId with nextCursor, page size capped;
 //   - product-discovery: purchasable = item ACTIVE + content PUBLISHED + price ACTIVE + in stock,
 //     visible only after `lag` reads (the projection is event-driven);
-//   - BFF: search over purchasable products, delivery dates only for a 3-character served prefix.
+//   - BFF: search over purchasable products, delivery dates only for a 3-character served prefix;
+//   - process-path-management (fake_wms_test.go): GET /process-paths lists Active paths only; PUT
+//     /sites/{siteId}/cpt-schedule is a wholesale replacement (no Idempotency-Key, no version),
+//     400 on a missing/invalid body, 422 on an invalid timezone, no cutoff, an empty/duplicate
+//     cptId, a malformed localTime, empty/invalid days, an empty shipMethod or an eligible path
+//     that is not Active; an identical revision is a 200 that changes (and publishes) nothing;
+//   - network-fulfillment: GET /capability-offers advertises stock (PHYSICAL) only while the
+//     site's schedule agrees with the network node profile (and the pre-cutoff gap is not
+//     simulated), THROUGHPUT_CONSTRAINED 0 otherwise.
 type fakeCluster struct {
 	mu       sync.Mutex
 	currency string
@@ -53,10 +61,18 @@ type fakeCluster struct {
 	lag      int              // discovery reads that still answer purchasable=false once eligible
 	seen     map[string]int
 
-	posts     int            // every POST received by a context (replays included)
-	mutations int            // POSTs that changed state
-	byKind    map[string]int // mutations by route kind
-	targets   map[string]int // mutations by catalogItemId
+	// WMS (process-path-management) and network-fulfillment: see fake_wms_test.go
+	paths       map[string]string       // pathId -> status (ACTIVE, DEACTIVATED)
+	cpt         map[string]*CPTSchedule // siteId -> CPT schedule
+	puts        int                     // every PUT received
+	cptChanges  int                     // PUTs that changed a schedule (CPTScheduleChanged published)
+	node        NodeProfile             // the network's node profile the ACL's offers depend on
+	offerSKUs   []string                // SKUs network-fulfillment offers at node.VendorNodeCode
+	offersStuck bool                    // the pre-cutoff gap: THROUGHPUT_CONSTRAINED 0 whatever the schedule
+	posts       int                     // every POST received by a context (replays included)
+	mutations   int                     // POSTs that changed state
+	byKind      map[string]int          // mutations by route kind
+	targets     map[string]int          // mutations by catalogItemId
 
 	// afterMutation runs (outside the lock) after every state change; tests interrupt runs with it.
 	afterMutation func(kind string, n int)
@@ -80,6 +96,9 @@ func newFakeCluster() *fakeCluster {
 		currency: "USD", items: map[string]*fakeItem{}, prices: map[string]*ItemPrice{},
 		contents: map[string]*ProductContent{}, idem: map[string]fakeStored{}, seen: map[string]int{},
 		byKind: map[string]int{}, targets: map[string]int{}, pageCap: 7, lag: 1,
+		paths: map[string]string{"PICK": "ACTIVE", "PACK": "ACTIVE", "FULL_CASE": "ACTIVE", "OLD_PATH": "DEACTIVATED"},
+		cpt:   map[string]*CPTSchedule{},
+		node:  NodeProfile{VendorNodeCode: "site-1", Timezone: "America/Chicago", CutoffTimes: []string{"11:00", "17:00"}},
 	}
 }
 
@@ -132,6 +151,11 @@ func (f *fakeCluster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.read(w, r, strings.TrimPrefix(p, "/api"))
+		return
+	case r.Method == http.MethodPut:
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.putCPT(w, r, strings.TrimPrefix(p, "/api"))
 		return
 	case r.Method != http.MethodPost:
 		problem(w, http.StatusMethodNotAllowed, "method-not-allowed")
@@ -194,6 +218,9 @@ func (f *fakeCluster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ---- reads ----
 
 func (f *fakeCluster) read(w http.ResponseWriter, r *http.Request, p string) {
+	if f.readWMS(w, p) {
+		return
+	}
 	switch {
 	case p == "/offer-availability/catalog":
 		f.catalog(w, r)

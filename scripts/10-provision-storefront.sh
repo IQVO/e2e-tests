@@ -12,14 +12,20 @@
 #                 WMS usable stock of every fixture SKU (inventory-storage). WMS prerequisites
 #                 (sites, seed-products, seed-inventory) are NOT re-run: heavy, and stocking is
 #                 one-way. A missing one fails here with the commands to run.
-#   2. NETWORK    python3 ../warehouse-infra/scripts/seed-retail-network.py: vendor, region,
+#   2. WMS        go run ./cmd/seed-storefront -wms-only: site-1's CPT schedule in
+#                 process-path-management (fixtures/storefront/fulfilment-site.json), PUT only when
+#                 it differs (make warehouse-day overwrites it). FIRST, because network-fulfillment
+#                 caps every listing's stock at the capacity before the next cutoff: the network
+#                 verify (listings with stock) and the storefront both depend on it.
+#   3. NETWORK    python3 ../warehouse-infra/scripts/seed-retail-network.py: vendor, region,
 #                 station, service areas, node + profile, lane, waves (DATED: every run extends
 #                 the 14-day horizon), catalogue items, listings, inventory feed; then verifies.
-#   3. DICTIONARY seed-retail-network.py --check-translation helm-values/network-fulfillment.yaml:
+#   4. DICTIONARY seed-retail-network.py --check-translation helm-values/network-fulfillment.yaml:
 #                 a stale product dictionary means orders never reach the warehouse.
-#   4. STOREFRONT go run ./cmd/seed-storefront: tax table, delivery charges, categories, prices,
-#                 product content; then VERIFY (purchasable, delivery quote, search).
-#   5. SUMMARY    the storefront URL and the deliverable postal codes.
+#   5. STOREFRONT go run ./cmd/seed-storefront: the CPT schedule again (equal by now: skipped),
+#                 then tax table, delivery charges, categories, prices, product content; then
+#                 VERIFY (capability offers, purchasable, delivery quote, search).
+#   6. SUMMARY    the storefront URL and the deliverable postal codes.
 #
 #   bash scripts/10-provision-storefront.sh                 # make provision-storefront
 #   bash scripts/10-provision-storefront.sh --dry-run       # make provision-storefront-dry-run (writes nothing)
@@ -27,8 +33,8 @@
 #
 # Env: WAREHOUSE_INFRA_DIR (default <repos root>/warehouse-infra), KONG_URL (default
 #   http://localhost:8000), STOREFRONT_URL (default http://storefront.localhost),
-#   STOREFRONT_VERIFY_TIMEOUT (default 3m), STOREFRONT_SKIP_NETWORK=1 (skip steps 2-3: only when
-#   you just ran them). Other arguments are passed to cmd/seed-storefront.
+#   STOREFRONT_VERIFY_TIMEOUT (default 3m), STOREFRONT_SKIP_NETWORK=1 (skip steps 3-4: only when
+#   you just ran them). Other arguments are passed to cmd/seed-storefront (step 5).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -37,12 +43,13 @@ source "${SCRIPT_DIR}/lib.sh"
 MODE="provision"
 SEED_ARGS=()
 NET_ARGS=()
+WMS_ARGS=()
 for arg in "$@"; do
   case "${arg}" in
     --dry-run|-dry-run)
-      MODE="dry-run"; SEED_ARGS+=(-dry-run); NET_ARGS+=(--dry-run) ;;
+      MODE="dry-run"; SEED_ARGS+=(-dry-run); NET_ARGS+=(--dry-run); WMS_ARGS+=(-dry-run) ;;
     --verify-only|-verify-only)
-      MODE="verify-only"; SEED_ARGS+=(-verify-only); NET_ARGS+=(--verify) ;;
+      MODE="verify-only"; SEED_ARGS+=(-verify-only); NET_ARGS+=(--verify); WMS_ARGS+=(-verify-only) ;;
     *)
       SEED_ARGS+=("${arg}") ;;
   esac
@@ -84,7 +91,7 @@ expect_read() {
 log "storefront provisioning (${MODE})"
 
 # ---- 1. PREFLIGHT -----------------------------------------------------------------------------
-log "1/5 preflight"
+log "1/6 preflight"
 [[ "$(http_status "${API}/offer-availability/catalog?limit=1")" != "000" ]] \
   || die "Kong does not answer at ${KONG} -- start the kind cluster (warehouse-infra: scripts/up.sh)"
 [[ -d "${INFRA}" ]] \
@@ -98,6 +105,7 @@ expect_read "product-content" "${API}/product-content/categories" 200
 expect_read "product-discovery" "${API}/product-discovery/products?limit=1" 200
 expect_read "storefront BFF" "${BFF}/products?limit=1" 200
 expect_read "inventory-storage" "${API}/inventory-storage/inventory/preflight-unknown-sku/usable" 200 404
+expect_read "process-path-management" "${API}/process-path-management/process-paths" 200
 
 # WMS usable stock of every fixture SKU: the network's inventory feed (and so "in stock" in the
 # storefront) comes from it through network-fulfillment's ACL.
@@ -129,12 +137,23 @@ if [[ "${#empty[@]}" -gt 0 ]]; then
 fi
 ok "WMS: all ${total} storefront SKUs have usable stock"
 
-# ---- 2. NETWORK -------------------------------------------------------------------------------
+# ---- 2. WMS -----------------------------------------------------------------------------------
+# site-1's CPT schedule before anything that reads stock through network-fulfillment's ACL
+log "2/6 WMS: site-1's CPT schedule in process-path-management (go run ./cmd/seed-storefront -wms-only ${WMS_ARGS[*]+"${WMS_ARGS[*]}"})"
+( cd "${WORKSPACE_ROOT}" && go run ./cmd/seed-storefront -wms-only \
+    -base-url "${API}" \
+    -network-data "${NETWORK_DATA}" \
+    -site "${WORKSPACE_ROOT}/fixtures/storefront/fulfilment-site.json" \
+    -verify-timeout "${STOREFRONT_VERIFY_TIMEOUT:-3m}" \
+    ${WMS_ARGS[@]+"${WMS_ARGS[@]}"} ) \
+  || die "the WMS step failed (see above; docs/storefront-provisioning.md, WMS side of the promise)"
+
+# ---- 3. NETWORK -------------------------------------------------------------------------------
 if [[ "${STOREFRONT_SKIP_NETWORK:-0}" == "1" ]]; then
-  log "2/5 network tier: SKIPPED (STOREFRONT_SKIP_NETWORK=1)"
-  log "3/5 product dictionary: SKIPPED (STOREFRONT_SKIP_NETWORK=1)"
+  log "3/6 network tier: SKIPPED (STOREFRONT_SKIP_NETWORK=1)"
+  log "4/6 product dictionary: SKIPPED (STOREFRONT_SKIP_NETWORK=1)"
 else
-  log "2/5 network tier: ${PY} scripts/seed-retail-network.py ${NET_ARGS[*]+"${NET_ARGS[*]}"} (vendor, topology, waves, catalogue, listings, stock feed)"
+  log "3/6 network tier: ${PY} scripts/seed-retail-network.py ${NET_ARGS[*]+"${NET_ARGS[*]}"} (vendor, topology, waves, catalogue, listings, stock feed)"
   net_log="${LOG_DIR}/provision-storefront-network.log"
   net_rc=0
   ( cd "${INFRA}" && RETAIL_NETWORK_BASE_URL="${API}" "${PY}" scripts/seed-retail-network.py ${NET_ARGS[@]+"${NET_ARGS[@]}"} ) >"${net_log}" 2>&1 || net_rc=$?
@@ -145,8 +164,8 @@ else
     || die "the retail-network seed failed (exit ${net_rc}; see above and warehouse-infra scripts/README-retail-network-seed.md)"
   ok "network tier OK (${MODE})"
 
-  # ---- 3. DICTIONARY ----------------------------------------------------------------------------
-  log "3/5 network-fulfillment product dictionary (helm-values/network-fulfillment.yaml) vs the network"
+  # ---- 4. DICTIONARY ----------------------------------------------------------------------------
+  log "4/6 network-fulfillment product dictionary (helm-values/network-fulfillment.yaml) vs the network"
   tr_log="${LOG_DIR}/provision-storefront-check-translation.log"
   if ! ( cd "${INFRA}" && RETAIL_NETWORK_BASE_URL="${API}" "${PY}" scripts/seed-retail-network.py --check-translation helm-values/network-fulfillment.yaml ) >"${tr_log}" 2>&1; then
     cat "${tr_log}" >&2
@@ -159,19 +178,20 @@ else
   ok "$(tail -n 1 "${tr_log}") (full output: ${tr_log})"
 fi
 
-# ---- 4. STOREFRONT ----------------------------------------------------------------------------
-log "4/5 storefront tier: go run ./cmd/seed-storefront ${SEED_ARGS[*]+"${SEED_ARGS[*]}"}"
+# ---- 5. STOREFRONT ----------------------------------------------------------------------------
+log "5/6 storefront tier (CPT schedule re-checked): go run ./cmd/seed-storefront ${SEED_ARGS[*]+"${SEED_ARGS[*]}"}"
 cd "${WORKSPACE_ROOT}"
 go run ./cmd/seed-storefront \
   -base-url "${API}" \
   -storefront-url "${BFF}" \
   -network-data "${NETWORK_DATA}" \
+  -site "${WORKSPACE_ROOT}/fixtures/storefront/fulfilment-site.json" \
   -verify-timeout "${STOREFRONT_VERIFY_TIMEOUT:-3m}" \
   ${SEED_ARGS[@]+"${SEED_ARGS[@]}"}
 
-# ---- 5. SUMMARY -------------------------------------------------------------------------------
+# ---- 6. SUMMARY -------------------------------------------------------------------------------
 prefixes="$("${PY}" -c 'import json,sys; print(" ".join(p + "xx" for p in json.load(open(sys.argv[1]))["deliverablePostalPrefixes"]))' "${FIXTURE}")"
-log "5/5 summary (${MODE})"
+log "6/6 summary (${MODE})"
 ok "storefront:              ${SF}"
 ok "deliverable postal codes: ${prefixes} (e.g. 78701 Austin, TX); any other ZIP answers DESTINATION_NOT_SERVED"
 ok "payment test tokens:     tok_approve, tok_decline, tok_timeout (the shopper registers, adds an address and pays in the UI)"

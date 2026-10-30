@@ -17,16 +17,21 @@ type Config struct {
 	BaseURL         string // Kong, each context at <base>/<context>
 	StorefrontURL   string // the storefront BFF (/api/storefront)
 	FixturePath     string
+	SitePath        string // fixtures/storefront/fulfilment-site.json (the WMS CPT schedule)
 	ProductsPath    string // fixtures/products/fulfilment-products.json
 	NetworkDataPath string // warehouse-infra scripts/data/retail-network-seed.json
 	MediaBase       string
 	DryRun          bool
 	VerifyOnly      bool
+	WMSOnly         bool // the WMS step alone (the CPT schedule), before the network tier
 	VerifyTimeout   time.Duration
 	VerifyInterval  time.Duration
-	QuotePrefix     string
-	HTTP            *http.Client
-	Out             io.Writer
+	// OfferRecomputeInterval is network-fulfillment's capability-offer recompute period (0: one
+	// minute): VERIFY stops waiting once every offer was recomputed this long after the CPT write.
+	OfferRecomputeInterval time.Duration
+	QuotePrefix            string
+	HTTP                   *http.Client
+	Out                    io.Writer
 }
 
 // Result is what a run did; Run's error says whether it succeeded.
@@ -69,6 +74,45 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 	logf("check: fixture %d products in %d departments, currency %s; network data %s", len(fx.Products), len(fx.Departments), fx.Currency, cfg.NetworkDataPath)
 
+	// ---- CHECK: the WMS side of the promise (the fulfilment site's CPT schedule) ----
+	site, err := LoadSiteFixture(cfg.SitePath)
+	if err != nil {
+		return res, fmt.Errorf("check: %w", err)
+	}
+	if problems := site.Validate(); len(problems) > 0 {
+		return res, fmt.Errorf("check: the fulfilment-site fixture %s is invalid (%d problems):\n  %s", cfg.SitePath, len(problems), strings.Join(problems, "\n  "))
+	}
+	node, err := LoadNodeProfile(cfg.NetworkDataPath, site.SiteID)
+	if err != nil {
+		return res, fmt.Errorf("check: %w", err)
+	}
+	if problems := site.AgreeWith(node); len(problems) > 0 {
+		return res, fmt.Errorf("check: the CPT schedule of %s disagrees with the network's node profile (%s); both declare the same node, fix the one that is wrong:\n  %s", cfg.SitePath, cfg.NetworkDataPath, strings.Join(problems, "\n  "))
+	}
+	active, err := readActivePaths(ctx, c)
+	if err != nil {
+		return res, fmt.Errorf("check: process-path-management process paths: %w", err)
+	}
+	for _, ct := range site.Cutoffs {
+		for _, p := range ct.EligiblePathIDs {
+			if !active[p] {
+				return res, fmt.Errorf("check: cutoff %s names process path %q, which is not an Active path in process-path-management (seed the paths: scripts/seed-process-paths.sh); nothing written", ct.CptID, p)
+			}
+		}
+	}
+	cpt, err := observeCPT(ctx, c, site.SiteID)
+	if err != nil {
+		return res, fmt.Errorf("check: process-path-management CPT schedule of %s: %w", site.SiteID, err)
+	}
+	logf("check: fulfilment site %s: CPT schedule %s agrees with the network node profile; eligible paths Active", site.SiteID, describeSchedule(site.Timezone, site.Cutoffs))
+	if cfg.WMSOnly {
+		skus := make([]string, 0, len(fx.Products))
+		for _, p := range fx.Products {
+			skus = append(skus, p.SKU)
+		}
+		return runWMSOnly(ctx, c, cfg, skus, site, cpt, res, logf)
+	}
+
 	// ---- CHECK: catalogue items by exact title ----
 	catalog, err := readCatalog(ctx, c)
 	if err != nil {
@@ -90,6 +134,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("check: %w", err)
 	}
+	desired.Site, obs.CPT = site, cpt
 
 	// ---- PLAN ----
 	plan := BuildPlan(*desired, *obs)
@@ -110,9 +155,22 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	// ---- APPLY ----
+	var cptWritten time.Time
 	if !cfg.VerifyOnly {
 		start := time.Now()
-		err := apply(ctx, c, plan, obs.Tree, fx.Currency)
+		var err error
+		// the WMS step first: the promise of every storefront product depends on it
+		if plan.CPTSchedule != nil {
+			if err = applyCPT(ctx, c, site.SiteID, *plan.CPTSchedule); err == nil {
+				cptWritten = time.Now()
+				logf("apply: wms: CPT schedule of %s defined: %s", site.SiteID, describeSchedule(plan.CPTSchedule.Timezone, plan.CPTSchedule.Cutoffs))
+			} else {
+				err = fmt.Errorf("define the CPT schedule of %s: %w", site.SiteID, err)
+			}
+		}
+		if err == nil {
+			err = apply(ctx, c, plan, obs.Tree, fx.Currency)
+		}
 		res.Writes, res.WritesByKey = c.totalWrites(), c.writes
 		logf("apply: %d writes in %s (%s)", res.Writes, time.Since(start).Round(time.Millisecond), c.writeSummary())
 		if err != nil {
@@ -121,11 +179,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	// ---- VERIFY ----
+	skus := make([]string, 0, len(desired.Products))
+	for _, p := range desired.Products {
+		skus = append(skus, p.SKU)
+	}
+	offers := verifyOffers(ctx, c, site.SiteID, skus, cptWritten, cfg)
 	tree := CategoryTree{}
 	if err := c.get(ctx, c.base+"/product-content/categories", &tree); err != nil {
 		return res, fmt.Errorf("verify: %w", err)
 	}
 	rep := verify(ctx, c, desired, fx, tree, cfg)
+	rep.Offers = offers
+	rep.Warnings = append(offers.Warnings(), rep.Warnings...)
 	res.Verify = rep
 	for _, l := range rep.Lines() {
 		logf("%s", l)
