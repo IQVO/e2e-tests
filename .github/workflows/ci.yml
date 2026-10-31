@@ -76,6 +76,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/...
+      # warehouse-day: the storefront-site guard and the POST /orders body (httptest fakes, offline).
+      - run: go test ./cmd/warehouse-day/...
       - run: python3 scripts/test_harvest_fulfilment_products.py
 
   scripts-sanity:

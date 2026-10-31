@@ -14,7 +14,8 @@
 #                 one-way. A missing one fails here with the commands to run.
 #   2. WMS        go run ./cmd/seed-storefront -wms-only: site-1's CPT schedule in
 #                 process-path-management (fixtures/storefront/fulfilment-site.json), PUT only when
-#                 it differs (make warehouse-day overwrites it). FIRST, because network-fulfillment
+#                 it differs (a warehouse-day run with -allow-live-site would overwrite it; by
+#                 default it runs on its own site SIM1). FIRST, because network-fulfillment
 #                 caps every listing's stock at the capacity before the next cutoff: the network
 #                 verify (listings with stock) and the storefront both depend on it.
 #   3. NETWORK    python3 ../warehouse-infra/scripts/seed-retail-network.py: vendor, region,

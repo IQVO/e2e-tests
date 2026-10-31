@@ -63,11 +63,17 @@ when an eligible path is not Active in process-path-management. VERIFY then read
 offers of the 81 SKUs: after a PUT it waits (within `-verify-timeout`) for a recompute and prints a
 WARNING, not a failure, for SKUs that stay `THROUGHPUT_CONSTRAINED 0`.
 
-> **`make warehouse-day` overwrites site-1's CPT schedule** (`cmd/warehouse-day/sim.go`
-> `publishCPTSchedule`: timezone UTC, cutoffs `sim-1200/1600/2000` a few minutes apart, the
-> simulated trucks compressed onto the wall clock). After it, every capability offer is
-> `THROUGHPUT_CONSTRAINED 0` and every product shows unavailable in the storefront. Re-running
-> `make provision-storefront` restores the schedule (one PUT).
+> **`make warehouse-day` is isolated from site-1.** The simulator is a building of its own
+> (`-site`, default `SIM1`): its orders carry `fulfillmentSiteId: SIM1` (order-management ADR 0044)
+> and its compressed UTC truck schedule (`sim-1200/1600/2000`) is written to
+> `PUT /sites/SIM1/cpt-schedule` (`-cpt-site` defaults to `-site`). Before its first write it reads
+> this fixture's `siteId` and refuses to run (exit 2) when `-site` or `-cpt-site` is the
+> storefront's fulfilment site, unless `-allow-live-site` is given on purpose. The promise of a
+> SIM1 order is computed on SIM1 once order-management promises at the order's own site (the
+> order-management change that makes `fulfillmentSiteId` drive the promise); before that the sim's
+> orders are promised against site-1's schedule (read only, nothing written to it). A run with
+> `-allow-live-site` against site-1 still replaces its schedule: re-run `make provision-storefront`
+> after it (one PUT).
 
 ### Network tier (the retail network) - `warehouse-infra/scripts/seed-retail-network.py`, step 3
 
@@ -126,14 +132,16 @@ plans only differences; against an unchanged cluster it prints `writes planned 0
 `apply: 0 writes`, then verifies. An interrupted run (Ctrl-C, a lost connection) is resumed by
 running it again: it plans what is left. A changed fixture price becomes one `:set-list-price`; a
 changed derivation rule becomes `:revise` + `:publish` of the affected contents; a changed tax table
-or charge schedule is published as the next version; site-1's CPT schedule rewritten by `make
-warehouse-day` becomes one `PUT /sites/site-1/cpt-schedule`.
+or charge schedule is published as the next version; a site-1 CPT schedule that differs from the
+fixture (edited by hand, or a warehouse-day run with `-allow-live-site` against it) becomes one
+`PUT /sites/site-1/cpt-schedule`.
 
 **Live evidence** (2026-10-29): first run `apply: 306 writes` (63 categories, 81 prices, 81 contents
 created and 81 published; tax table and charge schedule v1 already equal, skipped), 81/81
 purchasable; second run `writes planned 0, writes sent 0`, verify PASS.
 
-**Live evidence, WMS step** (2026-10-30, after `make warehouse-day` had left UTC `sim-*` cutoffs):
+**Live evidence, WMS step** (2026-10-30, after a `make warehouse-day` run from before the simulator
+moved to its own site had left UTC `sim-*` cutoffs on site-1):
 first run, step 2 `writes planned 1, writes sent 1` (`PUT /sites/site-1/cpt-schedule`, America/Chicago
 11:00/17:00); second run, step 2 `matches, skip`, `writes sent 0`; the storefront tier
 (`STOREFRONT_SKIP_NETWORK=1`) `writes planned 0` with the schedule `matches, skip`. Both runs then
@@ -182,7 +190,7 @@ A new kind cluster has new ids everywhere. In order:
 | delivery dates answer `DESTINATION_NOT_SERVED` | a full ZIP (78701) sent where a prefix is expected, or a prefix outside 786/787 | send the first 3 characters (`787`); only 786xx/787xx are served |
 | `422 currency-mismatch` from pricing | pricing runs with another `PRICING_CURRENCY` than the fixture's USD | `config.currency: "USD"` in `warehouse-infra/helm-values/pricing.yaml` (merged), then rerun |
 | `purchasable: false` after a run | VERIFY names the missing part: out of stock (WMS stock -> ACL feed), no ACTIVE price, no PUBLISHED content; or the projection is still catching up | stock: see Stock depletion; a WITHDRAWN price or RETIRED content is reported as BLOCKED and needs a deliberate decision (neither can be undone); otherwise rerun `make provision-storefront-verify` |
-| every product shows unavailable (out of stock) although the WMS has usable stock | `GET /api/network-fulfillment/capability-offers` shows `THROUGHPUT_CONSTRAINED` with `advertisedQuantity: 0`: the ACL caps the offer at the process-path capacity before site-1's next CPT cutoff. Either site-1's CPT schedule is wrong (`GET /api/process-path-management/sites/site-1/cpt-schedule` shows UTC `sim-*` cutoffs: `make warehouse-day` ran) or the PICK path's cycle time (`cycleTimeP95`, `GET /api/process-path-management/process-paths/PICK`) does not fit before the next cutoff | `make provision-storefront` (restores the schedule; VERIFY prints the offers). If they stay `THROUGHPUT_CONSTRAINED 0` with the correct schedule, the remaining pre-cutoff gap is network-fulfillment's next-feasible-cutoff defect (separate PR, `fix/next-feasible-cutoff`); the listing feed refreshes within 5 min of a good offer |
+| every product shows unavailable (out of stock) although the WMS has usable stock | `GET /api/network-fulfillment/capability-offers` shows `THROUGHPUT_CONSTRAINED` with `advertisedQuantity: 0`: the ACL caps the offer at the process-path capacity before site-1's next CPT cutoff. Either site-1's CPT schedule is wrong (`GET /api/process-path-management/sites/site-1/cpt-schedule` shows UTC `sim-*` cutoffs: a warehouse-day run predating its own-site isolation, or one with `-allow-live-site`) or the PICK path's cycle time (`cycleTimeP95`, `GET /api/process-path-management/process-paths/PICK`) does not fit before the next cutoff | `make provision-storefront` (restores the schedule; VERIFY prints the offers). If they stay `THROUGHPUT_CONSTRAINED 0` with the correct schedule, the remaining pre-cutoff gap is network-fulfillment's next-feasible-cutoff defect (separate PR, `fix/next-feasible-cutoff`); the listing feed refreshes within 5 min of a good offer |
 | step 3 fails on `listings of site-1 LIVE with stock` (`availableQty ...=0`) | the same cause seen from the network: the ACL feeds the advertised quantity, 0 while the offers are `THROUGHPUT_CONSTRAINED 0` | if step 2 just redefined the schedule (`apply: wms: CPT schedule of site-1 defined`), the ACL feeds the new figure within its interval (5 min): rerun. If step 2 reported the schedule as matching and the offers stay constrained, see the row above |
 | step 4 fails: `wrong` / `missing` mappings | stale product dictionary after a reseed: orders never reach the warehouse | Cluster rebuild, step 3 |
 | CHECK fails: `no catalogue item titled ...` | the network seed did not run, or warehouse-infra's data file is older than the fixture | update warehouse-infra (`git pull`), run `make provision-storefront` (it runs the network seed first) |

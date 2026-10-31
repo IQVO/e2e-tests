@@ -17,7 +17,8 @@ import (
 // process-path-management. network-fulfillment (SITE_ID site-1) advertises each listing's quantity
 // as min(usable stock, process-path capacity before the site's NEXT cutoff of this schedule), and
 // the network declares the same node with the cutoffs of the network data file's node profile. A
-// schedule that disagrees (the warehouse-day simulator leaves compressed UTC truck times behind)
+// schedule that disagrees (a warehouse-day run from before it moved to its own site SIM1, or one
+// with -allow-live-site, leaves compressed UTC truck times behind)
 // turns every listing THROUGHPUT_CONSTRAINED 0: nothing is in stock in the storefront.
 
 // SiteFixture is fixtures/storefront/fulfilment-site.json: the CPT schedule the fulfilment site

@@ -23,6 +23,16 @@
 #   DAY_ORDERS     customer orders                    (default 150)
 #   DAY_PICKERS / DAY_PACKERS / DAY_SLAM / DAY_REBIN / DAY_FLEX
 #   DAY_SEED       deterministic run (default: time based)
+#   DAY_SITE       the simulated building's own site   (default SIM1): facility-layout
+#                  site code AND the fulfillmentSiteId every order carries
+#   DAY_CPT_SITE   site whose CPT schedule the simulated trucks replace (default: DAY_SITE)
+#
+# Isolated from the storefront: the orders are promised at the sim's own site
+# and its compressed UTC truck schedule goes to PUT /sites/<DAY_SITE>/cpt-schedule.
+# Before its first write the simulator reads the storefront's fulfilment site
+# (fixtures/storefront/fulfilment-site.json, siteId site-1) and refuses to run
+# (exit 2) when DAY_SITE or DAY_CPT_SITE is that site, unless -allow-live-site
+# is passed on purpose (then re-run make provision-storefront after it).
 #
 # Quick smoke: DAY_DURATION=90s DAY_ORDERS=20 bash scripts/07-run-warehouse-day.sh
 set -euo pipefail
@@ -40,5 +50,8 @@ set -a
 # shellcheck disable=SC1091
 source "${WORKSPACE_ROOT}/env.sh"
 set +a
+
+# The guard's source of truth, absolute so it does not depend on the cwd.
+export DAY_STOREFRONT_SITE_FIXTURE="${DAY_STOREFRONT_SITE_FIXTURE:-${WORKSPACE_ROOT}/fixtures/storefront/fulfilment-site.json}"
 
 exec "${BIN_DIR}/warehouse-day" "$@"

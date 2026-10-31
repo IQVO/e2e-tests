@@ -296,10 +296,10 @@ The day, hour by hour:
 
 | Sim time | Persona | APIs driven |
 |---|---|---|
-| 05:30 | control tower | facility-layout `POST /location-types` + `POST /locations/import` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}`; product-master `PUT /products/{sku}` (every SKU) + `PUT /products/{sku}/classification` (fragile SKUs; inventory-storage and the readers learn it from `warehouse.product-master.events`); process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule`; labor-performance `POST /standards` |
+| 05:30 | control tower | facility-layout `POST /location-types` + `POST /locations/import` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}`; product-master `PUT /products/{sku}` (every SKU) + `PUT /products/{sku}/classification` (fragile SKUs; inventory-storage and the readers learn it from `warehouse.product-master.events`); process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule` (the sim's own site, `SIM1`); labor-performance `POST /standards` |
 | 05:30 | receiving | inventory-storage `POST /stock/receive` + `POST /stock/stow` into registered bins (the ASN-driven path, inbound-receiving `POST /asns` → `/receipts` → `/receipts/{id}/lines` → `/close`, whose Good lines inventory-storage books as staged stock, is covered by `@inbound-receiving` and is not part of this simulated day) |
 | 06:00 | supervisor | workforce-management start-shift, `POST /shift-plans`, assignments; WES charge/plan; fulfillment station registration + check-in |
-| 06:00-20:00 | customers | order-management `POST /orders` on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
+| 06:00-20:00 | customers | order-management `POST /orders` (`fulfillmentSiteId: SIM1`) on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
 | all day | pickers / flex | `claim-next PICK`, `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `confirm-pick`, complete, `POST /rebin/arrivals` |
 | all day | packers / SLAM | `claim-next PACK`, `seal-package`, `POST /packages/{id}/slam` (weight mismatch injected), `GET /packages?orderRef=` -> LABELED / DIVERTED |
 | hourly | supervisor | WES telemetry + rebalance, queue depths, staffing gaps, flex reassignment, breaks (lunch 11:30-12:30) |
@@ -310,6 +310,31 @@ The run prints an end-of-day report (hourly snapshots, per-associate
 throughput, events per topic, per-order problems, PASS/FAIL checks) and writes
 `run/warehouse-day-<RUN_ID>.json`. Exit code is non-zero unless the warehouse
 worked end to end.
+
+**Its own site, isolated from the storefront.** The simulated building is a
+site of its own (`-site` / `DAY_SITE`, default `SIM1`). Every order carries it
+as `fulfillmentSiteId` (order-management ADR 0044) and the compressed UTC truck
+schedule is written to that site's CPT schedule (`-cpt-site` / `DAY_CPT_SITE`
+defaults to `-site`), so the storefront's fulfilment site `site-1`
+(`fixtures/storefront/fulfilment-site.json`) keeps its schedule and its
+promises. Before its first write the simulator reads that fixture and exits 2
+when `-site` or `-cpt-site` is the storefront's site, unless `-allow-live-site`
+is given on purpose; it also refuses a `-site` order-management would reject
+(uppercase letters and digits only). The orders are promised at SIM1 once
+order-management promises at the order's own site; until then they are
+promised against its `DEFAULT_SITE_ID` (read only), and a POST answer that
+drops `fulfillmentSiteId` is a finding. What else the day writes, by site:
+
+| Write | Site |
+|---|---|
+| facility-layout site/zone/aisle/slot map, fulfillment-execution stations (`locationCode` on the map) | SIM1 |
+| inventory-storage `PUT /bins/{binId}` | bin ids are SIM1 location codes; the API takes no site |
+| inventory-storage receive/stow, product-master products | run-scoped SKUs (`SKU-<run>-*`); the stock pool has no site |
+| workforce-management start-shift (`siteCode`), shift plan, staffing gap (`buildingId`, `-building`, default SIM1) | SIM1 (the staffing-gap query stays unscoped: `buildingId` only) |
+| process-path-management `POST /process-paths` (PICK, PACK, SLAM, REBIN) | fleet-wide catalogue, no site in the API; only paths that are missing are created |
+| labor-performance `POST /standards` | fleet-wide per task type, no site in the API: revises the active PICK/PACK/SLAM standard |
+| wes-work-planning `POST /paths/pick/charge`, `/plan` | fleet-wide per WES pool, no site in the API (the pool the storefront's orders use too) |
+| fulfillment-execution `POST /tasks/sweep-cpt-misses`, `/tasks/expire-leases` | fleet-wide sweeps, no site in the API |
 
 Pin `E2E_CONSUMER_GROUP_SUFFIX` (e.g. `warehouse-day`) before `make up` when
 running against a long-lived shared broker, so services resume their
