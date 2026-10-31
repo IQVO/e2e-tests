@@ -135,7 +135,9 @@ func (s *sim) checkOut(ctx context.Context, a *associate) {
 // startShift is the 06:00 clock-in: workforce shift + certifications,
 // path assignment, and station check-in.
 func (s *sim) startShift(ctx context.Context, a *associate) error {
-	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/start-shift", "/associates/"+a.id+"/start-shift", map[string]any{"certifications": a.certs})
+	// siteCode (ADR 0034) puts the associate at the simulated building, not
+	// site-less; the staffing-gap query keeps buildingId only (unscoped).
+	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/start-shift", "/associates/"+a.id+"/start-shift", map[string]any{"certifications": a.certs, "siteCode": s.cfg.buildingID})
 	if !r.ok() {
 		return fail("start-shift %s -> %d %s", a.id, r.status, truncate(string(r.body), 200))
 	}

@@ -323,8 +323,32 @@ var truckCutoffs = []struct {
 
 // publishCPTSchedule maps the simulated 12:00/16:00/20:00 truck departures
 // onto real UTC wall-clock minutes, because order-management promises
-// against real time. A missed truck is therefore a REAL missed CPT.
+// against real time. A missed truck is therefore a REAL missed CPT. The
+// schedule is the simulated building's own (-cpt-site, default -site): the
+// orders carry that site as fulfillmentSiteId, and siteGuard has already
+// refused the storefront's site.
 func (s *sim) publishCPTSchedule(ctx context.Context) error {
+	cutoffs := s.cptCutoffs()
+	for i, t := range truckCutoffs {
+		logf("transport", "truck %02d:%02d (sim) departs at %s UTC (real CPT, site %s)", t.h, t.m, cutoffs[i]["localTime"], s.cfg.cptSiteID)
+	}
+	r := s.api.call(ctx, svcProcessPath, http.MethodPut, "/sites/{siteId}/cpt-schedule", s.cptSchedulePath(),
+		map[string]any{"timezone": "UTC", "cutoffs": cutoffs})
+	if !r.ok() {
+		return fail("PUT cpt-schedule for %s -> %d %s", s.cfg.cptSiteID, r.status, truncate(string(r.body), 300))
+	}
+	return nil
+}
+
+// cptSchedulePath is the process-path-management path of the CPT schedule
+// the simulated trucks replace.
+func (s *sim) cptSchedulePath() string {
+	return "/sites/" + url.PathEscape(s.cfg.cptSiteID) + "/cpt-schedule"
+}
+
+// cptCutoffs is the day's truckCutoffs as process-path-management cutoffs
+// in UTC, one per distinct wall-clock minute.
+func (s *sim) cptCutoffs() []map[string]any {
 	seen := map[string]bool{}
 	var cutoffs []map[string]any
 	for _, t := range truckCutoffs {
@@ -339,14 +363,8 @@ func (s *sim) publishCPTSchedule(ctx context.Context) error {
 			"cptId": t.id, "localTime": hhmm, "daysOfWeek": []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
 			"shipMethod": "ground", "eligiblePathIds": []string{"PICK"},
 		})
-		logf("transport", "truck %02d:%02d (sim) departs at %s UTC (real CPT)", t.h, t.m, hhmm)
 	}
-	r := s.api.call(ctx, svcProcessPath, http.MethodPut, "/sites/{siteId}/cpt-schedule", "/sites/"+url.PathEscape(s.cfg.cptSiteID)+"/cpt-schedule",
-		map[string]any{"timezone": "UTC", "cutoffs": cutoffs})
-	if !r.ok() {
-		return fail("PUT cpt-schedule for %s -> %d %s", s.cfg.cptSiteID, r.status, truncate(string(r.body), 300))
-	}
-	return nil
+	return cutoffs
 }
 
 func (s *sim) defineLaborStandards(ctx context.Context) error {
@@ -709,10 +727,11 @@ type omLine struct {
 }
 
 type omOrder struct {
-	ID          string   `json:"id"`
-	Status      string   `json:"status"`
-	PromiseDate string   `json:"promiseDate"`
-	Lines       []omLine `json:"lines"`
+	ID                string   `json:"id"`
+	Status            string   `json:"status"`
+	PromiseDate       string   `json:"promiseDate"`
+	FulfillmentSiteID string   `json:"fulfillmentSiteId"`
+	Lines             []omLine `json:"lines"`
 }
 
 func (s *sim) getOrder(ctx context.Context, id string) (omOrder, int) {
@@ -724,14 +743,24 @@ func (s *sim) getOrder(ctx context.Context, id string) (omOrder, int) {
 	return o, r.status
 }
 
-func (s *sim) placeOrder(ctx context.Context, o *orderRec) {
+// orderBody is the POST /orders request of one simulated customer order.
+// fulfillmentSiteId is the simulated building (order-management ADR 0044:
+// caller-assigned, immutable): order-management promises the order against
+// that site's CPT schedule, the one publishCPTSchedule writes, and never
+// against the storefront's site (its DEFAULT_SITE_ID).
+func (s *sim) orderBody(o *orderRec) map[string]any {
 	var lines []map[string]any
 	for _, l := range o.lines {
 		lines = append(lines, map[string]any{"sku": s.sku(l.sku), "quantity": l.qty, "giftWrap": l.giftWrap})
 	}
-	r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders", "/orders", map[string]any{
+	return map[string]any{
 		"lines": lines, "allowPartialShipment": o.allowPartial, "releaseOnAllocation": o.releaseOnAlloc,
-	})
+		"fulfillmentSiteId": s.cfg.siteCode,
+	}
+}
+
+func (s *sim) placeOrder(ctx context.Context, o *orderRec) {
+	r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders", "/orders", s.orderBody(o))
 	o.intakeHTTP = r.status
 	o.placedWall = time.Now()
 	if r.status != http.StatusCreated {
@@ -742,6 +771,9 @@ func (s *sim) placeOrder(ctx context.Context, o *orderRec) {
 	if err := r.decode(&created); err != nil {
 		s.finding("POST /orders body undecodable: %v", err)
 		return
+	}
+	if created.FulfillmentSiteID != s.cfg.siteCode {
+		s.finding("order-management did not keep the order's fulfillmentSiteId: sent %q, got %q (it would promise the order against its DEFAULT_SITE_ID, not the simulated trucks)", s.cfg.siteCode, created.FulfillmentSiteID)
 	}
 	for _, l := range created.Lines {
 		if l.PathID != "" && l.PathID != s.cfg.wesPickPath {
