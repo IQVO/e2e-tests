@@ -280,6 +280,18 @@ var processPaths = []struct{ id, prefix, capability string }{
 	{"REBIN", "rebin", "rebin"},
 }
 
+// capabilityOf is the capability a path requires, i.e. the certification an
+// associate needs to be assigned to it. Unknown path ids panic: the floor
+// plan only staffs the paths this table defines.
+func capabilityOf(pathID string) string {
+	for _, p := range processPaths {
+		if p.id == pathID {
+			return p.capability
+		}
+	}
+	panic("warehouse-day: no process path " + pathID)
+}
+
 func (s *sim) ensureProcessPaths(ctx context.Context) error {
 	var existing []struct {
 		PathID string `json:"pathId"`

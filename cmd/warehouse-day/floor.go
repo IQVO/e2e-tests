@@ -59,11 +59,15 @@ func (s *sim) staffTheFloor() {
 			s.associates = append(s.associates, a)
 		}
 	}
-	add(rolePicker, s.cfg.pickers, "PICK", "PICK")
-	add(rolePacker, s.cfg.packers, "PACK", "PACK")
-	add(roleSlam, s.cfg.slammers, "SLAM", "SLAM")
-	add(roleRebin, s.cfg.rebinners, "REBIN", "REBIN")
-	add(roleFlex, s.cfg.flex, "PICK", "PICK", "PACK")
+	// Certifications are the paths' REQUIRED CAPABILITIES (processPaths), the
+	// vocabulary workforce-management checks on assignment - not path ids:
+	// certifying "PICK" for a path that requires "pick" is a 409
+	// certification-required at the first assignment.
+	add(rolePicker, s.cfg.pickers, "PICK", capabilityOf("PICK"))
+	add(rolePacker, s.cfg.packers, "PACK", capabilityOf("PACK"))
+	add(roleSlam, s.cfg.slammers, "SLAM", capabilityOf("SLAM"))
+	add(roleRebin, s.cfg.rebinners, "REBIN", capabilityOf("REBIN"))
+	add(roleFlex, s.cfg.flex, "PICK", capabilityOf("PICK"), capabilityOf("PACK"))
 }
 
 func (s *sim) stationCount() int {
