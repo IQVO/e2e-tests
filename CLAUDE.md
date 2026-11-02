@@ -49,7 +49,7 @@ NOT a `git worktree`: from `.worktrees/` every sibling path resolves wrong.
    - Never relax an assertion to `>=` to hide accumulation; scope the id.
    - Never assert aggregate queue depth as a proxy for "my task arrived":
      use `GET /tasks?orderRef=`.
-   - `claim-next` is PULL dispatch: use `claimNextTaskForOrder`.
+   - `POST /stations/{id}/task-claims` (the former claim-next) is PULL dispatch: use `claimNextTaskForOrder`.
    - Never purge tables in a setup step to fix interference.
    - Creating POSTs need an `Idempotency-Key` header (fresh key per logical
      action; the helper fix is in PR #28, do not touch it from other branches).
