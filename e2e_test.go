@@ -905,18 +905,18 @@ func (w *world) wesEventuallyReportsCompleted(workUnitID string) error {
 	})
 }
 
-// wesRebalanceRecommendationIs asserts GET /paths/{pathId}/rebalance's
+// wesRebalanceRecommendationIs asserts POST /paths/{pathId}/rebalance-decisions's
 // action field, the same tool wes-work-planning's own get_rebalance_
 // recommendation MCP tool wraps (see its internal/adapters/inbound/mcp
 // /tools.go) — checked here over plain REST so this step needs no MCP
 // client of its own, while still proving the exact signal warehouse-ops-
 // agent's outbound MCP client will read moments later in the scenario.
 func (w *world) wesRebalanceRecommendationIs(pathID, action string) error {
-	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/paths/%s/rebalance", wesBaseURL, pathID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/paths/%s/rebalance-decisions", wesBaseURL, pathID), nil); err != nil {
 		return err
 	}
-	if w.last.status != http.StatusOK {
-		return fmt.Errorf("GET rebalance: status %d, body=%s", w.last.status, w.last.body)
+	if w.last.status != http.StatusCreated {
+		return fmt.Errorf("POST rebalance-decisions: status %d, body=%s", w.last.status, w.last.body)
 	}
 	got := w.last.json()
 	if got["action"] != action {

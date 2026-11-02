@@ -733,7 +733,7 @@ func (s *sim) supervisor(ctx context.Context, wg *sync.WaitGroup) {
 		var reb struct {
 			Action string `json:"action"`
 		}
-		rb := s.api.call(ctx, svcWES, http.MethodGet, "/paths/{pathId}/rebalance", "/paths/"+s.cfg.wesPickPath+"/rebalance", nil)
+		rb := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/rebalance-decisions", "/paths/"+s.cfg.wesPickPath+"/rebalance-decisions", nil)
 		_ = rb.decode(&reb)
 		gaps := []string{}
 		for _, p := range []string{"PICK", "PACK"} {
