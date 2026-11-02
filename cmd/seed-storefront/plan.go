@@ -144,9 +144,9 @@ type Plan struct {
 type PriceAction struct {
 	SKU           string
 	CatalogItemID string
-	Create        bool  // POST /item-prices; otherwise :set-list-price
+	Create        bool  // POST /item-prices; otherwise PUT /list-price
 	AmountMinor   int64 // the new list price
-	Version       int   // the observed version (optimistic guard of :set-list-price)
+	Version       int   // the observed version (optimistic guard of PUT /list-price)
 }
 
 // ContentAction converges the content of one item: create or revise if the body differs, then
@@ -155,9 +155,9 @@ type ContentAction struct {
 	SKU           string
 	CatalogItemID string
 	Create        bool // POST /product-contents (DRAFT, revision 1)
-	Revise        bool // POST :revise (new revision)
+	Revise        bool // POST /revisions (new revision)
 	FromRevision  int  // the observed revision a revise applies to
-	Publish       bool // POST :publish (always true once Create or Revise)
+	Publish       bool // POST /publications (always true once Create or Revise)
 	Body          ContentBody
 	CategoryPath  string
 }

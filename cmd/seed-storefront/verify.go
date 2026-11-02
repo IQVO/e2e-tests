@@ -160,8 +160,8 @@ func verify(ctx context.Context, c *client, d *Desired, fx *Fixture, tree Catego
 			Unavailable []map[string]any `json:"unavailable"`
 		}
 		body := map[string]string{"postalPrefix": cfg.QuotePrefix}
-		u := c.sf + "/products/" + url.PathEscape(p.CatalogItemID) + ":delivery-dates"
-		if _, err := c.do(ctx, http.MethodPost, u, body, "", &dates, http.StatusOK); err != nil {
+		u := c.sf + "/products/" + url.PathEscape(p.CatalogItemID) + "/delivery-date-quotes"
+		if _, err := c.do(ctx, http.MethodPost, u, body, fmt.Sprintf("seed-sf-verify-%d", time.Now().UnixNano()), &dates, http.StatusOK); err != nil {
 			rep.Failures = append(rep.Failures, fmt.Sprintf("delivery quote: %v", err))
 		} else {
 			for _, t := range dates.Tiers {
@@ -214,11 +214,11 @@ func verify(ctx context.Context, c *client, d *Desired, fx *Fixture, tree Catego
 // department name (category names are indexed), then the department's category filter.
 func searchDepartment(ctx context.Context, c *client, name string, idx map[string]Category, subtree map[string]bool) (int, error) {
 	type hits struct {
-		Hits []ProductView `json:"hits"`
+		Items []ProductView `json:"items"`
 	}
 	count := func(h hits) int {
 		n := 0
-		for _, v := range h.Hits {
+		for _, v := range h.Items {
 			if subtree[v.CategoryID] || (len(v.CategoryPath) > 0 && strings.EqualFold(v.CategoryPath[0], name)) {
 				n++
 			}

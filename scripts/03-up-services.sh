@@ -112,7 +112,7 @@
 #                           retail network (ADR 0001). Calls
 #                           order-management over HTTP (POST /orders with
 #                           releaseOnAllocation=false, a HELD order) to ask
-#                           feasibility, then POST /orders/{id}/release on
+#                           feasibility, then POST /orders/{id}/releases on
 #                           acceptance. No Kafka publisher of its own in
 #                           this harness (NETWORK_MODE=stub, no
 #                           EVENT_PUBLISHER); its inbound demand is a
@@ -418,7 +418,7 @@ log "starting network-inventory-planning on ${NIP_BASE_URL}"
 # process can never join the live cluster's group). OUTBOX_RELAY_ENABLED
 # turns on the relay that drains approvals / work demands onto
 # warehouse.network-inventory-planning.events; without it POST
-# /v1/transfers:approve would persist but never emit. TRANSFER_PICK_PATH_ID
+# /v1/transfer-approvals would persist but never emit. TRANSFER_PICK_PATH_ID
 # has no default (unset => approve answers 503 config-incomplete).
 start_service nip "${BIN_DIR}/nip" \
   HTTP_ADDR=":${NIP_HTTP_PORT}" \

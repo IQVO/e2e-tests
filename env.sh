@@ -412,7 +412,7 @@ WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP="warehouse-planning-storage-${E2E_CONS
 # The pick leg's path is `pick-transfer` (inside the existing PICK family,
 # matchPrefix `pick`); the dispatch leg's is `dispatch-transfer` (the
 # DISPATCH family this harness's catalogue fixture adds). NIP has no
-# default for the pick path: unset, POST /v1/transfers:approve answers 503.
+# default for the pick path: unset, POST /v1/transfer-approvals answers 503.
 NIP_TRANSFER_PICK_PATH_ID="pick-transfer"
 NIP_TRANSFER_DISPATCH_PATH_ID="dispatch-transfer"
 # NIP refuses to plan from a single stale fact, anywhere in its read models

@@ -547,13 +547,11 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	}
 
 	// wes-work-planning: one work unit per line, all Completed
-	var wus []struct {
+	type workUnit struct {
 		ID    string `json:"id"`
 		State string `json:"state"`
 	}
-	if r := s.api.call(ctx, svcWES, http.MethodGet, "/work-units?reference", "/work-units?reference="+url.QueryEscape(o.id), nil); r.ok() {
-		_ = r.decode(&wus)
-	}
+	wus, _ := listAll[workUnit](ctx, s.api, svcWES, "/work-units?reference", "/work-units?reference="+url.QueryEscape(o.id))
 	states := map[string]int{}
 	for _, w := range wus {
 		states[w.State]++
@@ -580,11 +578,8 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	// fulfillment-execution: PICK task per line COMPLETED, one PACK task
 	pickDone := 0
 	for i := range o.lines {
-		var ts []task
 		ref := fmt.Sprintf("%s-line-%d", o.id, i+1)
-		if r := s.api.call(ctx, svcFulfillment, http.MethodGet, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(ref), nil); r.ok() {
-			_ = r.decode(&ts)
-		}
+		ts, _ := listAll[task](ctx, s.api, svcFulfillment, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(ref))
 		for _, t := range ts {
 			if t.Type == "PICK" && t.Status == "COMPLETED" {
 				pickDone++
@@ -596,10 +591,7 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	if pickDone != len(o.lines) {
 		prob("PICK tasks completed %d/%d", pickDone, len(o.lines))
 	}
-	var packs []task
-	if r := s.api.call(ctx, svcFulfillment, http.MethodGet, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(o.id), nil); r.ok() {
-		_ = r.decode(&packs)
-	}
+	packs, _ := listAll[task](ctx, s.api, svcFulfillment, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(o.id))
 	packStates := []string{}
 	for _, t := range packs {
 		if t.Type == "PACK" {
@@ -611,10 +603,8 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 		prob("PACK tasks for order: %v, want exactly one COMPLETED", packStates)
 	}
 
-	var pk []pkg
-	r := s.api.call(ctx, svcFulfillment, http.MethodGet, "/packages?orderRef", "/packages?orderRef="+url.QueryEscape(o.id), nil)
+	pk, r := listAll[pkg](ctx, s.api, svcFulfillment, "/packages?orderRef", "/packages?orderRef="+url.QueryEscape(o.id))
 	if r.ok() {
-		_ = r.decode(&pk)
 		wantPkg := "LABELED"
 		if o.kind == kindMispickInjct {
 			wantPkg = "DIVERTED"

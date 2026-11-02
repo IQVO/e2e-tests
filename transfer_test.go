@@ -349,7 +349,7 @@ func (w *world) planningPublishesCapacityPlan(site string, ratePerHour, hours in
 	if planID == "" {
 		return fmt.Errorf("capacity plan response has no id: %s", w.last.body)
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/capacity-plans/%s/publish", warehousePlanningBaseURL, planID), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/capacity-plans/%s/publications", warehousePlanningBaseURL, planID), nil)); err != nil {
 		return fmt.Errorf("publish capacity plan %s: %w", planID, err)
 	}
 	return nil
@@ -427,7 +427,7 @@ func (w *world) approveTransfer(qty int, sku, origin, dest string) error {
 	// refused (422 facts-incomplete) and nothing is persisted, so retrying is
 	// exactly what an operator would do.
 	err := eventually(func() error {
-		if err := w.doJSON(http.MethodPost, nipBaseURL+"/v1/transfers:approve", body); err != nil {
+		if err := w.doJSON(http.MethodPost, nipBaseURL+"/v1/transfer-approvals", body); err != nil {
 			return err
 		}
 		if w.last.status != http.StatusOK {
@@ -758,7 +758,7 @@ func (w *world) destinationStows(qty int, bin string) error {
 		return err
 	}
 	bin = w.rs(bin)
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/transfers/%s/stow", inventoryBaseURL, st.lineID), map[string]any{
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/transfers/%s/stowages", inventoryBaseURL, st.lineID), map[string]any{
 		"bins": []map[string]any{{"binId": bin, "quantity": qty}},
 	})); err != nil {
 		return err

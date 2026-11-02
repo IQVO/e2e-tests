@@ -490,7 +490,7 @@ func (w *world) stowContainer(idx int, asn string) error {
 	// landed the stow fails closed with 409 bin-handling-unit-mismatch, so retry
 	// that one answer (any other failure is real and returned at once).
 	if err := eventually(func() error {
-		if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/containers/%s:stow", inventoryBaseURL, lpn),
+		if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/containers/%s/stowages", inventoryBaseURL, lpn),
 			map[string]any{"bin": bin}); err != nil {
 			return err
 		}
@@ -537,7 +537,7 @@ func (w *world) usableIs(sku string, usable, loose, cases int) error {
 func (w *world) breakContainer(idx int, asn string) error {
 	asn = w.rs(asn)
 	lpn := w.mcs().ssccs[asn][idx-1]
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/containers/%s:break", inventoryBaseURL, lpn),
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/containers/%s/case-breaks", inventoryBaseURL, lpn),
 		map[string]any{"looseBin": w.mcs().looseBin})); err != nil {
 		return fmt.Errorf("break %s into %s: %w", lpn, w.mcs().looseBin, err)
 	}

@@ -20,7 +20,7 @@ Feature: inbound-receiving takes goods from ASN to staged stock
     discrepancy carries all three numbers (expected 50, received 40, damaged
     0); the same table is checked on the REST read AND on the ReceiptClosed
     event, so the published contract and the read model agree.
-  - inventory-storage has no read of STAGED stock (POST /stock/receive is a
+  - inventory-storage has no read of STAGED stock (POST /stock-receipts is a
     bare acknowledgement and usable only counts stowed units). The handover is
     therefore proved by the StockReceived it raises on its analytics topic:
     the units, and the NUMBER of events for the SKU, must be exact. Usable

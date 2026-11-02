@@ -119,10 +119,10 @@ func (s *sim) registerStations(ctx context.Context) error {
 }
 
 func (s *sim) checkIn(ctx context.Context, a *associate) {
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-in", "/stations/"+a.station+"/check-in", map[string]any{"occupantId": a.id})
+	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-ins", "/stations/"+a.station+"/check-ins", map[string]any{"occupantId": a.id})
 	if r.status == http.StatusConflict {
-		s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-out", "/stations/"+a.station+"/check-out", nil)
-		r = s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-in", "/stations/"+a.station+"/check-in", map[string]any{"occupantId": a.id})
+		s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-outs", "/stations/"+a.station+"/check-outs", nil)
+		r = s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-ins", "/stations/"+a.station+"/check-ins", map[string]any{"occupantId": a.id})
 	}
 	if !r.ok() {
 		s.finding("check-in %s at %s -> %d %s", a.id, a.station, r.status, truncate(string(r.body), 160))
@@ -130,7 +130,7 @@ func (s *sim) checkIn(ctx context.Context, a *associate) {
 }
 
 func (s *sim) checkOut(ctx context.Context, a *associate) {
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-out", "/stations/"+a.station+"/check-out", nil)
+	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-outs", "/stations/"+a.station+"/check-outs", nil)
 	if !r.ok() {
 		s.finding("check-out %s at %s -> %d %s", a.id, a.station, r.status, truncate(string(r.body), 160))
 	}
@@ -141,7 +141,7 @@ func (s *sim) checkOut(ctx context.Context, a *associate) {
 func (s *sim) startShift(ctx context.Context, a *associate) error {
 	// siteCode (ADR 0034) puts the associate at the simulated building, not
 	// site-less; the staffing-gap query keeps buildingId only (unscoped).
-	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/start-shift", "/associates/"+a.id+"/start-shift", map[string]any{"certifications": a.certs, "siteCode": s.cfg.buildingID})
+	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/shift-starts", "/associates/"+a.id+"/shift-starts", map[string]any{"certifications": a.certs, "siteCode": s.cfg.buildingID})
 	if !r.ok() {
 		return fail("start-shift %s -> %d %s", a.id, r.status, truncate(string(r.body), 200))
 	}
@@ -157,7 +157,7 @@ func (s *sim) endShift(a *associate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	s.checkOut(ctx, a)
-	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/end-shift", "/associates/"+a.id+"/end-shift", nil)
+	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/shift-ends", "/associates/"+a.id+"/shift-ends", nil)
 	if !r.ok() {
 		s.finding("end-shift %s -> %d %s", a.id, r.status, truncate(string(r.body), 160))
 	}
@@ -170,7 +170,7 @@ func (s *sim) maybeBreak(ctx context.Context, a *associate) {
 	}
 	a.breakTaken = true
 	s.checkOut(ctx, a)
-	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/break/start", "/associates/"+a.id+"/break/start", nil)
+	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/break-starts", "/associates/"+a.id+"/break-starts", nil)
 	if !r.ok() {
 		s.finding("break/start %s -> %d %s", a.id, r.status, truncate(string(r.body), 160))
 	}
@@ -179,7 +179,7 @@ func (s *sim) maybeBreak(ctx context.Context, a *associate) {
 	sleepCtx(ctx, s.clock.simDur(30*time.Minute))
 	ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	r = s.api.call(ctx2, svcWorkforce, http.MethodPost, "/associates/{id}/break/end", "/associates/"+a.id+"/break/end", nil)
+	r = s.api.call(ctx2, svcWorkforce, http.MethodPost, "/associates/{id}/break-ends", "/associates/"+a.id+"/break-ends", nil)
 	if !r.ok() {
 		s.finding("break/end %s -> %d %s", a.id, r.status, truncate(string(r.body), 160))
 	}
@@ -206,7 +206,7 @@ type task struct {
 // claimable right now.
 func (s *sim) claimNext(ctx context.Context, a *associate, taskType string) (task, bool) {
 	var t task
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/claim-next", "/stations/"+a.station+"/claim-next", map[string]any{"taskType": taskType})
+	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/task-claims", "/stations/"+a.station+"/task-claims", map[string]any{"taskType": taskType})
 	switch {
 	case r.status == http.StatusOK:
 		if err := r.decode(&t); err != nil {
@@ -223,7 +223,7 @@ func (s *sim) claimNext(ctx context.Context, a *associate, taskType string) (tas
 }
 
 func (s *sim) completeTask(ctx context.Context, a *associate, t task) bool {
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/complete", "/tasks/"+url.PathEscape(t.ID)+"/complete", map[string]any{"stationId": a.station})
+	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/completions", "/tasks/"+url.PathEscape(t.ID)+"/completions", map[string]any{"stationId": a.station})
 	if r.status == http.StatusConflict {
 		s.m.completeConflicts.Add(1)
 	}
@@ -265,11 +265,7 @@ type reservation struct {
 }
 
 func (s *sim) reservationsFor(ctx context.Context, orderID string) []reservation {
-	var out []reservation
-	r := s.api.call(ctx, svcInventory, http.MethodGet, "/reservations?demandRef", "/reservations?demandRef="+url.QueryEscape(orderID), nil)
-	if r.ok() {
-		_ = r.decode(&out)
-	}
+	out, _ := listAll[reservation](ctx, s.api, svcInventory, "/reservations?demandRef", "/reservations?demandRef="+url.QueryEscape(orderID))
 	return out
 }
 
@@ -345,7 +341,7 @@ func (s *sim) pickOne(ctx context.Context, a *associate) bool {
 		sleepCtx(ctx, jitter(nil2(s), s.cfg.pickSeconds*a.speed*float64(max(1, al.Quantity))/1.5, 0.25))
 		units += al.Quantity
 		if i == 0 && len(res.Allocations) > 1 {
-			if r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/renew-lease", "/tasks/"+url.PathEscape(t.ID)+"/renew-lease", map[string]any{"stationId": a.station}); r.ok() {
+			if r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/lease-renewals", "/tasks/"+url.PathEscape(t.ID)+"/lease-renewals", map[string]any{"stationId": a.station}); r.ok() {
 				s.m.leaseRenewals.Add(1)
 			}
 		}
@@ -445,7 +441,7 @@ func (s *sim) packOne(ctx context.Context, a *associate) bool {
 		contents = append(contents, s.sku("LAMP"))
 	}
 	sleepCtx(ctx, jitter(nil2(s), s.cfg.packSeconds*a.speed*(1+0.2*float64(units-1)), 0.2))
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/seal-package", "/tasks/"+url.PathEscape(t.ID)+"/seal-package", map[string]any{
+	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/package-seals", "/tasks/"+url.PathEscape(t.ID)+"/package-seals", map[string]any{
 		"stationId": a.station, "contents": contents,
 	})
 	if r.status != http.StatusCreated {
@@ -494,7 +490,7 @@ func (s *sim) slamOne(ctx context.Context, a *associate, p parcel) {
 		actual += skuByKey("LAMP").weightKg
 	}
 	sleepCtx(ctx, jitter(nil2(s), 0.4*a.speed, 0.2))
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/packages/{id}/slam", "/packages/"+url.PathEscape(p.packageID)+"/slam", map[string]any{
+	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/packages/{id}/slam-runs", "/packages/"+url.PathEscape(p.packageID)+"/slam-runs", map[string]any{
 		"actualWeight": round3(actual), "expectedWeight": round3(expected),
 	})
 	if r.status != http.StatusNoContent {
@@ -621,7 +617,7 @@ func (s *sim) releaseScheduler(ctx context.Context, wg *sync.WaitGroup) {
 	for ctx.Err() == nil {
 		depth := s.queueDepth(ctx, "PICK")
 		for depth < target && ctx.Err() == nil {
-			r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/release", "/paths/"+s.cfg.wesPickPath+"/release", nil)
+			r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/work-releases", "/paths/"+s.cfg.wesPickPath+"/work-releases", nil)
 			if r.status == http.StatusOK {
 				s.m.released.Add(1)
 				depth++
@@ -682,7 +678,7 @@ func (s *sim) inventoryControl(ctx context.Context, wg *sync.WaitGroup) {
 	}
 	s.mu.Unlock()
 	for _, o := range backordered {
-		r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders/{id}/retry-allocation", "/orders/"+o.id+"/retry-allocation", nil)
+		r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders/{id}/allocation-retries", "/orders/"+o.id+"/allocation-retries", nil)
 		var got omOrder
 		_ = r.decode(&got)
 		s.mu.Lock()
@@ -696,7 +692,7 @@ func (s *sim) inventoryControl(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func (s *sim) cycleCount(ctx context.Context, bin string, counted int, expectDiscrepancy bool) {
-	r := s.api.call(ctx, svcInventory, http.MethodPost, "/bins/{binId}/cycle-count", "/bins/"+url.PathEscape(bin)+"/cycle-count", map[string]any{"countedQuantity": counted})
+	r := s.api.call(ctx, svcInventory, http.MethodPost, "/bins/{binId}/cycle-counts", "/bins/"+url.PathEscape(bin)+"/cycle-counts", map[string]any{"countedQuantity": counted})
 	var res struct {
 		SystemQuantity int  `json:"systemQuantity"`
 		Discrepancy    bool `json:"discrepancy"`
@@ -767,8 +763,8 @@ func (s *sim) supervisor(ctx context.Context, wg *sync.WaitGroup) {
 func (s *sim) sweeps(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for ctx.Err() == nil {
-		s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/expire-leases", "/tasks/expire-leases", nil)
-		s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/sweep-cpt-misses", "/tasks/sweep-cpt-misses", nil)
+		s.api.call(ctx, svcFulfillment, http.MethodPost, "/task-lease-expirations", "/task-lease-expirations", nil)
+		s.api.call(ctx, svcFulfillment, http.MethodPost, "/cpt-miss-sweeps", "/cpt-miss-sweeps", nil)
 		sleepCtx(ctx, 3*time.Second)
 	}
 }
@@ -782,7 +778,7 @@ func (s *sim) sweeps(ctx context.Context, wg *sync.WaitGroup) {
 func (s *sim) confirmPick(ctx context.Context, reservationID string) resp {
 	var r resp
 	for attempt := 0; attempt < 5; attempt++ {
-		r = s.api.call(ctx, svcInventory, http.MethodPost, "/reservations/{id}/confirm-pick", "/reservations/"+url.PathEscape(reservationID)+"/confirm-pick", nil)
+		r = s.api.call(ctx, svcInventory, http.MethodPost, "/reservations/{id}/pick-confirmations", "/reservations/"+url.PathEscape(reservationID)+"/pick-confirmations", nil)
 		if r.status != http.StatusConflict || !strings.Contains(string(r.body), "/concurrent-modification") {
 			return r
 		}

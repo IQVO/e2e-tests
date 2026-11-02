@@ -368,7 +368,7 @@ func (w *world) slotGenerate(site string) (map[string]any, error) {
 // Draft behind. Best effort: the outcome is irrelevant to the scenario.
 func (w *world) slotDiscard(p map[string]any) {
 	if id, _ := p["planId"].(string); id != "" {
-		_ = w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/reject", slottingBaseURL, id),
+		_ = w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/rejections", slottingBaseURL, id),
 			map[string]any{"reason": "e2e: intermediate draft while the local copies converge"})
 	}
 }
@@ -565,7 +565,7 @@ func (w *world) planIsApproved(label, site string) error {
 	if err != nil {
 		return err
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approve", slottingBaseURL, id), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approvals", slottingBaseURL, id), nil)); err != nil {
 		return fmt.Errorf("approve plan %s: %w", id, err)
 	}
 	if got := w.last.json()["state"]; w.last.status != http.StatusOK || got != "Approved" {
@@ -581,7 +581,7 @@ func (w *world) approvingIsRefused(label, site string, status int, slug string) 
 	if err != nil {
 		return err
 	}
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approve", slottingBaseURL, id), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approvals", slottingBaseURL, id), nil); err != nil {
 		return err
 	}
 	return w.problemIs(status, slug)

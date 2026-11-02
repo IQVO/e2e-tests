@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/claudioed/warehouse-e2e/internal/paging"
 )
 
 // Service names double as the gateway path segment (Kong routes
@@ -148,7 +150,7 @@ func (r resp) decode(v any) error {
 }
 
 // call performs one request. route is the templated route used as the
-// metrics key (e.g. "POST /stations/{id}/claim-next"), path the concrete one.
+// metrics key (e.g. "POST /stations/{id}/task-claims"), path the concrete one.
 func (a *api) call(ctx context.Context, svc, method, route, path string, body any) resp {
 	var rd io.Reader
 	if body != nil {
@@ -166,7 +168,7 @@ func (a *api) call(ctx context.Context, svc, method, route, path string, body an
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
-	if method == http.MethodPost {
+	if method == http.MethodPost || method == http.MethodPatch {
 		// ADR-0028: creating POSTs require an Idempotency-Key. A real
 		// device mints one per logical action; this client never
 		// re-sends, so a fresh key per call is the honest equivalent.
@@ -198,4 +200,28 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// listAll reads a paginated collection (GET path) and returns every item, following
+// nextCursor until it is absent. route is the templated metrics key, as for call. The returned
+// resp is the last page's: !ok() means the walk failed and the items are what was read so far.
+func listAll[T any](ctx context.Context, a *api, svc, route, path string) ([]T, resp) {
+	var all []T
+	cursor := ""
+	for pages := 0; pages < 10000; pages++ {
+		r := a.call(ctx, svc, http.MethodGet, route, paging.With(path, cursor), nil)
+		if !r.ok() {
+			return all, r
+		}
+		items, next, err := paging.Decode[T](r.body)
+		if err != nil {
+			return all, resp{status: 0, body: []byte(err.Error())}
+		}
+		all = append(all, items...)
+		if next == "" || next == cursor {
+			return all, r
+		}
+		cursor = next
+	}
+	return all, resp{status: 0, body: []byte("paging did not end")}
 }

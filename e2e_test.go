@@ -188,7 +188,7 @@ func (w *world) doJSON(method, url string, body any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if method == http.MethodPost || method == http.MethodPut {
+	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
 		// Creating POSTs require an Idempotency-Key (facility-layout ADR-0019 and the fleet
 		// idempotency middleware), and the two returns/exceptions contexts demand it on
 		// their policy-declaring PUTs too. This client never re-sends a request, so a fresh
@@ -368,7 +368,7 @@ func (w *world) resolveSlot(code string) string {
 
 func (w *world) decommissionLocationSlot(locationCode string) error {
 	return w.expectOK2xx(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/locations/%s/decommission", facilityBaseURL, w.resolveSlot(locationCode)), nil))
+		fmt.Sprintf("%s/locations/%s/decommissionings", facilityBaseURL, w.resolveSlot(locationCode)), nil))
 }
 
 // ---------------------------------------------------------------------
@@ -585,7 +585,7 @@ func (w *world) physicalProfileReadFor(sku string) error {
 // pass on an unrelated 409, which would silently hide a broken cache.
 func (w *world) stowIsRejected(qty int, sku, binID string) error {
 	binID = w.resolveSlot(binID)
-	if err := w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/stow", map[string]any{
+	if err := w.doJSON(http.MethodPost, inventoryBaseURL+"/stowages", map[string]any{
 		"sku": sku, "quantity": qty, "binId": binID,
 	}); err != nil {
 		return err
@@ -611,7 +611,7 @@ func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		lastErr = w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/stow",
+		lastErr = w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stowages",
 			map[string]any{"sku": sku, "quantity": qty, "binId": binID}))
 		if lastErr == nil {
 			return nil
@@ -664,7 +664,7 @@ func (w *world) binExists(binID string, capacity int) error {
 
 func (w *world) receiveStock(qty int, sku string) error {
 	sku = w.rs(sku)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/receive", map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock-receipts", map[string]any{
 		"sku": sku, "quantity": qty,
 	}))
 }
@@ -672,7 +672,7 @@ func (w *world) receiveStock(qty int, sku string) error {
 func (w *world) stowStock(qty int, sku, binID string) error {
 	sku = w.rs(sku)
 	binID = w.rs(binID)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/stow", map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stowages", map[string]any{
 		"sku": sku, "quantity": qty, "binId": binID,
 	}))
 }
@@ -704,7 +704,7 @@ func (w *world) usableInventoryIs(sku string, want int) error {
 
 func (w *world) startAssociateShift(associateID, certification string) error {
 	associateID = w.rs(associateID)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/associates/%s/start-shift", workforceBaseURL, associateID), map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/associates/%s/shift-starts", workforceBaseURL, associateID), map[string]any{
 		"certifications": []string{certification},
 	}))
 }
@@ -810,7 +810,7 @@ func (w *world) enqueueWorkUnit(workUnitID string, hoursFromNow int, reference, 
 }
 
 func (w *world) releaseWorkFor(pathID string) error {
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/paths/%s/release", wesBaseURL, pathID), nil))
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/paths/%s/work-releases", wesBaseURL, pathID), nil))
 }
 
 // releaseWorkEventuallyReleasesOrderLine is releaseWorkFor targeted at the
@@ -883,7 +883,7 @@ func (w *world) wesEventuallyObservesLaborPlan(pathID string, plannedHeads int) 
 func (w *world) wesEventuallyReportsCompleted(workUnitID string) error {
 	workUnitID = w.rs(workUnitID)
 	return eventually(func() error {
-		if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/work-units/%s/complete", wesBaseURL, workUnitID), nil); err != nil {
+		if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/work-units/%s/completions", wesBaseURL, workUnitID), nil); err != nil {
 			return err
 		}
 		// 409 = already completed (by the Kafka-driven TaskCompleted
@@ -952,7 +952,7 @@ func (w *world) registerStation(stationID, capabilities string) error {
 func (w *world) checkInStation(associateID, stationID string) error {
 	associateID = w.rs(associateID)
 	stationID = w.rs(stationID)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/stations/%s/check-in", fulfillmentBaseURL, stationID), map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/stations/%s/check-ins", fulfillmentBaseURL, stationID), map[string]any{
 		"occupantId": associateID,
 	}))
 }
@@ -1013,7 +1013,7 @@ func (w *world) fulfillmentEventuallyCreatesTaskFor(orderRef string) error {
 func (w *world) claimNextTask(stationID, taskType string) error {
 	stationID = w.rs(stationID)
 	return w.expectOK2xx(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/stations/%s/claim-next", fulfillmentBaseURL, stationID),
+		fmt.Sprintf("%s/stations/%s/task-claims", fulfillmentBaseURL, stationID),
 		map[string]any{"taskType": taskType}))
 }
 
@@ -1025,7 +1025,7 @@ func (w *world) claimNextTaskForOrder(stationID, taskType, orderRef string) erro
 	orderRef = w.rs(orderRef)
 	return eventually(func() error {
 		if err := w.expectOK2xx(w.doJSON(http.MethodPost,
-			fmt.Sprintf("%s/stations/%s/claim-next", fulfillmentBaseURL, stationID),
+			fmt.Sprintf("%s/stations/%s/task-claims", fulfillmentBaseURL, stationID),
 			map[string]any{"taskType": taskType})); err != nil {
 			return err
 		}
@@ -1053,7 +1053,7 @@ func (w *world) completeClaimedTask(stationID string) error {
 	if w.claimedTaskID == "" {
 		return fmt.Errorf("no task has been claimed yet this scenario")
 	}
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/complete", fulfillmentBaseURL, w.claimedTaskID), map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/completions", fulfillmentBaseURL, w.claimedTaskID), map[string]any{
 		"stationId": stationID,
 	}))
 }
@@ -1066,7 +1066,7 @@ func (w *world) completeClaimedTask(stationID string) error {
 // internal/application/usecases/claim_next.go). Same direct-seed pattern
 // this harness already uses for inventory-storage bins (see binExists) —
 // there is no "force-expire one task's lease" HTTP endpoint; only the bulk
-// POST /tasks/expire-leases sweep, which also FREES the task (status back
+// POST /task-lease-expirations sweep, which also FREES the task (status back
 // to Pending) rather than leaving it Claimed-but-expired, which is
 // precisely the "stuck" state diagnose_stuck_tasks is meant to catch.
 func (w *world) claimedTaskLeaseForcedExpired() error {
@@ -1156,14 +1156,14 @@ func (w *world) theTaskForOrderLineHasCPTForcedIntoThePast(lineNo int) error {
 	return nil
 }
 
-// triggerFulfillmentCPTMissedSweep calls POST /tasks/sweep-cpt-misses (no
+// triggerFulfillmentCPTMissedSweep calls POST /cpt-miss-sweeps (no
 // request body — see PostSweepCPTMisses), fulfillment-execution's
 // Clock-driven sweep (ADR-0025) that detects every still-open task whose
 // CPT is now in the past and publishes TaskCPTMissed for each via its own
 // transactional outbox (the outbox relay runs automatically in-process —
 // no separate trigger needed for the Kafka hop itself).
 func (w *world) triggerFulfillmentCPTMissedSweep() error {
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fulfillmentBaseURL+"/tasks/sweep-cpt-misses", nil))
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fulfillmentBaseURL+"/cpt-miss-sweeps", nil))
 }
 
 // fulfillmentReportsAtLeastOneCPTMiss asserts the sweep's own response
@@ -1330,7 +1330,7 @@ func (w *world) dailyBriefListsOpenExceptionForPath(pathID, siteCode string) err
 // order-management steps (choreographed-release redesign)
 //
 // order-management's only public REST surface in v1: POST /orders,
-// GET /orders/{id}, POST /orders/{id}/retry-allocation, DELETE
+// GET /orders/{id}, POST /orders/{id}/allocation-retries, DELETE
 // /orders/{id}, GET /healthz. There is no /allocate or /release endpoint
 // — placing an order that can be immediately, fully allocated triggers
 // allocation (synchronous HTTP to inventory-storage, unchanged) AND

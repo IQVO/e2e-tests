@@ -229,7 +229,7 @@ func (w *world) vendorNodeReady(vendor, code string, maxWeightG int) error {
 	})); err != nil {
 		return fmt.Errorf("declare operational profile: %w", err)
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/nodes/%s:activate", nodeTopologyBaseURL, s.nodeID), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/nodes/%s/activations", nodeTopologyBaseURL, s.nodeID), nil)); err != nil {
 		return fmt.Errorf("activate node: %w", err)
 	}
 	n := w.last.json()
@@ -315,7 +315,7 @@ func (w *world) planDraftEventually(packing string, qty int) error {
 
 func (w *world) planConfirmed() error {
 	s := w.sis()
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s:confirm", sellerInboundBaseURL, s.planID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s/confirmations", sellerInboundBaseURL, s.planID), nil); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK || w.last.json()["state"] != "CONFIRMED" {
@@ -326,14 +326,14 @@ func (w *world) planConfirmed() error {
 
 func (w *world) planConfirmRefused(slug string) error {
 	s := w.sis()
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s:confirm", sellerInboundBaseURL, s.planID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s/confirmations", sellerInboundBaseURL, s.planID), nil); err != nil {
 		return err
 	}
 	return w.siExpectProblem(http.StatusConflict, slug)
 }
 
 func (w *world) sellerSuspended() error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/sellers/%s:suspend", sellerInboundBaseURL, w.sis().sellerID),
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/sellers/%s/suspensions", sellerInboundBaseURL, w.sis().sellerID),
 		map[string]any{"reason": "e2e: repeated label violations"}); err != nil {
 		return err
 	}
@@ -467,7 +467,7 @@ func (w *world) shipmentState(want string) (map[string]any, error) {
 }
 
 func (w *world) shipRefused(slug string) error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s:ship", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s/dispatches", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
 		return err
 	}
 	if err := w.siExpectProblem(http.StatusConflict, slug); err != nil {
@@ -478,7 +478,7 @@ func (w *world) shipRefused(slug string) error {
 }
 
 func (w *world) shipmentLabelled() error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s:label", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s/labels", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK || w.last.json()["state"] != "LABELLED" {
@@ -516,7 +516,7 @@ func (w *world) labelsOK(n, eaches int) error {
 }
 
 func (w *world) shipmentShipped() error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s:ship", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s/dispatches", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK || w.last.json()["state"] != "SHIPPED" || w.last.json()["shippedAt"] == nil {

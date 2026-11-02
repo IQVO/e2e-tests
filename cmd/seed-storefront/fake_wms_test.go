@@ -30,7 +30,7 @@ func (f *fakeCluster) readWMS(w http.ResponseWriter, p string) bool {
 			}
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].PathID < out[j].PathID })
-		writeJSON(w, http.StatusOK, out)
+		writeJSON(w, http.StatusOK, map[string]any{"items": out})
 	case strings.HasPrefix(p, "/process-path-management/sites/") && strings.HasSuffix(p, "/cpt-schedule"):
 		site := strings.TrimSuffix(strings.TrimPrefix(p, "/process-path-management/sites/"), "/cpt-schedule")
 		s := f.cpt[site]
@@ -40,7 +40,7 @@ func (f *fakeCluster) readWMS(w http.ResponseWriter, p string) bool {
 		}
 		writeJSON(w, http.StatusOK, s)
 	case p == "/network-fulfillment/capability-offers":
-		writeJSON(w, http.StatusOK, map[string]any{"capabilityOffers": f.offers()})
+		writeJSON(w, http.StatusOK, map[string]any{"items": f.offers()})
 	default:
 		return false
 	}
