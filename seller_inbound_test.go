@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -182,14 +181,13 @@ func (w *world) vendorNodeReady(vendor, code string, maxWeightG int) error {
 		return fmt.Errorf("onboard vendor: %w", err)
 	}
 	// regionId is the node-topology region id (not its code): read it from the region list.
-	if err := w.doJSON(http.MethodGet, nodeTopologyBaseURL+"/regions", nil); err != nil {
+	regions, err := w.getItems(nodeTopologyBaseURL + "/regions")
+	if err != nil {
 		return err
 	}
-	var regions []any
-	_ = json.Unmarshal(w.last.body, &regions)
 	regionID := ""
-	for _, r := range regions {
-		if m, ok := r.(map[string]any); ok && regionID == "" {
+	for _, m := range regions {
+		if regionID == "" {
 			regionID, _ = m["regionId"].(string)
 			if m["code"] == siRegionCode {
 				regionID, _ = m["regionId"].(string)
@@ -555,15 +553,13 @@ func (w *world) vendorPollsTree(eaches int) error {
 	s := w.sis()
 	q := url.Values{"vendorId": {s.vendorID}, "nodeId": {s.nodeID}}
 	return siEventually(func() error {
-		if err := w.doJSON(http.MethodGet, vendorConnectivityBaseURL+"/vendor/inbound-shipments?"+q.Encode(), nil); err != nil {
-			return err
-		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("poll = %d (%s)", w.last.status, w.last.body)
+		polled, err := w.getItems(vendorConnectivityBaseURL + "/vendor/inbound-shipments?" + q.Encode())
+		if err != nil {
+			return fmt.Errorf("poll: %w", err)
 		}
 		var sh map[string]any
-		for _, x := range anySlice(w.last.json()["inboundShipments"]) {
-			if m, ok := x.(map[string]any); ok && m["shipmentId"] == s.shipmentID {
+		for _, m := range polled {
+			if m["shipmentId"] == s.shipmentID {
 				sh = m
 			}
 		}
@@ -623,12 +619,13 @@ func (w *world) vendorGetsShipment(status string) error {
 func (w *world) vendorPollNoLongerHasShipment() error {
 	s := w.sis()
 	q := url.Values{"vendorId": {s.vendorID}, "nodeId": {s.nodeID}}
-	if err := w.doJSON(http.MethodGet, vendorConnectivityBaseURL+"/vendor/inbound-shipments?"+q.Encode(), nil); err != nil {
+	polled, err := w.getItems(vendorConnectivityBaseURL + "/vendor/inbound-shipments?" + q.Encode())
+	if err != nil {
 		return err
 	}
-	for _, x := range anySlice(w.last.json()["inboundShipments"]) {
-		if m, ok := x.(map[string]any); ok && m["shipmentId"] == s.shipmentID {
-			return fmt.Errorf("received shipment %s is still in the poll: %s", s.shipmentID, w.last.body)
+	for _, m := range polled {
+		if m["shipmentId"] == s.shipmentID {
+			return fmt.Errorf("received shipment %s is still in the poll: %v", s.shipmentID, m)
 		}
 	}
 	return nil

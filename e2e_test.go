@@ -155,6 +155,9 @@ type world struct {
 	// exc is the exception-management correlation (the case under test in
 	// scenarios 2 and 3). See returns_test.go.
 	exc *exceptionsState
+
+	// pathListing is every item of the last process-paths listing (all pages), see listPaths.
+	pathListing []map[string]any
 }
 
 func newWorld() *world {
@@ -973,16 +976,9 @@ func (w *world) checkInStation(associateID, stationID string) error {
 func (w *world) fulfillmentEventuallyCreatesTaskFor(orderRef string) error {
 	orderRef = w.rs(orderRef)
 	return eventually(func() error {
-		if err := w.doJSON(http.MethodGet,
-			fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, orderRef), nil); err != nil {
+		tasks, err := w.getItems(fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, orderRef))
+		if err != nil {
 			return err
-		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("status %d (body=%s)", w.last.status, w.last.body)
-		}
-		var tasks []map[string]any
-		if err := json.Unmarshal(w.last.body, &tasks); err != nil {
-			return fmt.Errorf("decode tasks for %s: %w (body=%s)", orderRef, err, w.last.body)
 		}
 		if len(tasks) == 0 {
 			return fmt.Errorf("no task yet for orderRef %q", orderRef)
@@ -1751,7 +1747,9 @@ func (w *world) listPaths(all bool) error {
 	if all {
 		url += "?all=true"
 	}
-	return w.doJSON(http.MethodGet, url, nil)
+	items, err := w.getItems(url)
+	w.pathListing = items
+	return err
 }
 
 func (w *world) activeListingIncludes(pathID string) error {
@@ -1779,22 +1777,15 @@ func (w *world) fullListingIncludes(pathID string) error {
 }
 
 func (w *world) listingContains(pathID string, want bool) error {
-	if w.last.status != http.StatusOK {
-		return fmt.Errorf("GET process-paths: status %d (body=%s)", w.last.status, w.last.body)
-	}
-	var items []map[string]any
-	if err := json.Unmarshal(w.last.body, &items); err != nil {
-		return fmt.Errorf("decoding process-paths list: %w (body=%s)", err, w.last.body)
-	}
 	found := false
-	for _, item := range items {
+	for _, item := range w.pathListing {
 		if item["pathId"] == pathID {
 			found = true
 			break
 		}
 	}
 	if found != want {
-		return fmt.Errorf("process-paths listing contains %q = %v, want %v (full body: %s)", pathID, found, want, w.last.body)
+		return fmt.Errorf("process-paths listing contains %q = %v, want %v (all pages: %v)", pathID, found, want, w.pathListing)
 	}
 	return nil
 }

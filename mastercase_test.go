@@ -11,7 +11,6 @@ package main
 // services themselves.
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -569,16 +568,12 @@ func (w *world) reserveEaches(qty int, sku, demand string) error {
 
 func (w *world) onHandIs(sku, demand string, want int) error {
 	sku, demand = w.rs(sku), w.rs(demand)
-	if err := w.doJSON(http.MethodGet, inventoryBaseURL+"/reservations?demandRef="+url.QueryEscape(demand), nil); err != nil {
+	rs, err := w.getItems(inventoryBaseURL + "/reservations?demandRef=" + url.QueryEscape(demand))
+	if err != nil {
 		return err
 	}
-	var rs []any
-	if err := json.Unmarshal(w.last.body, &rs); err != nil {
-		return fmt.Errorf("reservations body %s: %w", w.last.body, err)
-	}
 	reserved := 0
-	for _, r := range rs {
-		rm := r.(map[string]any)
+	for _, rm := range rs {
 		if rm["status"] == "ACTIVE" {
 			q, _ := toFloat(rm["quantity"])
 			reserved += int(q)
@@ -611,15 +606,11 @@ func (w *world) exceptionCaseEventually(queue, kind, asn string, idx int) error 
 	subject := rid + "/" + sscc + "/" + kind
 	return eventually(func() error {
 		q := url.Values{"sourceType": {typeCartonDiscrepancyRaised}, "queue": {queue}, "status": {"OPEN"}}
-		if err := w.doJSON(http.MethodGet, exceptionsBaseURL+"/exceptions?"+q.Encode(), nil); err != nil {
+		cs, err := w.getItems(exceptionsBaseURL + "/exceptions?" + q.Encode())
+		if err != nil {
 			return err
 		}
-		var cs []any
-		if err := json.Unmarshal(w.last.body, &cs); err != nil {
-			return fmt.Errorf("exceptions body %s: %w", w.last.body, err)
-		}
-		for _, c := range cs {
-			cm := c.(map[string]any)
+		for _, cm := range cs {
 			dk, _ := cm["dedupKey"].(map[string]any)
 			if dk["sourceSubject"] != subject {
 				continue

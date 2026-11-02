@@ -42,7 +42,7 @@ running fleet; "curated" means chosen by hand for this study (and committed).
 |---|---|---|---|---|---|---|
 | WMS | facility-layout | the pilot sites, zones, aisles and storage locations (bins) | `POST /sites`, `/zones`, `/aisles`, `/locations/import` | `~/warehouse-systems/provisioning` (`run_all.sh`, see its README) | site code / location id | curated layouts |
 | WMS | product-master | the products (dimensions, weight, handling tags, classification) | `PUT /products/{sku}`, `PUT /products/{sku}/classification` | `scripts/08-seed-products.sh` (`make seed-products`) | SKU; idempotent PUTs | real (open product datasets, `fixtures/products/README.md`) |
-| WMS | inventory-storage | usable stock of the 81 storefront SKUs | `PUT /bins/{binId}`, `POST /stock/stow` | `scripts/09-seed-inventory.sh` (`make seed-inventory`) | bin; deterministic stow `Idempotency-Key` (bin, SKU, qty) | real products, planned quantities |
+| WMS | inventory-storage | usable stock of the 81 storefront SKUs | `PUT /bins/{binId}`, `POST /stowages` | `scripts/09-seed-inventory.sh` (`make seed-inventory`) | bin; deterministic stow `Idempotency-Key` (bin, SKU, qty) | real products, planned quantities |
 
 The preflight reads `GET /api/inventory-storage/inventory/<sku>/usable` for every storefront SKU and
 fails with the commands above when one has no usable stock. It never stocks anything: stocking is
@@ -166,7 +166,7 @@ fails for it and the preflight stops on its SKU. Check with
 `curl localhost:8000/api/inventory-storage/inventory/<sku>/usable`. Re-running
 `scripts/09-seed-inventory.sh` is not a restock: it is built to add nothing on a rerun (bins holding
 their plan are skipped, stow keys are deterministic). Restock deliberately: stow fresh units into a
-bin through inventory-storage (`POST /stock/stow` with a new `Idempotency-Key`) or receive them
+bin through inventory-storage (`POST /stowages` with a new `Idempotency-Key`) or receive them
 through inbound-receiving; the ACL feeds the new figure within its interval (5 min).
 
 ## Cluster rebuild

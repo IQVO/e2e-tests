@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -570,19 +569,7 @@ func (w *world) p5PathIs(id, prefix, caps, cycle, dest, attrs, intake string) er
 }
 
 func (w *world) p5ActivePaths() ([]map[string]any, error) {
-	if err := w.doJSON(http.MethodGet, processPathMgmtBaseURL+"/process-paths", nil); err != nil {
-		return nil, err
-	}
-	if w.last.status != http.StatusOK {
-		return nil, fmt.Errorf("GET /process-paths = %d (%s)", w.last.status, w.last.body)
-	}
-	var out []map[string]any
-	for _, x := range anySlice(jsonAny(w.last.body)) {
-		if m, ok := x.(map[string]any); ok {
-			out = append(out, m)
-		}
-	}
-	return out, nil
+	return w.getItems(processPathMgmtBaseURL + "/process-paths")
 }
 
 func (w *world) p5ListingHasCaseFlowBesideOthers() error {
@@ -718,12 +705,6 @@ func registerPhase5APathSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^the active paths taking intake "([^"]*)" include "([^"]*)" and "([^"]*)"$`, w.p5ByIntake)
 	sc.Step(`^defining path "([^"]*)" like (FULL_CASE|CROSS_DOCK) but with (destination role|cycleTimeP95|matchPrefix|intake) "([^"]*)" is refused with (\d+) problem "([^"]*)"$`, w.p5InvalidDefinition)
 	sc.Step(`^process path "([^"]*)" does not exist$`, w.p5PathAbsent)
-}
-
-func jsonAny(b []byte) any {
-	var v any
-	_ = json.Unmarshal(b, &v)
-	return v
 }
 
 // ---------------------------------------------------------------------

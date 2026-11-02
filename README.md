@@ -297,13 +297,13 @@ The day, hour by hour:
 | Sim time | Persona | APIs driven |
 |---|---|---|
 | 05:30 | control tower | facility-layout `POST /location-types` + `POST /location-imports` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}`; product-master `PUT /products/{sku}` (every SKU) + `PUT /products/{sku}/classification` (fragile SKUs; inventory-storage and the readers learn it from `warehouse.product-master.events`); process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule` (the sim's own site, `SIM1`); labor-performance `POST /standards` |
-| 05:30 | receiving | inventory-storage `POST /stock-receipts` + `POST /stowages` into registered bins (the ASN-driven path, inbound-receiving `POST /asns` → `/receipts` → `/receipts/{id}/lines` → `/close`, whose Good lines inventory-storage books as staged stock, is covered by `@inbound-receiving` and is not part of this simulated day) |
-| 06:00 | supervisor | workforce-management start-shift, `POST /shift-plans`, assignments; WES charge/plan; fulfillment station registration + check-in |
+| 05:30 | receiving | inventory-storage `POST /stock-receipts` + `POST /stowages` into registered bins (the ASN-driven path, inbound-receiving `POST /asns` → `/receipts` → `/receipts/{id}/lines` → `/receipts/{id}/closures`, whose Good lines inventory-storage books as staged stock, is covered by `@inbound-receiving` and is not part of this simulated day) |
+| 06:00 | supervisor | workforce-management `POST /associates/{id}/shift-starts`, `POST /shift-plans`, assignments; WES charge/plan; fulfillment station registration + `POST /stations/{id}/check-ins` |
 | 06:00-20:00 | customers | order-management `POST /orders` (`fulfillmentSiteId: SIM1`) on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
-| all day | pickers / flex | `claim-next PICK`, `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `confirm-pick`, complete, `POST /rebin/arrivals` |
-| all day | packers / SLAM | `claim-next PACK`, `seal-package`, `POST /packages/{id}/slam-runs` (weight mismatch injected), `GET /packages?orderRef=` -> LABELED / DIVERTED |
+| all day | pickers / flex | `POST /stations/{id}/task-claims` (PICK), `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `POST /reservations/{id}/pick-confirmations`, `POST /tasks/{id}/completions`, `POST /rebin/arrivals` |
+| all day | packers / SLAM | `POST /stations/{id}/task-claims` (PACK), `POST /tasks/{id}/package-seals`, `POST /packages/{id}/slam-runs` (weight mismatch injected), `GET /packages?orderRef=` -> LABELED / DIVERTED |
 | hourly | supervisor | WES telemetry + rebalance, queue depths, staffing gaps, flex reassignment, breaks (lunch 11:30-12:30) |
-| 10:00, 13:00 | inventory control | cycle counts (one deliberate shortage), replenishment + `retry-allocation` for backorders |
+| 10:00, 13:00 | inventory control | cycle counts (one deliberate shortage), replenishment + `POST /orders/{id}/allocation-retries` for backorders |
 | 22:00+ | auditor | per-order trace across order-management, WES, inventory, fulfillment, packages, labor scorecards and Kafka; inventory conservation; DLQ count |
 
 The run prints an end-of-day report (hourly snapshots, per-associate
@@ -452,7 +452,7 @@ FULFILLMENT_BASE_URL=$P/fulfillment-execution KAFKA_BROKERS=localhost:9092 GODOG
 Plus the seller-inbound variables above. Tags: `@e2e @phase5` plus the one in the table.
 
 | `NETWORK_INVENTORY_PLANNING_BASE_URL` | `NIP_BASE_URL` (`http://localhost:8099`) | proposals, approval, transfers |
-| `FULFILLMENT_BASE_URL` | `http://localhost:8084` | tasks, stations, seal-package, packages |
+| `FULFILLMENT_BASE_URL` | `http://localhost:8084` | tasks, stations, package-seals, packages |
 | `PRODUCT_MASTER_BASE_URL`, `FACILITY_BASE_URL` | as elsewhere | pack levels; site transfer capability |
 
 Both pack levels reach NIP and fulfillment-execution over Kafka into local views that have no REST
@@ -641,6 +641,28 @@ make provision-storefront-verify    # read-only verification
 - `NIP_TRANSFER_READ_MODE=rest` switches the transfer feature's state
   assertion from NIP's own table (default, `db`) to `GET /v1/transfers/{id}`
   once that endpoint is on NIP's develop.
+
+## Fleet REST API guideline (this harness is a pure consumer)
+
+Every provider follows the warehouse-docs REST guideline, and this repo follows it as a client:
+
+- **Routes name things, not actions.** Commands are transition nouns (`POST /orders/{id}/releases`,
+  `POST /stations/{id}/task-claims`, `POST /tasks/{id}/completions`) or collection-level job nouns
+  (`POST /stowages`, `POST /stock-receipts`, `POST /location-imports`, `POST /cpt-miss-sweeps`,
+  `POST /task-lease-expirations`). The old `:verb` / verb-segment routes no longer exist.
+- **Every POST and PATCH carries a fresh `Idempotency-Key`** (a retry of the same logical call reuses it).
+  The seeders derive a deterministic key per logical write; the Godog world, the soak driver and
+  `warehouse-day` mint a new random key per call. A `PUT` needs none.
+- **Replay and reuse.** A replayed answer carries `Idempotency-Replayed: true`; the same key with a
+  different request is `409` problem `idempotency-key-reused` (a client bug, never retried blindly).
+- **Lists are `{items, nextCursor}`.** One shared helper, `internal/paging` (`paging.All`, `paging.Decode`),
+  sends `limit` + `cursor` and follows `nextCursor` until it is absent; the Godog steps use
+  `world.getItems` and `warehouse-day` uses `listAll`. The retired `after` / `offset` parameters answer
+  `400 unknown-query-parameter`. Composite views (`/sites/{code}/layout`, the category tree) are not lists.
+
+The live-cluster suite can only pass once the whole REST cutover set is deployed together
+(warehouse-infra applies it as one set); until then only the unit tests (`make seed-tests`, `go test ./internal/...`)
+and the compile/vet/shell gates apply.
 
 ## Tests
 

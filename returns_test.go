@@ -133,16 +133,6 @@ func (w *world) exInit() *exceptionsState {
 	return w.exc
 }
 
-// jsonList decodes a bare JSON array of objects (GET /exceptions answers an
-// array, which w.last.json()'s map cannot hold).
-func jsonList(body []byte) ([]map[string]any, error) {
-	var list []map[string]any
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, fmt.Errorf("decode JSON array: %w (body: %s)", err, body)
-	}
-	return list, nil
-}
-
 // countKafkaEvents walks the WHOLE topic (the scanTopic throwaway-group
 // idiom) and counts CloudEvents of exactly fullType whose payload satisfies
 // pred. "Exactly N events" assertions need the count, not the first match.
@@ -591,14 +581,7 @@ func (w *world) exceptionsShowOneCase(workUnit string, occurrence int) error {
 	workUnit = w.rs(workUnit)
 	st.workUnit = workUnit
 	return eventually(func() error {
-		if err := w.doJSON(http.MethodGet,
-			fmt.Sprintf("%s/exceptions?sourceType=%s", exceptionsBaseURL, typeTaskCPTMissedFull), nil); err != nil {
-			return err
-		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("GET /exceptions: status %d, body=%s", w.last.status, w.last.body)
-		}
-		list, err := jsonList(w.last.body)
+		list, err := w.getItems(fmt.Sprintf("%s/exceptions?sourceType=%s", exceptionsBaseURL, typeTaskCPTMissedFull))
 		if err != nil {
 			return err
 		}

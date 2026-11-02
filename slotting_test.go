@@ -225,16 +225,12 @@ func (w *world) demandLinesAreStated(units []int, sku, site string) error {
 func (w *world) velocityEventually(picks, units int, sku, site string) error {
 	sku, site = w.rs(sku), w.rs(site)
 	return eventually(func() error {
-		q := url.Values{"siteId": {site}, "windowDays": {fmt.Sprint(slotLookbackDays)}, "limit": {"500"}}
-		if err := w.doJSON(http.MethodGet, slottingBaseURL+"/sku-velocity?"+q.Encode(), nil); err != nil {
+		q := url.Values{"siteId": {site}, "windowDays": {fmt.Sprint(slotLookbackDays)}}
+		items, err := w.getItems(slottingBaseURL + "/sku-velocity?" + q.Encode())
+		if err != nil {
 			return err
 		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("GET /sku-velocity: status %d (body: %s)", w.last.status, w.last.body)
-		}
-		items, _ := w.last.json()["items"].([]any)
-		for _, it := range items {
-			m, _ := it.(map[string]any)
+		for _, m := range items {
 			if m["sku"] != sku {
 				continue
 			}
