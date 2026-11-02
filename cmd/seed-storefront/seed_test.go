@@ -487,10 +487,10 @@ func TestFakeEnforcesTheContract(t *testing.T) {
 		slug            string
 	}{
 		{"no idempotency key", "/pricing/tax-tables", "", map[string]any{"version": 1, "bands": []TaxBand{{"786", "787", 825}}}, 400, "idempotency-key-required"},
-		{"key too long", "/pricing/tax-tables", strings.Repeat("k", 129), map[string]any{"version": 1, "bands": []TaxBand{{"786", "787", 825}}}, 400, "idempotency-key-required"},
+		{"key too long", "/pricing/tax-tables", strings.Repeat("k", 129), map[string]any{"version": 1, "bands": []TaxBand{{"786", "787", 825}}}, 400, "idempotency-key-invalid"},
 		{"tax v2", "/pricing/tax-tables", "t2", map[string]any{"version": 2, "bands": []TaxBand{{"786", "787", 825}}}, 201, ""},
 		{"tax v2 replayed", "/pricing/tax-tables", "t2", map[string]any{"version": 2, "bands": []TaxBand{{"786", "787", 825}}}, 201, ""},
-		{"same key, other body", "/pricing/tax-tables", "t2", map[string]any{"version": 9, "bands": []TaxBand{{"786", "787", 825}}}, 422, "idempotency-key-reuse"},
+		{"same key, other body", "/pricing/tax-tables", "t2", map[string]any{"version": 9, "bands": []TaxBand{{"786", "787", 825}}}, 409, "idempotency-key-reused"},
 		{"tax version not increasing", "/pricing/tax-tables", "t1", map[string]any{"version": 2, "bands": []TaxBand{{"786", "787", 825}}}, 409, "non-increasing-version"},
 		{"schedule missing a tier", "/pricing/delivery-charge-schedules", "s1", map[string]any{"version": 1, "tiers": tiers[:3]}, 422, "incomplete-charge-schedule"},
 		{"schedule in EUR", "/pricing/delivery-charge-schedules", "s2", map[string]any{"version": 1, "tiers": []TierCharge{{Tier: "SAME_DAY", Charge: Money{1, "EUR"}}}}, 422, "currency-mismatch"},
@@ -498,16 +498,16 @@ func TestFakeEnforcesTheContract(t *testing.T) {
 		{"price of a discontinued item", "/pricing/item-prices", "p2", map[string]any{"catalogItemId": gone, "listPrice": usd(100)}, 422, "unknown-catalog-item"},
 		{"price", "/pricing/item-prices", "p3", map[string]any{"catalogItemId": id, "listPrice": usd(100)}, 201, ""},
 		{"second price create", "/pricing/item-prices", "p4", map[string]any{"catalogItemId": id, "listPrice": usd(100)}, 409, "concurrent-update"},
-		{"stale price version", "/pricing/item-prices/" + id + ":set-list-price", "p5", map[string]any{"listPrice": usd(200), "version": 5}, 409, "concurrent-update"},
+		{"stale price version", "/pricing/item-prices/" + id + "/list-price", "p5", map[string]any{"listPrice": usd(200), "version": 5}, 409, "concurrent-update"},
 		{"unknown parent category", "/product-content/categories", "c1", map[string]any{"parentId": "cat-nope", "name": "X"}, 422, "unknown-category"},
 		{"category", "/product-content/categories", "c2", map[string]any{"name": "Home"}, 201, ""},
 		{"duplicate sibling", "/product-content/categories", "c3", map[string]any{"name": "home"}, 422, "duplicate-sibling-name"},
 		{"content with unknown category", "/product-content/product-contents", "pc1", map[string]any{"catalogItemId": id, "description": "d", "primaryCategoryId": "cat-nope"}, 422, "unknown-category"},
 		{"incomplete draft", "/product-content/product-contents", "pc2", map[string]any{"catalogItemId": id, "description": "d"}, 201, ""},
-		{"publish incomplete", "/product-content/product-contents/" + id + ":publish", "pc3", nil, 422, "incomplete-content"},
-		{"too many bullets", "/product-content/product-contents/" + id + ":revise", "pc4", map[string]any{"bullets": strings.Split("a b c d e f g h i j k", " ")}, 422, "too-many-bullets"},
-		{"complete revise", "/product-content/product-contents/" + id + ":revise", "pc5", map[string]any{"description": "d", "primaryCategoryId": "cat-0001", "media": []Media{{"m1", "http://h/x.svg", "alt", "PRIMARY"}}}, 200, ""},
-		{"publish", "/product-content/product-contents/" + id + ":publish", "pc6", nil, 200, ""},
+		{"publish incomplete", "/product-content/product-contents/" + id + "/publications", "pc3", nil, 422, "incomplete-content"},
+		{"too many bullets", "/product-content/product-contents/" + id + "/revisions", "pc4", map[string]any{"bullets": strings.Split("a b c d e f g h i j k", " ")}, 422, "too-many-bullets"},
+		{"complete revise", "/product-content/product-contents/" + id + "/revisions", "pc5", map[string]any{"description": "d", "primaryCategoryId": "cat-0001", "media": []Media{{"m1", "http://h/x.svg", "alt", "PRIMARY"}}}, 200, ""},
+		{"publish", "/product-content/product-contents/" + id + "/publications", "pc6", nil, 200, ""},
 	}
 	for _, s := range steps {
 		status, body := post(t, api+s.path, s.key, s.body)
@@ -516,11 +516,11 @@ func TestFakeEnforcesTheContract(t *testing.T) {
 		}
 	}
 	f.contents[id].State = "RETIRED"
-	if status, body := post(t, api+"/product-content/product-contents/"+id+":revise", "pc7", map[string]any{"description": "e"}); status != 409 || !strings.Contains(body, "content-retired") {
+	if status, body := post(t, api+"/product-content/product-contents/"+id+"/revisions", "pc7", map[string]any{"description": "e"}); status != 409 || !strings.Contains(body, "content-retired") {
 		t.Fatalf("revise RETIRED: %d %s", status, body)
 	}
 	f.prices[id].State = "WITHDRAWN"
-	if status, body := post(t, api+"/pricing/item-prices/"+id+":set-list-price", "p6", map[string]any{"listPrice": usd(300)}); status != 409 || !strings.Contains(body, "illegal-transition") {
+	if status, body := post(t, api+"/pricing/item-prices/"+id+"/list-price", "p6", map[string]any{"listPrice": usd(300)}); status != 409 || !strings.Contains(body, "illegal-transition") {
 		t.Fatalf("set price of WITHDRAWN: %d %s", status, body)
 	}
 

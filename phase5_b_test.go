@@ -256,7 +256,7 @@ func registerPhase5BSteps(sc *godog.ScenarioContext, w *world) {
 		created, _ := w.last.json()["id"].(string)
 		err := eventually(func() error {
 			if err := w.expectOK2xx(w.doJSON(http.MethodPost,
-				fmt.Sprintf("%s/stations/%s/claim-next", fulfillmentBaseURL, st.station), map[string]any{"taskType": "PACK"})); err != nil {
+				fmt.Sprintf("%s/stations/%s/task-claims", fulfillmentBaseURL, st.station), map[string]any{"taskType": "PACK"})); err != nil {
 				return err
 			}
 			if got := w.last.json(); got["orderRef"] != order {
@@ -278,7 +278,7 @@ func registerPhase5BSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^the station seals SKU "([^"]*)" in fulfillment-execution as an ordinary carton$`,
 		func(sku string) error { return st.seal(w, sku, false, 0) })
 	sc.Step(`^the station seals SKU "([^"]*)" in fulfillment-execution in its own container without a line quantity$`, func(sku string) error {
-		return w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/seal-package", fulfillmentBaseURL, st.taskID),
+		return w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/package-seals", fulfillmentBaseURL, st.taskID),
 			map[string]any{"stationId": st.station, "contents": []string{w.rs(sku)}, "shipInOwnContainer": true})
 	})
 	sc.Step(`^fulfillment-execution eventually knows the CASE level of SKU "([^"]*)"$`, func(sku string) error {
@@ -381,7 +381,7 @@ func (st *p5State) declare(w *world, sku string, perCase int, caseDims *p5Dims) 
 	return nil
 }
 
-// generate calls POST /v1/transfer-proposals:generate over an explicit snapshot
+// generate calls POST /v1/transfer-proposal-runs over an explicit snapshot
 // of one lane origin -> destination: the destination has 0 stock and a target
 // of `deficit` (so its deficit is exactly that), the origin has `supply`
 // available and no safety stock. The proposal for the SKU, if any, goes to st.prop.
@@ -402,7 +402,7 @@ func (st *p5State) generate(w *world, sku string, deficit, supply int) error {
 		"lanes": []any{map[string]any{"Origin": origin, "Destination": dest,
 			"LeadTime": int64(24 * time.Hour), "UnitHandlingCost": 1, "Enabled": true}},
 	}
-	if err := w.doJSON(http.MethodPost, p5NipBase+"/v1/transfer-proposals:generate", body); err != nil {
+	if err := w.doJSON(http.MethodPost, p5NipBase+"/v1/transfer-proposal-runs", body); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK {
@@ -478,7 +478,7 @@ func (st *p5State) seal(w *world, sku string, ownContainer bool, lineQty int) er
 		body["shipInOwnContainer"] = true
 		body["lineQuantity"] = lineQty
 	}
-	return w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/seal-package", fulfillmentBaseURL, st.taskID), body)
+	return w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/package-seals", fulfillmentBaseURL, st.taskID), body)
 }
 
 func (st *p5State) packageIsOwnContainer(got map[string]any, sku string, l, wd, h, g int, raw any) error {
@@ -500,14 +500,14 @@ func (st *p5State) packageIsOwnContainer(got map[string]any, sku string, l, wd, 
 	return nil
 }
 
-// postApprove POSTs /v1/transfers:approve with an explicit Idempotency-Key (doJSON
+// postApprove POSTs /v1/transfer-approvals with an explicit Idempotency-Key (doJSON
 // mints a fresh key per call, which cannot express a replay).
 func (st *p5State) postApprove(w *world, key string, body map[string]any) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, p5NipBase+"/v1/transfers:approve", bytes.NewReader(b))
+	req, err := http.NewRequest(http.MethodPost, p5NipBase+"/v1/transfer-approvals", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}

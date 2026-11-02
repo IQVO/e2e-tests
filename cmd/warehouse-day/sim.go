@@ -293,16 +293,13 @@ func capabilityOf(pathID string) string {
 }
 
 func (s *sim) ensureProcessPaths(ctx context.Context) error {
-	var existing []struct {
+	type pathRow struct {
 		PathID string `json:"pathId"`
 		Status string `json:"status"`
 	}
-	r := s.api.call(ctx, svcProcessPath, http.MethodGet, "/process-paths", "/process-paths", nil)
+	existing, r := listAll[pathRow](ctx, s.api, svcProcessPath, "/process-paths", "/process-paths")
 	if !r.ok() {
 		return fail("GET /process-paths -> %d %s", r.status, truncate(string(r.body), 200))
-	}
-	if err := r.decode(&existing); err != nil {
-		return err
 	}
 	have := map[string]bool{}
 	for _, p := range existing {
@@ -433,9 +430,9 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 			"activities": []string{"Pack"},
 		})
 	}
-	r := s.api.call(ctx, svcFacility, http.MethodPost, "/locations/import", "/locations/import", rows)
+	r := s.api.call(ctx, svcFacility, http.MethodPost, "/location-imports", "/location-imports", rows)
 	if !r.ok() {
-		return fail("POST /locations/import -> %d %s", r.status, truncate(string(r.body), 300))
+		return fail("POST /location-imports -> %d %s", r.status, truncate(string(r.body), 300))
 	}
 	var rep struct {
 		RowsSubmitted, SlotsImported, RowsRejected int
@@ -485,7 +482,7 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 
 func (s *sim) receiveAndStow(ctx context.Context, who string, sd skuDef, qty int, bins []string) error {
 	sku := s.sku(sd.key)
-	r := s.api.call(ctx, svcInventory, http.MethodPost, "/stock/receive", "/stock/receive", map[string]any{"sku": sku, "quantity": qty})
+	r := s.api.call(ctx, svcInventory, http.MethodPost, "/stock-receipts", "/stock-receipts", map[string]any{"sku": sku, "quantity": qty})
 	if !r.ok() {
 		return fail("receive %d %s -> %d %s", qty, sku, r.status, truncate(string(r.body), 200))
 	}
@@ -497,7 +494,7 @@ func (s *sim) receiveAndStow(ctx context.Context, who string, sd skuDef, qty int
 			chunk = left
 		}
 		bin := bins[(start+i)%len(bins)]
-		r := s.api.call(ctx, svcInventory, http.MethodPost, "/stock/stow", "/stock/stow", map[string]any{"sku": sku, "quantity": chunk, "binId": bin})
+		r := s.api.call(ctx, svcInventory, http.MethodPost, "/stowages", "/stowages", map[string]any{"sku": sku, "quantity": chunk, "binId": bin})
 		switch {
 		case r.ok():
 			left -= chunk
@@ -583,7 +580,7 @@ func (s *sim) planTheDay(ctx context.Context) error {
 	if !r.ok() {
 		return fail("POST /paths/PICK/charge -> %d %s", r.status, truncate(string(r.body), 200))
 	}
-	pr := s.api.call(ctx, svcWorkforce, http.MethodPost, "/paths/{pathId}/plan/propose", "/paths/PICK/plan/propose",
+	pr := s.api.call(ctx, svcWorkforce, http.MethodPost, "/paths/{pathId}/plan-proposals", "/paths/PICK/plan-proposals",
 		map[string]any{"buildingId": s.cfg.buildingID, "charge": float64(units), "plannedRate": 60.0})
 	logf("planner", "forecast %d units across %d trucks; workforce proposal -> %d %s", units, len(buckets), pr.status, truncate(strings.TrimSpace(string(pr.body)), 160))
 
@@ -840,7 +837,7 @@ func (s *sim) customerService(ctx context.Context, wg *sync.WaitGroup) {
 		for _, o := range due {
 			done[o] = true
 			if o.kind == kindHeldRelease {
-				r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders/{id}/release", "/orders/"+o.id+"/release", nil)
+				r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders/{id}/releases", "/orders/"+o.id+"/releases", nil)
 				logf("cust-service", "held order #%03d confirmed by customer -> release %d", o.seq, r.status)
 				if !r.ok() {
 					s.finding("releasing held order %s -> %d %s", o.id, r.status, truncate(string(r.body), 200))

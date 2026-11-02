@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -182,14 +181,13 @@ func (w *world) vendorNodeReady(vendor, code string, maxWeightG int) error {
 		return fmt.Errorf("onboard vendor: %w", err)
 	}
 	// regionId is the node-topology region id (not its code): read it from the region list.
-	if err := w.doJSON(http.MethodGet, nodeTopologyBaseURL+"/regions", nil); err != nil {
+	regions, err := w.getItems(nodeTopologyBaseURL + "/regions")
+	if err != nil {
 		return err
 	}
-	var regions []any
-	_ = json.Unmarshal(w.last.body, &regions)
 	regionID := ""
-	for _, r := range regions {
-		if m, ok := r.(map[string]any); ok && regionID == "" {
+	for _, m := range regions {
+		if regionID == "" {
 			regionID, _ = m["regionId"].(string)
 			if m["code"] == siRegionCode {
 				regionID, _ = m["regionId"].(string)
@@ -229,7 +227,7 @@ func (w *world) vendorNodeReady(vendor, code string, maxWeightG int) error {
 	})); err != nil {
 		return fmt.Errorf("declare operational profile: %w", err)
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/nodes/%s:activate", nodeTopologyBaseURL, s.nodeID), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/nodes/%s/activations", nodeTopologyBaseURL, s.nodeID), nil)); err != nil {
 		return fmt.Errorf("activate node: %w", err)
 	}
 	n := w.last.json()
@@ -315,7 +313,7 @@ func (w *world) planDraftEventually(packing string, qty int) error {
 
 func (w *world) planConfirmed() error {
 	s := w.sis()
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s:confirm", sellerInboundBaseURL, s.planID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s/confirmations", sellerInboundBaseURL, s.planID), nil); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK || w.last.json()["state"] != "CONFIRMED" {
@@ -326,14 +324,14 @@ func (w *world) planConfirmed() error {
 
 func (w *world) planConfirmRefused(slug string) error {
 	s := w.sis()
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s:confirm", sellerInboundBaseURL, s.planID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-plans/%s/confirmations", sellerInboundBaseURL, s.planID), nil); err != nil {
 		return err
 	}
 	return w.siExpectProblem(http.StatusConflict, slug)
 }
 
 func (w *world) sellerSuspended() error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/sellers/%s:suspend", sellerInboundBaseURL, w.sis().sellerID),
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/sellers/%s/suspensions", sellerInboundBaseURL, w.sis().sellerID),
 		map[string]any{"reason": "e2e: repeated label violations"}); err != nil {
 		return err
 	}
@@ -467,7 +465,7 @@ func (w *world) shipmentState(want string) (map[string]any, error) {
 }
 
 func (w *world) shipRefused(slug string) error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s:ship", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s/dispatches", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
 		return err
 	}
 	if err := w.siExpectProblem(http.StatusConflict, slug); err != nil {
@@ -478,7 +476,7 @@ func (w *world) shipRefused(slug string) error {
 }
 
 func (w *world) shipmentLabelled() error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s:label", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s/labels", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK || w.last.json()["state"] != "LABELLED" {
@@ -516,7 +514,7 @@ func (w *world) labelsOK(n, eaches int) error {
 }
 
 func (w *world) shipmentShipped() error {
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s:ship", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/inbound-shipments/%s/dispatches", sellerInboundBaseURL, w.sis().shipmentID), nil); err != nil {
 		return err
 	}
 	if w.last.status != http.StatusOK || w.last.json()["state"] != "SHIPPED" || w.last.json()["shippedAt"] == nil {
@@ -555,15 +553,13 @@ func (w *world) vendorPollsTree(eaches int) error {
 	s := w.sis()
 	q := url.Values{"vendorId": {s.vendorID}, "nodeId": {s.nodeID}}
 	return siEventually(func() error {
-		if err := w.doJSON(http.MethodGet, vendorConnectivityBaseURL+"/vendor/inbound-shipments?"+q.Encode(), nil); err != nil {
-			return err
-		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("poll = %d (%s)", w.last.status, w.last.body)
+		polled, err := w.getItems(vendorConnectivityBaseURL + "/vendor/inbound-shipments?" + q.Encode())
+		if err != nil {
+			return fmt.Errorf("poll: %w", err)
 		}
 		var sh map[string]any
-		for _, x := range anySlice(w.last.json()["inboundShipments"]) {
-			if m, ok := x.(map[string]any); ok && m["shipmentId"] == s.shipmentID {
+		for _, m := range polled {
+			if m["shipmentId"] == s.shipmentID {
 				sh = m
 			}
 		}
@@ -623,12 +619,13 @@ func (w *world) vendorGetsShipment(status string) error {
 func (w *world) vendorPollNoLongerHasShipment() error {
 	s := w.sis()
 	q := url.Values{"vendorId": {s.vendorID}, "nodeId": {s.nodeID}}
-	if err := w.doJSON(http.MethodGet, vendorConnectivityBaseURL+"/vendor/inbound-shipments?"+q.Encode(), nil); err != nil {
+	polled, err := w.getItems(vendorConnectivityBaseURL + "/vendor/inbound-shipments?" + q.Encode())
+	if err != nil {
 		return err
 	}
-	for _, x := range anySlice(w.last.json()["inboundShipments"]) {
-		if m, ok := x.(map[string]any); ok && m["shipmentId"] == s.shipmentID {
-			return fmt.Errorf("received shipment %s is still in the poll: %s", s.shipmentID, w.last.body)
+	for _, m := range polled {
+		if m["shipmentId"] == s.shipmentID {
+			return fmt.Errorf("received shipment %s is still in the poll: %v", s.shipmentID, m)
 		}
 	}
 	return nil

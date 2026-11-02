@@ -36,7 +36,7 @@ Feature: Inter-warehouse transfer saga across real services
 
   Not covered, and why: a SHORT pick (picked quantity below the allocated
   quantity). fulfillment-execution's completion contract carries no picked
-  quantity (POST /tasks/{id}/complete takes only a stationId; the fact's
+  quantity (POST /tasks/{id}/completions takes only a stationId; the fact's
   quantity is the released quantity), so no real service can produce one
   today. NIP's own short-pick handling (ADR 0005) is proven in its repo.
 

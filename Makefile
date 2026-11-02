@@ -115,7 +115,7 @@ provision-storefront-verify:
 # Offline tests of the seeders (contract fakes; no cluster) and of warehouse-day's site guard
 # and order body (httptest fakes), as in CI's seed-products-tests job.
 seed-tests:
-	$(GO) test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/... ./cmd/warehouse-day/...
+	$(GO) test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/... ./cmd/warehouse-day/... ./internal/...
 
 down:
 	bash scripts/05-down-services.sh

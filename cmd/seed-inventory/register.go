@@ -15,7 +15,7 @@ import (
 )
 
 // invClient drives inventory-storage's PUBLISHED REST contract only (apis/openapi.yaml):
-// PUT /bins/{binId} (declarative, idempotent), GET /bins/{binId} and POST /stock/stow.
+// PUT /bins/{binId} (declarative, idempotent), GET /bins/{binId} and POST /stowages.
 type invClient struct {
 	base string
 	http *http.Client
@@ -142,7 +142,7 @@ func (c *invClient) stockBin(ctx context.Context, bp *BinPlan, rep *stockReport)
 			key = key[:255]
 		}
 		body := map[string]any{"sku": l.SKU, "quantity": l.Qty, "binId": id}
-		if _, err := c.do(ctx, http.MethodPost, "/stock/stow", body, key, nil, http.StatusCreated, http.StatusOK); err != nil {
+		if _, err := c.do(ctx, http.MethodPost, "/stowages", body, key, nil, http.StatusCreated, http.StatusOK); err != nil {
 			rep.fail("stow %d x %s into %s: %v", l.Qty, l.SKU, id, err)
 			return
 		}

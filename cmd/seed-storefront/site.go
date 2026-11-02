@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/claudioed/warehouse-e2e/internal/paging"
 )
 
 // The WMS step: the CPT (critical pull time) schedule of the fulfilment site in
@@ -300,13 +302,14 @@ func runWMSOnly(ctx context.Context, c *client, cfg Config, skus []string, site 
 }
 
 // readActivePaths lists process-path-management's Active process paths (GET /process-paths
-// returns only Active paths by default, as a bare array).
+// returns only Active paths by default, paged as {items,nextCursor}).
 func readActivePaths(ctx context.Context, c *client) (map[string]bool, error) {
-	var paths []struct {
+	type pathRow struct {
 		PathID string `json:"pathId"`
 		Status string `json:"status"`
 	}
-	if err := c.get(ctx, c.ppm()+"/process-paths", &paths); err != nil {
+	paths, err := paging.All[pathRow](ctx, c.get, c.ppm()+"/process-paths")
+	if err != nil {
 		return nil, err
 	}
 	out := map[string]bool{}
@@ -410,15 +413,12 @@ func verifyOffers(ctx context.Context, c *client, siteID string, skus []string, 
 	}
 	start := time.Now()
 	for {
-		var page struct {
-			CapabilityOffers []CapabilityOffer `json:"capabilityOffers"`
-		}
-		err := c.get(ctx, c.base+"/network-fulfillment/capability-offers", &page)
+		offers, err := paging.All[CapabilityOffer](ctx, c.get, c.base+"/network-fulfillment/capability-offers")
 		r.Err = err
 		settled := false
 		if err == nil {
 			by := map[string]CapabilityOffer{}
-			for _, o := range page.CapabilityOffers {
+			for _, o := range offers {
 				if o.SiteID == siteID {
 					by[o.SKU] = o
 				}

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/claudioed/warehouse-e2e/internal/paging"
 )
 
 // pmClient drives product-master's PUBLISHED REST contract only
@@ -182,45 +184,35 @@ type listedProduct struct {
 	} `json:"physicalProfile"`
 }
 
-// listAll pages through GET /products (max page size 500).
-func (c *pmClient) listAll(ctx context.Context) (map[string]listedProduct, error) {
-	out := map[string]listedProduct{}
-	cursor := ""
-	for {
-		u := c.base + "/products?limit=500"
-		if cursor != "" {
-			u += "&cursor=" + url.QueryEscape(cursor)
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := c.http.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		var page struct {
-			Items      []listedProduct `json:"items"`
-			NextCursor string          `json:"nextCursor"`
-		}
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-			_ = resp.Body.Close()
-			return nil, &apiError{Status: resp.StatusCode, Body: string(b)}
-		}
-		err = json.NewDecoder(resp.Body).Decode(&page)
-		_ = resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		for _, it := range page.Items {
-			out[it.SKU] = it
-		}
-		if page.NextCursor == "" {
-			return out, nil
-		}
-		cursor = page.NextCursor
+// getJSON GETs rawURL (relative to the product-master base) and decodes a 200 into out.
+func (c *pmClient) getJSON(ctx context.Context, rawURL string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+rawURL, nil)
+	if err != nil {
+		return err
 	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return &apiError{Status: resp.StatusCode, Body: string(b)}
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// listAll pages through GET /products, following nextCursor until it is absent.
+func (c *pmClient) listAll(ctx context.Context) (map[string]listedProduct, error) {
+	items, err := paging.All[listedProduct](ctx, c.getJSON, "/products")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]listedProduct, len(items))
+	for _, it := range items {
+		out[it.SKU] = it
+	}
+	return out, nil
 }
 
 // verify reads the catalogue back over the API and checks every fixture

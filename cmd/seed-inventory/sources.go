@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/claudioed/warehouse-e2e/internal/paging"
 )
 
 // reader fetches JSON over a service's published REST contract. GETs are retried
@@ -65,62 +67,50 @@ func (e *apiError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, 
 // grocery (a GTIN SKU without dimensions, as Open Food Facts records none). Registered products
 // that are neither (legacy test SKUs with an empty description) are returned as skipped.
 func loadProducts(ctx context.Context, r *reader) (stockable []Product, skipped []string, err error) {
-	cursor := ""
-	for {
-		path := "/products?limit=500"
-		if cursor != "" {
-			path += "&cursor=" + url.QueryEscape(cursor)
-		}
-		var page struct {
-			Items []struct {
-				SKU            string `json:"sku"`
-				Description    string `json:"description"`
-				Classification *struct {
-					HandlingTags     []string `json:"handlingTags"`
-					TemperatureClass string   `json:"temperatureClass"`
-					DotHazardClass   *int     `json:"dotHazardClass"`
-				} `json:"classification"`
-				PhysicalProfile struct {
-					Effective *struct {
-						LengthMm int64 `json:"lengthMm"`
-						WidthMm  int64 `json:"widthMm"`
-						HeightMm int64 `json:"heightMm"`
-						WeightG  int64 `json:"weightG"`
-					} `json:"effective"`
-				} `json:"physicalProfile"`
-			} `json:"items"`
-			NextCursor string `json:"nextCursor"`
-		}
-		if err := r.getJSON(ctx, path, &page); err != nil {
-			return nil, nil, fmt.Errorf("product-master GET /products: %w", err)
-		}
-		for _, it := range page.Items {
-			p := Product{SKU: it.SKU, Description: it.Description}
-			if c := it.Classification; c != nil {
-				p.Tags, p.Temp = c.HandlingTags, c.TemperatureClass
-				if c.DotHazardClass != nil {
-					p.DotClass = *c.DotHazardClass
-				}
-			}
-			if e := it.PhysicalProfile.Effective; e != nil && e.LengthMm > 0 {
-				p.HasDims = true
-				p.VolumeL = float64(e.LengthMm) * float64(e.WidthMm) * float64(e.HeightMm) / 1e6
-				p.WeightG = e.WeightG
-			}
-			switch {
-			case p.HasDims:
-				stockable = append(stockable, p)
-			case it.Description != "" && allDigits(it.SKU):
-				stockable = append(stockable, p)
-			default:
-				skipped = append(skipped, it.SKU)
-			}
-		}
-		if page.NextCursor == "" {
-			return stockable, skipped, nil
-		}
-		cursor = page.NextCursor
+	type item struct {
+		SKU            string `json:"sku"`
+		Description    string `json:"description"`
+		Classification *struct {
+			HandlingTags     []string `json:"handlingTags"`
+			TemperatureClass string   `json:"temperatureClass"`
+			DotHazardClass   *int     `json:"dotHazardClass"`
+		} `json:"classification"`
+		PhysicalProfile struct {
+			Effective *struct {
+				LengthMm int64 `json:"lengthMm"`
+				WidthMm  int64 `json:"widthMm"`
+				HeightMm int64 `json:"heightMm"`
+				WeightG  int64 `json:"weightG"`
+			} `json:"effective"`
+		} `json:"physicalProfile"`
 	}
+	items, err := paging.All[item](ctx, r.getJSON, "/products")
+	if err != nil {
+		return nil, nil, fmt.Errorf("product-master GET /products: %w", err)
+	}
+	for _, it := range items {
+		p := Product{SKU: it.SKU, Description: it.Description}
+		if c := it.Classification; c != nil {
+			p.Tags, p.Temp = c.HandlingTags, c.TemperatureClass
+			if c.DotHazardClass != nil {
+				p.DotClass = *c.DotHazardClass
+			}
+		}
+		if e := it.PhysicalProfile.Effective; e != nil && e.LengthMm > 0 {
+			p.HasDims = true
+			p.VolumeL = float64(e.LengthMm) * float64(e.WidthMm) * float64(e.HeightMm) / 1e6
+			p.WeightG = e.WeightG
+		}
+		switch {
+		case p.HasDims:
+			stockable = append(stockable, p)
+		case it.Description != "" && allDigits(it.SKU):
+			stockable = append(stockable, p)
+		default:
+			skipped = append(skipped, it.SKU)
+		}
+	}
+	return stockable, skipped, nil
 }
 
 func allDigits(s string) bool {
@@ -139,12 +129,13 @@ func allDigits(s string) bool {
 // its zone's temperature class and hazmat rating and its volume and weight limits. Amnesty slots
 // (exceptions) are not stock locations and are left out.
 func loadSites(ctx context.Context, r *reader, codes []string) ([]Site, error) {
-	var all []struct {
+	type siteRow struct {
 		SiteCode string `json:"siteCode"`
 		Role     string `json:"siteRole"`
 		Status   string `json:"status"`
 	}
-	if err := r.getJSON(ctx, "/sites", &all); err != nil {
+	all, err := paging.All[siteRow](ctx, r.getJSON, "/sites")
+	if err != nil {
 		return nil, fmt.Errorf("facility-layout GET /sites: %w", err)
 	}
 	roles := map[string]string{}
@@ -159,21 +150,22 @@ func loadSites(ctx context.Context, r *reader, codes []string) ([]Site, error) {
 		if !ok {
 			return nil, fmt.Errorf("site %s is not an Active site in facility-layout", code)
 		}
-		var zones []struct {
+		type zoneRow struct {
 			ZoneID   string `json:"zoneId"`
 			ZoneCode string `json:"zoneCode"`
 			Temp     string `json:"temperatureClass"`
 			Hazmat   bool   `json:"hazmat"`
 			Status   string `json:"status"`
 		}
-		if err := r.getJSON(ctx, "/sites/"+url.PathEscape(code)+"/zones", &zones); err != nil {
+		zones, err := paging.All[zoneRow](ctx, r.getJSON, "/sites/"+url.PathEscape(code)+"/zones")
+		if err != nil {
 			return nil, fmt.Errorf("facility-layout zones of %s: %w", code, err)
 		}
 		zone := map[string]int{}
 		for i, z := range zones {
 			zone[z.ZoneID] = i
 		}
-		var locs []struct {
+		type locRow struct {
 			Code     string `json:"locationCode"`
 			ZoneID   string `json:"zoneId"`
 			Status   string `json:"status"`
@@ -182,7 +174,8 @@ func loadSites(ctx context.Context, r *reader, codes []string) ([]Site, error) {
 				MaxVolumeM3 float64 `json:"maxVolumeM3"`
 			} `json:"capacity"`
 		}
-		if err := r.getJSON(ctx, "/sites/"+url.PathEscape(code)+"/locations?role=Storage", &locs); err != nil {
+		locs, err := paging.All[locRow](ctx, r.getJSON, "/sites/"+url.PathEscape(code)+"/locations?role=Storage")
+		if err != nil {
 			return nil, fmt.Errorf("facility-layout storage locations of %s: %w", code, err)
 		}
 		s := Site{Code: code, Role: role}

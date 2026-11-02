@@ -23,7 +23,7 @@ import (
 //
 //   - every POST to a context needs an Idempotency-Key of 1..128 characters (400
 //     idempotency-key-required); a repeated key replays the stored answer; the same key with a
-//     different request is 422;
+//     different request is 409 idempotency-key-reused;
 //   - pricing: one configured currency (422 currency-mismatch), tax table and charge schedule
 //     versions strictly increase (409 non-increasing-version), a schedule names every tier (422
 //     incomplete-charge-schedule), a price needs a known, non-discontinued item, a WITHDRAWN price
@@ -152,12 +152,12 @@ func (f *fakeCluster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer f.mu.Unlock()
 		f.read(w, r, strings.TrimPrefix(p, "/api"))
 		return
-	case r.Method == http.MethodPut:
+	case r.Method == http.MethodPut && !strings.HasSuffix(p, "/list-price"):
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.putCPT(w, r, strings.TrimPrefix(p, "/api"))
 		return
-	case r.Method != http.MethodPost:
+	case r.Method != http.MethodPost && r.Method != http.MethodPut:
 		problem(w, http.StatusMethodNotAllowed, "method-not-allowed")
 		return
 	}
@@ -167,18 +167,24 @@ func (f *fakeCluster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := r.Header.Get("Idempotency-Key")
 	f.mu.Lock()
 	f.posts++
-	if key == "" || len(key) > 128 {
+	isPut := r.Method == http.MethodPut // PUT /list-price: idempotent by method, no key, no replay store
+	if !isPut && (key == "" || len(key) > 128) {
 		f.mu.Unlock()
-		problem(w, http.StatusBadRequest, "idempotency-key-required")
+		if key == "" {
+			problem(w, http.StatusBadRequest, "idempotency-key-required")
+		} else {
+			problem(w, http.StatusBadRequest, "idempotency-key-invalid")
+		}
 		return
 	}
 	fp := r.Method + " " + p + " " + string(body)
-	if st, ok := f.idem[key]; ok {
+	if st, ok := f.idem[key]; ok && !isPut {
 		f.mu.Unlock()
 		if st.fingerprint != fp {
-			problem(w, http.StatusUnprocessableEntity, "idempotency-key-reuse")
+			problem(w, http.StatusConflict, "idempotency-key-reused")
 			return
 		}
+		w.Header().Set("Idempotency-Replayed", "true")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(st.status)
 		_, _ = w.Write(st.body)
@@ -189,7 +195,9 @@ func (f *fakeCluster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	changed := rec.Code < 300
 	n := 0
 	if changed {
-		f.idem[key] = fakeStored{fingerprint: fp, status: rec.Code, body: rec.Body.Bytes()}
+		if !isPut {
+			f.idem[key] = fakeStored{fingerprint: fp, status: rec.Code, body: rec.Body.Bytes()}
+		}
 		f.mutations++
 		f.byKind[kind]++
 		n = f.byKind[kind]
@@ -266,11 +274,17 @@ func (f *fakeCluster) read(w http.ResponseWriter, r *http.Request, p string) {
 }
 
 func (f *fakeCluster) catalog(w http.ResponseWriter, r *http.Request) {
+	for k := range r.URL.Query() { // the guideline: only limit and cursor, a retired parameter fails loudly
+		if k != "limit" && k != "cursor" {
+			problem(w, http.StatusBadRequest, "unknown-query-parameter")
+			return
+		}
+	}
 	limit := 50
 	if s := r.URL.Query().Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 1 || n > 500 {
-			problem(w, http.StatusUnprocessableEntity, "validation-failed")
+			problem(w, http.StatusBadRequest, "invalid-limit")
 			return
 		}
 		limit = n
@@ -278,7 +292,7 @@ func (f *fakeCluster) catalog(w http.ResponseWriter, r *http.Request) {
 	if limit > f.pageCap {
 		limit = f.pageCap
 	}
-	after := r.URL.Query().Get("after")
+	after := r.URL.Query().Get("cursor")
 	ids := make([]string, 0, len(f.items))
 	for id := range f.items {
 		if id > after {
@@ -379,13 +393,13 @@ func (f *fakeCluster) bff(w http.ResponseWriter, r *http.Request, p string) {
 			}
 			hits = append(hits, v)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
-	case r.Method == http.MethodPost && strings.HasSuffix(p, ":delivery-dates"):
+		writeJSON(w, http.StatusOK, map[string]any{"items": hits})
+	case r.Method == http.MethodPost && strings.HasSuffix(p, "/delivery-date-quotes"):
 		var req struct {
 			PostalPrefix string `json:"postalPrefix"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if f.items[strings.TrimSuffix(strings.TrimPrefix(p, "/products/"), ":delivery-dates")] == nil {
+		if f.items[strings.TrimSuffix(strings.TrimPrefix(p, "/products/"), "/delivery-date-quotes")] == nil {
 			problem(w, http.StatusNotFound, "not-found")
 			return
 		}
@@ -476,8 +490,8 @@ func (f *fakeCluster) command(w http.ResponseWriter, p string, body []byte) (kin
 		}
 		return "item-price", in.CatalogItemID
 
-	case strings.HasPrefix(p, "/pricing/item-prices/") && strings.HasSuffix(p, ":set-list-price"):
-		id := strings.TrimSuffix(strings.TrimPrefix(p, "/pricing/item-prices/"), ":set-list-price")
+	case strings.HasPrefix(p, "/pricing/item-prices/") && strings.HasSuffix(p, "/list-price"):
+		id := strings.TrimSuffix(strings.TrimPrefix(p, "/pricing/item-prices/"), "/list-price")
 		var in struct {
 			ListPrice Money `json:"listPrice"`
 			Version   int   `json:"version"`
@@ -564,8 +578,8 @@ func (f *fakeCluster) command(w http.ResponseWriter, p string, body []byte) (kin
 		}
 		return "content-create", in.CatalogItemID
 
-	case strings.HasPrefix(p, "/product-content/product-contents/") && strings.HasSuffix(p, ":revise"):
-		id := strings.TrimSuffix(strings.TrimPrefix(p, "/product-content/product-contents/"), ":revise")
+	case strings.HasPrefix(p, "/product-content/product-contents/") && strings.HasSuffix(p, "/revisions"):
+		id := strings.TrimSuffix(strings.TrimPrefix(p, "/product-content/product-contents/"), "/revisions")
 		var in ContentBody
 		_ = json.Unmarshal(body, &in)
 		pc := f.contents[id]
@@ -589,8 +603,8 @@ func (f *fakeCluster) command(w http.ResponseWriter, p string, body []byte) (kin
 		}
 		return "content-revise", id
 
-	case strings.HasPrefix(p, "/product-content/product-contents/") && strings.HasSuffix(p, ":publish"):
-		id := strings.TrimSuffix(strings.TrimPrefix(p, "/product-content/product-contents/"), ":publish")
+	case strings.HasPrefix(p, "/product-content/product-contents/") && strings.HasSuffix(p, "/publications"):
+		id := strings.TrimSuffix(strings.TrimPrefix(p, "/product-content/product-contents/"), "/publications")
 		pc := f.contents[id]
 		switch {
 		case pc == nil:
@@ -663,7 +677,11 @@ func post(t interface{ Fatal(...any) }, url, key string, body any) (int, string)
 	if body != nil {
 		raw, _ = json.Marshal(body)
 	}
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	method := http.MethodPost
+	if strings.HasSuffix(url, "/list-price") {
+		method = http.MethodPut // attribute replace: the key is accepted and ignored
+	}
+	req, _ := http.NewRequest(method, url, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		req.Header.Set("Idempotency-Key", key)

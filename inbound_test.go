@@ -7,7 +7,7 @@ package main
 // Everything is black-box over the wire. REST is the main surface; Kafka is
 // read (never written) where the REST contract has no read for the fact:
 //
-//   - inventory-storage exposes NO read of staged stock (POST /stock/receive
+//   - inventory-storage exposes NO read of staged stock (POST /stock-receipts
 //     is a bare acknowledgement and /inventory/{sku}/usable only counts
 //     stowed units), so "the handover booked N units" is proved by the
 //     StockReceived it raises on warehouse.inventory.analytics (ADR 0037 §2),
@@ -306,7 +306,7 @@ func (w *world) receiptIsClosed(asn string) error {
 	if err != nil {
 		return err
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/receipts/%s/close", inboundBaseURL, id), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/receipts/%s/closures", inboundBaseURL, id), nil)); err != nil {
 		return fmt.Errorf("close receipt of ASN %s: %w", asn, err)
 	}
 	if got := w.last.json()["state"]; got != "Closed" {
@@ -508,10 +508,10 @@ func (w *world) appointmentAction(asn, action, wantState string) error {
 }
 
 func (w *world) carrierChecksIn(asn string) error {
-	return w.appointmentAction(asn, "check-in", "CheckedIn")
+	return w.appointmentAction(asn, "check-ins", "CheckedIn")
 }
 func (w *world) appointmentIsCancelled(asn string) error {
-	return w.appointmentAction(asn, "cancel", "Cancelled")
+	return w.appointmentAction(asn, "cancellations", "Cancelled")
 }
 
 func (w *world) appointmentIsInState(asn, want string) error {

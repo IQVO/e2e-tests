@@ -9,7 +9,7 @@ Feature: Phase 5 part B - case-multiple transfers and ship-in-own-container
      one case, never above what the origin can supply; the demand stays visible as
      caseMultiple, cases, requestedQtyEaches, roundedQtyEaches and a SIGNED
      remainderEaches. A plain SKU is planned exactly as before. Approval
-     (POST /v1/transfers:approve, GET /v1/transfers/{id}) applies the same rule, and
+     (POST /v1/transfer-approvals, GET /v1/transfers/{id}) applies the same rule, and
      ADR 0018 (per-site staleness): a stale fact excludes only ITS site, so an
      approval fails closed (422 facts-incomplete) only when the transfer's own origin
      or destination is excluded, never because of another site's stale facts.
@@ -36,7 +36,7 @@ Feature: Phase 5 part B - case-multiple transfers and ship-in-own-container
     Kafka into their own local pack views; neither view is readable over REST, so the
     "eventually" steps probe the behaviour itself (a proposal that carries the case
     multiple; a refused own-container seal that no longer says no-case-level).
-  - Proposals come from POST /v1/transfer-proposals:generate over an explicit
+  - Proposals come from POST /v1/transfer-proposal-runs over an explicit
     snapshot (positions, policies, lane): the diagnostic boundary of NIP, which
     still consults NIP's pack view.
   - Approvals run on TWO RUN-SCOPED SITES per scenario (P5O<run> origin, P5D<run>

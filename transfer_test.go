@@ -349,7 +349,7 @@ func (w *world) planningPublishesCapacityPlan(site string, ratePerHour, hours in
 	if planID == "" {
 		return fmt.Errorf("capacity plan response has no id: %s", w.last.body)
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/capacity-plans/%s/publish", warehousePlanningBaseURL, planID), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/capacity-plans/%s/publications", warehousePlanningBaseURL, planID), nil)); err != nil {
 		return fmt.Errorf("publish capacity plan %s: %w", planID, err)
 	}
 	return nil
@@ -427,7 +427,7 @@ func (w *world) approveTransfer(qty int, sku, origin, dest string) error {
 	// refused (422 facts-incomplete) and nothing is persisted, so retrying is
 	// exactly what an operator would do.
 	err := eventually(func() error {
-		if err := w.doJSON(http.MethodPost, nipBaseURL+"/v1/transfers:approve", body); err != nil {
+		if err := w.doJSON(http.MethodPost, nipBaseURL+"/v1/transfer-approvals", body); err != nil {
 			return err
 		}
 		if w.last.status != http.StatusOK {
@@ -635,12 +635,9 @@ func (w *world) wesEnqueuesLegAsWorkUnit(leg string) error {
 		return err
 	}
 	return eventually(func() error {
-		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand), nil); err != nil {
+		units, err := w.getItems(fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand))
+		if err != nil {
 			return err
-		}
-		var units []map[string]any
-		if err := json.Unmarshal(w.last.body, &units); err != nil {
-			return fmt.Errorf("decode work units for %s: %w (body %s)", demand, err, w.last.body)
 		}
 		if len(units) != 1 {
 			return fmt.Errorf("want exactly 1 work unit for reference %q, got %d", demand, len(units))
@@ -658,15 +655,12 @@ func (w *world) wesHasNoWorkUnitForTransfer() error {
 		return err
 	}
 	for _, demand := range []string{st.pickDemand, st.dispatchDemand} {
-		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand), nil); err != nil {
+		units, err := w.getItems(fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand))
+		if err != nil {
 			return err
 		}
-		var units []map[string]any
-		if err := json.Unmarshal(w.last.body, &units); err != nil {
-			return fmt.Errorf("decode work units for %s: %w (body %s)", demand, err, w.last.body)
-		}
 		if len(units) != 0 {
-			return fmt.Errorf("wes-work-planning has work for rejected transfer reference %q: %s", demand, w.last.body)
+			return fmt.Errorf("wes-work-planning has work for rejected transfer reference %q: %v", demand, units)
 		}
 	}
 	return nil
@@ -678,15 +672,12 @@ func (w *world) fulfillmentHasNoTaskForTransfer() error {
 		return err
 	}
 	for _, demand := range []string{st.pickDemand, st.dispatchDemand} {
-		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, demand), nil); err != nil {
+		tasks, err := w.getItems(fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, demand))
+		if err != nil {
 			return err
 		}
-		var tasks []map[string]any
-		if err := json.Unmarshal(w.last.body, &tasks); err != nil {
-			return fmt.Errorf("decode tasks for %s: %w (body %s)", demand, err, w.last.body)
-		}
 		if len(tasks) != 0 {
-			return fmt.Errorf("fulfillment-execution has a task for rejected transfer reference %q: %s", demand, w.last.body)
+			return fmt.Errorf("fulfillment-execution has a task for rejected transfer reference %q: %v", demand, tasks)
 		}
 	}
 	return nil
@@ -758,7 +749,7 @@ func (w *world) destinationStows(qty int, bin string) error {
 		return err
 	}
 	bin = w.rs(bin)
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/transfers/%s/stow", inventoryBaseURL, st.lineID), map[string]any{
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/transfers/%s/stowages", inventoryBaseURL, st.lineID), map[string]any{
 		"bins": []map[string]any{{"binId": bin, "quantity": qty}},
 	})); err != nil {
 		return err

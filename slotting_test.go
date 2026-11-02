@@ -225,16 +225,12 @@ func (w *world) demandLinesAreStated(units []int, sku, site string) error {
 func (w *world) velocityEventually(picks, units int, sku, site string) error {
 	sku, site = w.rs(sku), w.rs(site)
 	return eventually(func() error {
-		q := url.Values{"siteId": {site}, "windowDays": {fmt.Sprint(slotLookbackDays)}, "limit": {"500"}}
-		if err := w.doJSON(http.MethodGet, slottingBaseURL+"/sku-velocity?"+q.Encode(), nil); err != nil {
+		q := url.Values{"siteId": {site}, "windowDays": {fmt.Sprint(slotLookbackDays)}}
+		items, err := w.getItems(slottingBaseURL + "/sku-velocity?" + q.Encode())
+		if err != nil {
 			return err
 		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("GET /sku-velocity: status %d (body: %s)", w.last.status, w.last.body)
-		}
-		items, _ := w.last.json()["items"].([]any)
-		for _, it := range items {
-			m, _ := it.(map[string]any)
+		for _, m := range items {
 			if m["sku"] != sku {
 				continue
 			}
@@ -368,7 +364,7 @@ func (w *world) slotGenerate(site string) (map[string]any, error) {
 // Draft behind. Best effort: the outcome is irrelevant to the scenario.
 func (w *world) slotDiscard(p map[string]any) {
 	if id, _ := p["planId"].(string); id != "" {
-		_ = w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/reject", slottingBaseURL, id),
+		_ = w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/rejections", slottingBaseURL, id),
 			map[string]any{"reason": "e2e: intermediate draft while the local copies converge"})
 	}
 }
@@ -565,7 +561,7 @@ func (w *world) planIsApproved(label, site string) error {
 	if err != nil {
 		return err
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approve", slottingBaseURL, id), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approvals", slottingBaseURL, id), nil)); err != nil {
 		return fmt.Errorf("approve plan %s: %w", id, err)
 	}
 	if got := w.last.json()["state"]; w.last.status != http.StatusOK || got != "Approved" {
@@ -581,7 +577,7 @@ func (w *world) approvingIsRefused(label, site string, status int, slug string) 
 	if err != nil {
 		return err
 	}
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approve", slottingBaseURL, id), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approvals", slottingBaseURL, id), nil); err != nil {
 		return err
 	}
 	return w.problemIs(status, slug)

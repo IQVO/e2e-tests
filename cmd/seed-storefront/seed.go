@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/claudioed/warehouse-e2e/internal/paging"
 )
 
 // Config is one seeder run.
@@ -204,29 +206,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	return res, nil
 }
 
-// readCatalog pages through offer-availability GET /catalog with the nextCursor.
+// readCatalog pages through offer-availability GET /catalog, following nextCursor until it is absent.
 func readCatalog(ctx context.Context, c *client) ([]CatalogItem, error) {
-	var all []CatalogItem
-	after := ""
-	for pages := 0; pages < 10000; pages++ {
-		u := c.base + "/offer-availability/catalog?limit=100"
-		if after != "" {
-			u += "&after=" + url.QueryEscape(after)
-		}
-		var page struct {
-			Items      []CatalogItem `json:"items"`
-			NextCursor *string       `json:"nextCursor"`
-		}
-		if err := c.get(ctx, u, &page); err != nil {
-			return nil, err
-		}
-		all = append(all, page.Items...)
-		if page.NextCursor == nil || *page.NextCursor == "" || len(page.Items) == 0 || *page.NextCursor == after {
-			return all, nil
-		}
-		after = *page.NextCursor
-	}
-	return nil, fmt.Errorf("catalogue paging did not end")
+	return paging.All[CatalogItem](ctx, c.get, c.base+"/offer-availability/catalog")
 }
 
 // buildDesired resolves every fixture product (sku -> network title -> catalogue item) and derives
@@ -381,12 +363,13 @@ func apply(ctx context.Context, c *client, p *Plan, tree CategoryTree, currency 
 			}
 			continue
 		}
-		body := struct {
+		// PUT replaces the list-price attribute: idempotent by method, so no Idempotency-Key and a
+		// retry after a lost response re-applies the same state. The observed version is NOT sent
+		// (it would turn that retry into a 409 concurrent-update); the plan is declarative.
+		path := "/pricing/item-prices/" + url.PathEscape(pa.CatalogItemID) + "/list-price"
+		if err := c.put(ctx, "item-price", path, struct {
 			ListPrice Money `json:"listPrice"`
-			Version   int   `json:"version"`
-		}{price, pa.Version}
-		path := "/pricing/item-prices/" + url.PathEscape(pa.CatalogItemID) + ":set-list-price"
-		if err := c.write(ctx, "item-price", path, body, nil, nil, http.StatusOK); err != nil {
+		}{price}, nil, http.StatusOK); err != nil {
 			return fmt.Errorf("set list price of %s: %w", pa.SKU, err)
 		}
 	}
@@ -416,7 +399,7 @@ func apply(ctx context.Context, c *client, p *Plan, tree CategoryTree, currency 
 				FromRevision int         `json:"fromRevision"`
 				Body         ContentBody `json:"body"`
 			}{ca.FromRevision, body}
-			if err := c.write(ctx, "content-revise", base+":revise", body, material, &got, http.StatusOK); err != nil {
+			if err := c.write(ctx, "content-revise", base+"/revisions", body, material, &got, http.StatusOK); err != nil {
 				return fmt.Errorf("revise content of %s: %w", ca.SKU, err)
 			}
 			revision = got.Revision
@@ -425,7 +408,7 @@ func apply(ctx context.Context, c *client, p *Plan, tree CategoryTree, currency 
 			material := struct {
 				Revision int `json:"revision"`
 			}{revision}
-			if err := c.write(ctx, "content-publish", base+":publish", nil, material, nil, http.StatusOK); err != nil {
+			if err := c.write(ctx, "content-publish", base+"/publications", nil, material, nil, http.StatusOK); err != nil {
 				return fmt.Errorf("publish content of %s (revision %d): %w", ca.SKU, revision, err)
 			}
 		}

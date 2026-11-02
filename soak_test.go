@@ -214,7 +214,7 @@ func (w *world) soakInjectorLoop(ctx context.Context, pathID string, start, end 
 			m.enqueueErrors.Add(1)
 		default:
 			m.enqueued.Add(1)
-			rstatus, _, rerr := soakPostJSON(w.client, fmt.Sprintf("%s/paths/%s/release", wesBaseURL, pathID), nil)
+			rstatus, _, rerr := soakPostJSON(w.client, fmt.Sprintf("%s/paths/%s/work-releases", wesBaseURL, pathID), nil)
 			switch {
 			case rerr != nil:
 				m.releaseErrors.Add(1)
@@ -247,7 +247,7 @@ func (w *world) soakWorkerLoop(ctx context.Context, stationID, taskType string, 
 		default:
 		}
 
-		status, body, err := soakPostJSON(w.client, fmt.Sprintf("%s/stations/%s/claim-next", fulfillmentBaseURL, stationID), map[string]any{
+		status, body, err := soakPostJSON(w.client, fmt.Sprintf("%s/stations/%s/task-claims", fulfillmentBaseURL, stationID), map[string]any{
 			"taskType": taskType,
 		})
 		switch {
@@ -263,7 +263,7 @@ func (w *world) soakWorkerLoop(ctx context.Context, stationID, taskType string, 
 				m.completeErrors.Add(1)
 				continue
 			}
-			cstatus, _, cerr := soakPostJSON(w.client, fmt.Sprintf("%s/tasks/%s/complete", fulfillmentBaseURL, taskID), map[string]any{
+			cstatus, _, cerr := soakPostJSON(w.client, fmt.Sprintf("%s/tasks/%s/completions", fulfillmentBaseURL, taskID), map[string]any{
 				"stationId": stationID,
 			})
 			if cerr != nil || cstatus < 200 || cstatus >= 300 {
