@@ -67,9 +67,14 @@ type config struct {
 	allowLiveSite         bool
 	buildingID            string
 	// wesPickPath is the WES work pool PICK work lands in: the pathId
-	// order-management stamps on order lines (its DefaultPathId "pick"),
-	// which the catalogue resolves to the PICK family. WES pools by the
-	// raw path id, so charge/plan/release must target it, not "PICK".
+	// order-management stamps on order lines. Since order-management's
+	// ADR 0013 replaced the hardcoded DefaultPathId "pick" with its
+	// PathSelectionPolicy validated against the live catalogue, lines
+	// carry the CATALOGUE path's own id — which this simulator defines
+	// in ensureProcessPaths as "PICK" (matchPrefix "pick"). WES pools
+	// by that raw path id, so charge/plan/release must target "PICK";
+	// the old "pick" default points the floor at a pool no line ever
+	// lands on (97-path-mismatch findings, 0 orders shipped).
 	wesPickPath string
 	reportDir   string
 	seed        int64
@@ -122,7 +127,7 @@ func loadConfig() config {
 	flag.StringVar(&c.cptSiteID, "cpt-site", envOr("DAY_CPT_SITE", ""), "process-path-management site whose CPT schedule the simulated trucks replace (empty = -site)")
 	flag.StringVar(&c.storefrontSiteFixture, "storefront-site-fixture", envOr("DAY_STOREFRONT_SITE_FIXTURE", defaultStorefrontSiteFixture), "fixture declaring the storefront's live fulfilment site (siteId); the run refuses to write that site")
 	flag.BoolVar(&c.allowLiveSite, "allow-live-site", false, "allow -site/-cpt-site to be the storefront's fulfilment site (overwrites its CPT schedule; re-run make provision-storefront after)")
-	flag.StringVar(&c.wesPickPath, "wes-pick-path", envOr("DAY_WES_PICK_PATH", "pick"), "WES work pool for PICK work (the pathId order-management stamps on order lines)")
+	flag.StringVar(&c.wesPickPath, "wes-pick-path", envOr("DAY_WES_PICK_PATH", "PICK"), "WES work pool for PICK work (the pathId order-management stamps on order lines: the catalogue path id, PICK — see ADR 0013)")
 	flag.StringVar(&c.buildingID, "building", envOr("DAY_BUILDING", "SIM1"), "workforce-management building id")
 	flag.StringVar(&c.reportDir, "report-dir", envOr("DAY_REPORT_DIR", "run"), "where the JSON audit report is written")
 	flag.Int64Var(&c.seed, "seed", int64(envInt("DAY_SEED", 0)), "random seed (0 = time based)")
