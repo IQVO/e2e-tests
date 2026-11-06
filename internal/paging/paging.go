@@ -26,6 +26,24 @@ type Page[T any] struct {
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
+// UnmarshalJSON refuses a body that is not a page: "items" must be present and a JSON array
+// (an empty array is a valid empty page). A 200 with a retired key, `"items":null` or no
+// items at all is a contract violation, never an empty collection.
+func (p *Page[T]) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Items      *[]T   `json:"items"`
+		NextCursor string `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("decode {items,nextCursor}: %w (body: %.200s)", err, b)
+	}
+	if raw.Items == nil {
+		return fmt.Errorf("not a page: \"items\" is missing or null (body: %.200s)", b)
+	}
+	p.Items, p.NextCursor = *raw.Items, raw.NextCursor
+	return nil
+}
+
 // Getter fetches one URL and decodes the JSON answer into out. Callers adapt their own HTTP
 // client (context-aware or not) to this shape.
 type Getter func(ctx context.Context, rawURL string, out any) error
