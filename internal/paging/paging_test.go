@@ -99,3 +99,33 @@ func TestDecode(t *testing.T) {
 		t.Fatal("a bare array is not the guideline envelope")
 	}
 }
+
+// A 200 that is not a page must be refused, never read as an empty collection: a producer
+// still answering a retired key (or null items) would otherwise make every consumer silently
+// see nothing.
+func TestNotAPageIsRefused(t *testing.T) {
+	bodies := map[string]string{
+		"retired key":  `{"products":[{"sku":"A"}],"nextToken":"x"}`,
+		"null items":   `{"items":null}`,
+		"empty object": `{}`,
+		"bare array":   `[1,2]`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			get := func(_ context.Context, _ string, out any) error { return json.Unmarshal([]byte(body), out) }
+			if got, err := All[int](context.Background(), get, "/things"); err == nil {
+				t.Fatalf("read %q as a page with %v items", body, got)
+			}
+			if _, _, err := Decode[int]([]byte(body)); err == nil {
+				t.Fatalf("Decode accepted %q", body)
+			}
+		})
+	}
+}
+
+func TestAnEmptyItemsArrayIsAValidEmptyPage(t *testing.T) {
+	items, next, err := Decode[int]([]byte(`{"items":[]}`))
+	if err != nil || len(items) != 0 || next != "" {
+		t.Fatalf("%v %q %v", items, next, err)
+	}
+}
