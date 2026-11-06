@@ -785,6 +785,80 @@ func (w *world) destinationScanOfRejectedLineIsQuarantined(site string, qty int)
 // registration
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Cancel-after-allocation (ADR 0022)
+// ---------------------------------------------------------------------
+
+// cancelTransfer posts the operator cancel: an ALLOCATED transfer must
+// answer 202 with state RELEASING (the compensation is in flight, not
+// done).
+func (w *world) cancelTransfer(reason string) error {
+	st, err := w.xf()
+	if err != nil {
+		return err
+	}
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/v1/transfers/%s/cancellation", nipBaseURL, st.id), map[string]any{"reason": reason}); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusAccepted {
+		return fmt.Errorf("cancel answered %d (body: %s), want 202", w.last.status, w.last.body)
+	}
+	if got := w.last.json()["state"]; got != "RELEASING" {
+		return fmt.Errorf("cancel response state = %v, want RELEASING (body: %s)", got, w.last.body)
+	}
+	return nil
+}
+
+// inventoryPublishesReleased asserts the TransferStockAllocationReleased
+// fact with its outcome on the inventory topic.
+func (w *world) inventoryPublishesReleased(outcome string) error {
+	st, err := w.xf()
+	if err != nil {
+		return err
+	}
+	p, err := expectKafkaEvent(topicInventoryEvents,
+		"com.warehouse.wms.inventory-storage.reservation.TransferStockAllocationReleased",
+		func(p map[string]any) bool { return p["transfer_id"] == st.id }, "transfer "+st.id)
+	if err != nil {
+		return err
+	}
+	if p["outcome"] != outcome || p["transfer_line_id"] != st.lineID {
+		return fmt.Errorf("TransferStockAllocationReleased = %v, want outcome %s for line %s", p, outcome, st.lineID)
+	}
+	return nil
+}
+
+// inventoryReservationIsRevoked proves the compensation's physical effect
+// in inventory-storage itself: the transfer's origin reservation (demand
+// ref "transfer:<id>:<line>") is no longer holding stock.
+func (w *world) inventoryReservationIsRevoked() error {
+	st, err := w.xf()
+	if err != nil {
+		return err
+	}
+	db, err := dbOpen(inventoryDBURL, inventoryDBPassword)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return eventually(func() error {
+		var status string
+		err := db.QueryRowContext(context.Background(),
+			`SELECT status FROM reservations WHERE demand_ref = $1`,
+			"transfer:"+st.id+":"+st.lineID).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("no reservation for transfer %s in inventory-storage", st.id)
+		}
+		if err != nil {
+			return err
+		}
+		if status != "REVOKED" {
+			return fmt.Errorf("transfer %s reservation status = %s, want REVOKED", st.id, status)
+		}
+		return nil
+	})
+}
+
 func registerTransferSteps(sc *godog.ScenarioContext, w *world) {
 	// The suite shares ONE world across scenarios (see InitializeScenario),
 	// so the saga correlation is reset explicitly before each scenario.
@@ -809,6 +883,10 @@ func registerTransferSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^inventory-storage eventually publishes TransferStockAllocationRejected for the transfer with reason ([A-Z_]+)$`, w.inventoryPublishesRejected)
 	sc.Step(`^network-inventory-planning eventually releases the (pick|dispatch) demand of (\d+) units on path "([^"]*)" at site "([^"]*)"$`, w.nipReleasesDemand)
 	sc.Step(`^network-inventory-planning has released no work demand for the transfer$`, w.nipReleasesNoDemand)
+
+	sc.Step(`^I cancel the transfer in network-inventory-planning with reason "([^\"]*)"$`, w.cancelTransfer)
+	sc.Step(`^inventory-storage eventually publishes TransferStockAllocationReleased for the transfer with outcome ([A-Z_]+)$`, w.inventoryPublishesReleased)
+	sc.Step(`^inventory-storage's reservation for the transfer is revoked$`, w.inventoryReservationIsRevoked)
 	sc.Step(`^fulfillment-execution eventually publishes (TransferPicked|TransferDispatched) for the transfer with quantity (\d+)$`, w.fulfillmentPublishesFact)
 	sc.Step(`^inventory-storage eventually publishes (TransferReceiptStaged|TransferStockStowed) for the transfer$`, w.inventoryPublishesDestinationFact)
 

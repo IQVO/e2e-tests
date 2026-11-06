@@ -117,3 +117,31 @@ Feature: Inter-warehouse transfer saga across real services
     And wes-work-planning has no work unit for the transfer
     And fulfillment-execution has no task for the transfer
     And destination site "E2E-DEST" scanning 5 units against the transfer's rejected line is quarantined by inventory-storage
+
+  @e2e @inter-warehouse-transfer
+  Scenario: Cancelling an ALLOCATED transfer releases the origin hold and closes the saga
+    Given the harness injects facility-layout's SiteCapabilityChanged for site "E2E-ORIGIN" with transfer origin and destination enabled
+    And the harness injects facility-layout's SiteCapabilityChanged for site "E2E-DEST" with transfer origin and destination enabled
+    And the harness injects order-management's SiteSkuDemandChanged for site "E2E-DEST": 10 units of SKU "SKU-XFER-CNCL-<run>" due in 2 hours
+    And the harness injects order-management's SiteSkuDemandChanged for site "E2E-ORIGIN": 1 units of SKU "SKU-XFER-BASE-<run>" due in 2 hours
+    And warehouse-planning publishes a capacity plan for site "E2E-ORIGIN" of 1000 orders per hour covering the next 48 hours
+    And warehouse-planning publishes a capacity plan for site "E2E-DEST" of 1000 orders per hour covering the next 48 hours
+    And site "E2E-ORIGIN" holds 20 units of SKU "SKU-XFER-CNCL-<run>" stowed in bin "E2E-ORIGIN-BIN-CNCL-<run>" in inventory-storage
+
+    When I approve a transfer of 5 units of SKU "SKU-XFER-CNCL-<run>" from site "E2E-ORIGIN" to site "E2E-DEST" in network-inventory-planning
+    Then inventory-storage eventually publishes TransferStockAllocated for the transfer: 5 units at site "E2E-ORIGIN"
+    And network-inventory-planning eventually reports the transfer as ALLOCATED
+
+    # --- the operator cancels after allocation: RELEASING, not CANCELLED yet
+    When I cancel the transfer in network-inventory-planning with reason "e2e cancel-after-allocation"
+    Then network-inventory-planning eventually reports the transfer as RELEASING
+
+    # --- inventory-storage resolves the hold and the saga settles
+    And inventory-storage eventually publishes TransferStockAllocationReleased for the transfer with outcome RELEASED
+    And inventory-storage's reservation for the transfer is revoked
+    And network-inventory-planning eventually reports the transfer as CANCELLED
+
+    # --- nothing was worked, nothing can arrive
+    And network-inventory-planning has released no work demand for the transfer
+    And wes-work-planning has no work unit for the transfer
+    And fulfillment-execution has no task for the transfer
