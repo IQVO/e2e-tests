@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 14 bounded-context HTTP services as background processes
+# Starts all 18 bounded-context HTTP services (+ yard-management's relay worker) as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -25,6 +25,14 @@
 #                           it is a one-off migration aid, and on the shared
 #                           broker it would replay the cluster's whole
 #                           inventory history into this local database.
+#   3a. dock-scheduling   — dock appointment scheduling; OWNS the appointment
+#                           writes since inbound-receiving ADR 0019. Four
+#                           mandatory consumer groups; its outbox relay is
+#                           in-process. Started before inbound-receiving,
+#                           whose appointment copy it feeds.
+#   3a. yard-management   — gate check-in, dock the trailer, unload, release.
+#                           Three mandatory consumer groups; its outbox relay
+#                           is a SEPARATE worker, started right after the API.
 #   3b. inbound-receiving — the WMS-tier inbound dock workflow (ASN, dock
 #                           appointment, receipt; its ADR 0001/0002).
 #                           EVENT_PUBLISHER=kafka so ReceiptLineReceived
@@ -165,6 +173,9 @@ source "${SCRIPT_DIR}/services.sh"
 up_process_path
 up_facility
 up_product_master
+up_dock_scheduling
+up_yard_management
+up_yard_management_relay
 up_inbound_receiving
 up_slotting
 up_returns
@@ -179,10 +190,13 @@ up_planning
 up_nip
 up_exceptions
 
-log "all 16 services up and healthy"
+log "all 18 services (+ the yard relay worker) up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
+printf '  %-24s %s\n' dock-scheduling        "${DOCK_SCHEDULING_BASE_URL}"
+printf '  %-24s %s\n' yard-management        "${YARD_MANAGEMENT_BASE_URL}"
+printf '  %-24s %s\n' yard-management-relay  "${YARD_MANAGEMENT_RELAY_HEALTH_URL}"
 printf '  %-24s %s\n' inbound-receiving      "${INBOUND_BASE_URL}"
 printf '  %-24s %s\n' slotting-optimization   "${SLOTTING_BASE_URL}"
 printf '  %-24s %s\n' returns-processing     "${RETURNS_BASE_URL}"

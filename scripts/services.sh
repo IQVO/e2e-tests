@@ -32,7 +32,7 @@ up_process_path() {
     KAFKA_BROKERS="${KAFKA_BROKERS}" \
     LOG_LEVEL=info
   wait_for_http "${PROCESS_PATH_BASE_URL}/healthz"
-  "${SERVICES_SH_DIR}/seed-process-paths.sh"
+  bash "${SERVICES_SH_DIR}/seed-process-paths.sh"
 }
 
 up_facility() {
@@ -371,4 +371,66 @@ up_exceptions() {
     SHUTDOWN_DRAIN_DELAY=0 \
     LOG_LEVEL=info
   wait_for_http "${EXCEPTIONS_BASE_URL}/healthz"
+}
+
+# dock-scheduling: cmd/api, migrations embedded. It OWNS the appointment
+# writes since inbound-receiving ADR 0019 (book, reschedule, cancel). FOUR
+# mandatory consumer groups (yard-management facts, facility-layout dock slots
+# and operating hours, inbound-receiving's ASN, process-path-management's
+# cut-off times). The transactional-outbox relay runs in this process (its
+# cmd/relay is the same loop as a stand-alone binary), so there is no second
+# worker to start. DOCK_LEGACY_IMPORT_CONSUMER_GROUP stays unset: that is the
+# strangler stage A importer and would replay a shared broker's history.
+up_dock_scheduling() {
+  log "starting dock-scheduling on ${DOCK_SCHEDULING_BASE_URL}"
+  start_service dock-scheduling "${BIN_DIR}/dock-scheduling" \
+    HTTP_ADDR=":${DOCK_SCHEDULING_HTTP_PORT}" \
+    DATABASE_URL="${DOCK_SCHEDULING_DB_URL}" \
+    PGPASSWORD="dock_scheduling" \
+    KAFKA_BROKERS="${KAFKA_BROKERS}" \
+    YARD_CONSUMER_GROUP="${DOCK_YARD_CONSUMER_GROUP}" \
+    FACILITY_CONSUMER_GROUP="${DOCK_FACILITY_CONSUMER_GROUP}" \
+    ASN_CONSUMER_GROUP="${DOCK_ASN_CONSUMER_GROUP}" \
+    CPT_CONSUMER_GROUP="${DOCK_CPT_CONSUMER_GROUP}" \
+    OUTBOX_RELAY_INTERVAL="500ms" \
+    SHUTDOWN_DRAIN_DELAY=0 \
+    LOG_LEVEL=info
+  wait_for_http "${DOCK_SCHEDULING_BASE_URL}/healthz"
+}
+
+# yard-management: cmd/api, migrations embedded. THREE mandatory consumer
+# groups (dock-scheduling's appointments, facility-layout, inbound-receiving's
+# ReceiptClosed, which drives the auto-complete of the unload). Unlike
+# dock-scheduling its outbox relay is a SEPARATE binary (up_yard_management_relay,
+# its own Deployment in the chart): without it VisitCheckedIn and every other
+# yard fact stays in the outbox.
+up_yard_management() {
+  log "starting yard-management on ${YARD_MANAGEMENT_BASE_URL}"
+  start_service yard-management "${BIN_DIR}/yard-management" \
+    HTTP_ADDR=":${YARD_MANAGEMENT_HTTP_PORT}" \
+    DATABASE_URL="${YARD_MANAGEMENT_DB_URL}" \
+    PGPASSWORD="yard_management" \
+    KAFKA_BROKERS="${KAFKA_BROKERS}" \
+    DOCK_SCHEDULING_CONSUMER_GROUP="${YARD_DOCK_SCHEDULING_CONSUMER_GROUP}" \
+    FACILITY_CONSUMER_GROUP="${YARD_FACILITY_CONSUMER_GROUP}" \
+    INBOUND_RECEIVING_CONSUMER_GROUP="${YARD_INBOUND_RECEIVING_CONSUMER_GROUP}" \
+    SHUTDOWN_DRAIN_DELAY=0 \
+    LOG_LEVEL=info
+  wait_for_http "${YARD_MANAGEMENT_BASE_URL}/healthz"
+}
+
+# yard-management's outbox relay worker. It serves /healthz on RELAY_HEALTH_ADDR
+# (default :8081, which is facility-layout's port here, hence its own).
+# Started AFTER the API: the API owns the (embedded) migrations of the outbox
+# table the relay drains.
+up_yard_management_relay() {
+  log "starting yard-management relay on ${YARD_MANAGEMENT_RELAY_HEALTH_URL}"
+  start_service yard-management-relay "${BIN_DIR}/yard-management-relay" \
+    DATABASE_URL="${YARD_MANAGEMENT_DB_URL}" \
+    PGPASSWORD="yard_management" \
+    KAFKA_BROKERS="${KAFKA_BROKERS}" \
+    OUTBOX_POLL_INTERVAL="500ms" \
+    RELAY_HEALTH_ADDR=":${YARD_MANAGEMENT_RELAY_HEALTH_PORT}" \
+    LOG_LEVEL=info
+  wait_for_http "${YARD_MANAGEMENT_RELAY_HEALTH_URL}/healthz"
 }

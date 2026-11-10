@@ -14,7 +14,11 @@ name: E2E Behaviour
 #                                   warehouse-planning and
 #                                   network-inventory-planning)
 #   inbound-receiving-scenario      @inbound-receiving (product-master,
-#                                   inbound-receiving, inventory-storage)
+#                                   facility-layout, dock-scheduling,
+#                                   yard-management, inbound-receiving,
+#                                   inventory-storage, exception-management)
+#   inbound-journey-scenario        @inbound-journey: the whole dock chain on
+#                                   the same six services
 #   slotting-optimization-scenario  @slotting (facility-layout, product-master,
 #                                   slotting-optimization)
 #   returns-exceptions-scenario     @returns-exceptions (returns-processing,
@@ -491,10 +495,15 @@ jobs:
         run: tail -n 400 logs/*.log 2>&1 || true
 
 
-  # inbound-receiving's @inbound-receiving scenarios (ASN, dock appointment, receipt)
-  # and their event-driven handover to inventory-storage (inbound-receiving ADR 0003,
-  # inventory-storage ADR 0037). product-master: PRODUCT_MODE=kafka refuses an ASN line for a
-  # SKU product-master has not announced.
+  # inbound-receiving's @inbound-receiving scenarios (ASN, receipt, the event-driven
+  # handover to inventory-storage; inbound-receiving ADR 0003, inventory-storage ADR
+  # 0037) and the appointment legs, which since inbound-receiving ADR 0019 are owned
+  # by dock-scheduling (booking) and yard-management (gate check-in): inbound-receiving
+  # sees the appointment through its local copy. facility-layout declares the dock
+  # door inbound-receiving's door copy is fed from (DOCK_DOOR_CONSUMER_GROUP).
+  # The mastercase scenarios carry the same tag and need exception-management (a
+  # repeated SSCC raises a carton discrepancy it turns into a case) and
+  # facility-layout (the seeded case and loose bins).
   inbound-receiving-scenario:
     runs-on: ubuntu-latest
     permissions:
@@ -531,12 +540,229 @@ jobs:
         with:
           path: e2e-tests
 
+      - name: Checkout facility-layout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/facility-layout
+          ref: develop
+          path: facility-layout
+
       - name: Checkout product-master
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: IQVO/product-master
           ref: develop
           path: product-master
+
+      - name: Checkout dock-scheduling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/dock-scheduling
+          ref: develop
+          path: dock-scheduling
+
+      - name: Checkout yard-management
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/yard-management
+          ref: develop
+          path: yard-management
+
+      - name: Checkout inbound-receiving
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/inbound-receiving
+          ref: develop
+          path: inbound-receiving
+
+      - name: Checkout inventory-storage
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/inventory-storage
+          ref: develop
+          path: inventory-storage
+
+      - name: Checkout exception-management
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/exception-management
+          ref: develop
+          path: exception-management
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: e2e-tests/go.mod
+
+      - name: Wait for Kafka to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/9092) >/dev/null 2>&1; then
+              echo "kafka is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::kafka never became reachable on localhost:9092"
+          exit 1
+
+      - name: Create every harness topic and wait for a leader on each
+        working-directory: e2e-tests
+        run: |
+          # A fresh broker's first publish can race its metadata propagation
+          # (Unknown Topic Or Partition) and a consumer group on a topic that
+          # does not exist yet is never assigned a partition. cmd/ensure-topics
+          # holds the one topic list of the whole estate (every service's
+          # events and analytics topics, plus the ones only consumed), so a
+          # job never carries a copy that goes stale.
+          GOTOOLCHAIN=auto go run ./cmd/ensure-topics
+
+      - name: Start per-service Postgres instances
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          dbs="postgres-facility postgres-product-master postgres-dock-scheduling postgres-yard-management postgres-inbound-receiving postgres-inventory postgres-exceptions"
+          docker compose -f docker-compose.yml up -d ${dbs}
+          for svc in ${dbs}; do
+            deadline=$((SECONDS + 60))
+            while true; do
+              status="$(docker inspect -f '{{.State.Health.Status}}' "e2e-${svc}" 2>/dev/null || echo starting)"
+              [[ "${status}" == "healthy" ]] && break
+              if (( SECONDS > deadline )); then
+                echo "::error::${svc} never became healthy"
+                docker logs "e2e-${svc}" || true
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "${svc} healthy"
+          done
+
+      - name: Build the 8 binaries this job needs
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source env.sh
+          mkdir -p "${BIN_DIR}"
+
+          build_one() {
+            local name="$1" repo="$2" cmd_pkg="$3"
+            echo "==> go build ${name} (${repo}/cmd/${cmd_pkg})"
+            # GOTOOLCHAIN=auto: setup-go pins the toolchain to e2e-tests' own
+            # go.mod, but a sibling may require a newer Go (product-master
+            # needs >= 1.27.1).
+            ( cd "${repo}" && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o "${BIN_DIR}/${name}" "./cmd/${cmd_pkg}" )
+            echo "  OK   ${name} -> ${BIN_DIR}/${name}"
+          }
+
+          # Not scripts/01-build.sh verbatim: it also builds the services and
+          # MCP servers this job does not check out.
+          build_one facility               "${FACILITY_REPO}" facility
+          build_one product-master         "${PRODUCT_MASTER_REPO}" api
+          build_one dock-scheduling        "${DOCK_SCHEDULING_REPO}" api
+          build_one yard-management        "${YARD_MANAGEMENT_REPO}" api
+          build_one yard-management-relay  "${YARD_MANAGEMENT_REPO}" relay
+          build_one inbound-receiving      "${INBOUND_REPO}" api
+          build_one inventory              "${INVENTORY_REPO}" inventory
+          build_one exceptions             "${EXCEPTIONS_REPO}" api
+
+      - name: Start the 7 services and run @inbound-receiving
+        working-directory: e2e-tests
+        run: |
+          set -euo pipefail
+          source scripts/lib.sh
+          source scripts/services.sh
+
+          # The env of every service lives in scripts/services.sh; the order
+          # is the dependency order of scripts/03-up-services.sh.
+          up_facility
+          up_product_master
+          up_dock_scheduling
+          up_yard_management
+          up_yard_management_relay
+          up_inbound_receiving
+          up_inventory
+          up_exceptions
+
+          echo "all 7 services healthy"
+
+          export INBOUND_BASE_URL PRODUCT_MASTER_BASE_URL INVENTORY_BASE_URL INVENTORY_DB_URL FACILITY_BASE_URL DOCK_SCHEDULING_BASE_URL YARD_MANAGEMENT_BASE_URL EXCEPTIONS_BASE_URL KAFKA_BROKERS
+          # godog tag expression: a comma is OR.
+          export GODOG_TAGS="@inbound-receiving"
+          go test -v -run TestMain -timeout 5m .
+
+      - name: Dump service logs on failure
+        if: failure()
+        working-directory: e2e-tests
+        run: tail -n 400 logs/*.log 2>&1 || true
+
+
+  # The whole inbound dock chain with real services only
+  # (features/inbound_journey.feature): book in dock-scheduling, gate check-in and
+  # dock in yard-management, ASN and receipt in inbound-receiving, stow in
+  # inventory-storage, auto-complete back in yard-management and dock-scheduling.
+  inbound-journey-scenario:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+
+    services:
+      # Single-node KRaft Kafka, the exact config already proven to work
+      # in this fleet (order-management/docker-compose.kafka.yml) -- a
+      # GitHub Actions `services:` container rather than testcontainers,
+      # since every consumer/producer here is a real long-running Go
+      # binary spawned by shell, not a Go test process that could manage
+      # its own testcontainers lifecycle.
+      kafka:
+        image: apache/kafka:3.8.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+
+    steps:
+      - name: Checkout e2e-tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: e2e-tests
+
+      - name: Checkout facility-layout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/facility-layout
+          ref: develop
+          path: facility-layout
+
+      - name: Checkout product-master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/product-master
+          ref: develop
+          path: product-master
+
+      - name: Checkout dock-scheduling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/dock-scheduling
+          ref: develop
+          path: dock-scheduling
+
+      - name: Checkout yard-management
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: IQVO/yard-management
+          ref: develop
+          path: yard-management
 
       - name: Checkout inbound-receiving
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -583,7 +809,7 @@ jobs:
         working-directory: e2e-tests
         run: |
           set -euo pipefail
-          dbs="postgres-product-master postgres-inbound-receiving postgres-inventory"
+          dbs="postgres-facility postgres-product-master postgres-dock-scheduling postgres-yard-management postgres-inbound-receiving postgres-inventory"
           docker compose -f docker-compose.yml up -d ${dbs}
           for svc in ${dbs}; do
             deadline=$((SECONDS + 60))
@@ -600,7 +826,7 @@ jobs:
             echo "${svc} healthy"
           done
 
-      - name: Build the 3 binaries this job needs
+      - name: Build the 7 binaries this job needs
         working-directory: e2e-tests
         run: |
           set -euo pipefail
@@ -619,11 +845,15 @@ jobs:
 
           # Not scripts/01-build.sh verbatim: it also builds the services and
           # MCP servers this job does not check out.
+          build_one facility               "${FACILITY_REPO}" facility
           build_one product-master         "${PRODUCT_MASTER_REPO}" api
+          build_one dock-scheduling        "${DOCK_SCHEDULING_REPO}" api
+          build_one yard-management        "${YARD_MANAGEMENT_REPO}" api
+          build_one yard-management-relay  "${YARD_MANAGEMENT_REPO}" relay
           build_one inbound-receiving      "${INBOUND_REPO}" api
           build_one inventory              "${INVENTORY_REPO}" inventory
 
-      - name: Start the 3 services and run @inbound-receiving
+      - name: Start the 6 services and run @inbound-journey
         working-directory: e2e-tests
         run: |
           set -euo pipefail
@@ -632,15 +862,19 @@ jobs:
 
           # The env of every service lives in scripts/services.sh; the order
           # is the dependency order of scripts/03-up-services.sh.
+          up_facility
           up_product_master
+          up_dock_scheduling
+          up_yard_management
+          up_yard_management_relay
           up_inbound_receiving
           up_inventory
 
-          echo "all 3 services healthy"
+          echo "all 6 services healthy"
 
-          export INBOUND_BASE_URL PRODUCT_MASTER_BASE_URL INVENTORY_BASE_URL INVENTORY_DB_URL KAFKA_BROKERS
+          export INBOUND_BASE_URL PRODUCT_MASTER_BASE_URL INVENTORY_BASE_URL INVENTORY_DB_URL FACILITY_BASE_URL DOCK_SCHEDULING_BASE_URL YARD_MANAGEMENT_BASE_URL KAFKA_BROKERS
           # godog tag expression: a comma is OR.
-          export GODOG_TAGS="@inbound-receiving"
+          export GODOG_TAGS="@inbound-journey"
           go test -v -run TestMain -timeout 5m .
 
       - name: Dump service logs on failure

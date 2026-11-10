@@ -1,4 +1,4 @@
-# Nine dedicated Postgres databases. Kafka is ephemeral and managed outside Compose.
+# Eighteen dedicated Postgres databases. Kafka is ephemeral and managed outside Compose.
 name: warehouse-e2e
 
 services:
@@ -327,6 +327,48 @@ services:
       timeout: 3s
       retries: 20
 
+  # dock-scheduling (dock appointment scheduling; owns appointment booking since
+  # inbound-receiving ADR 0019). Own user/db name "dock_scheduling" on host port
+  # 5457 (it ships no compose file). Migrations are embedded in its binary.
+  postgres-dock-scheduling:
+    image: postgres:16
+    container_name: e2e-postgres-dock-scheduling
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dock_scheduling
+      POSTGRES_PASSWORD: dock_scheduling
+      POSTGRES_DB: dock_scheduling
+    ports:
+      - "5457:5432"
+    volumes:
+      - e2e_dock_scheduling_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dock_scheduling -d dock_scheduling"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # yard-management (gate check-in, dock the trailer, unload, release). Own
+  # user/db name "yard_management" on host port 5458. Migrations are embedded
+  # in its binary.
+  postgres-yard-management:
+    image: postgres:16
+    container_name: e2e-postgres-yard-management
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: yard_management
+      POSTGRES_PASSWORD: yard_management
+      POSTGRES_DB: yard_management
+    ports:
+      - "5458:5432"
+    volumes:
+      - e2e_yard_management_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yard_management -d yard_management"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -344,3 +386,5 @@ volumes:
   e2e_slotting_pg_data:
   e2e_returns_pg_data:
   e2e_exceptions_pg_data:
+  e2e_dock_scheduling_pg_data:
+  e2e_yard_management_pg_data:

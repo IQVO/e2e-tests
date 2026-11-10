@@ -29,6 +29,24 @@ components:
     remote: delivery_promise_mfe/App
     nativeScenarios: []
     clusterChecks: []
+  dock-scheduling:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    commands:
+      backend: api
+      mcp: mcp
+      projector: projector
+      reports: reports
+      relay: relay
+      sweep: sweep
+    nativeScenarios:
+    - inbound-journey
+    - inbound-receiving
+    clusterChecks: []
   ecosystem:
     kinds:
     - shell
@@ -498,3 +516,20 @@ components:
     - mcp
     - reports
     - browser
+  yard-management:
+    kinds:
+    - backend
+    - oltp
+    - mcp
+    - projector
+    - reports
+    commands:
+      backend: api
+      mcp: mcp
+      projector: yard-projector
+      reports: yard-reports
+      relay: relay
+    nativeScenarios:
+    - inbound-journey
+    - inbound-receiving
+    clusterChecks: []
