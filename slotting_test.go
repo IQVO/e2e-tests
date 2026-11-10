@@ -50,9 +50,14 @@ const (
 	// slotLocationType is the facility-layout location type of every forward
 	// slot the feature registers. facility-layout's placement rules
 	// (RULE-ALLOW-FWD-*) allow only CartonFlow, Shelf and ToteWall in a FWD
-	// zone; Shelf is a seeded type whose default capacity is far above one
+	// zone; Shelf's default capacity is far above one
 	// unit of the feature's SKUs (205x121x82 mm, 1720 g).
 	slotLocationType = "Shelf"
+	// slotLocationTypeWeightKg / VolumeM3 are the capacity the feature declares
+	// for it (the 150 kg / 0.4 m3 default features/phase5_case_pick.feature
+	// documents).
+	slotLocationTypeWeightKg = 150
+	slotLocationTypeVolumeM3 = 0.4
 	// slotLookbackDays is the demand window of every plan; the injected
 	// demand is due one hour ago, well inside it.
 	slotLookbackDays = 7
@@ -116,6 +121,14 @@ func (w *world) slotsExist(site string, hazmat bool, codes ...string) error {
 	site = w.rs(site)
 	if err := w.ensureSite(site, "Slotting E2E "+site); err != nil {
 		return fmt.Errorf("site %s: %w", site, err)
+	}
+	// The location type is the feature's own precondition: facility-layout
+	// seeds none, so the scenario declares it itself (a 409 when an earlier
+	// scenario of the same run already did) instead of leaning on whichever
+	// feature ran first in a full-suite run -- the isolated CI job runs this
+	// feature alone and answered 404 location-type-not-found.
+	if err := w.ensureLocationType(slotLocationType, slotLocationTypeWeightKg, slotLocationTypeVolumeM3); err != nil {
+		return fmt.Errorf("location type %s: %w", slotLocationType, err)
 	}
 	for _, raw := range codes {
 		code := w.rs(raw)

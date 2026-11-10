@@ -41,7 +41,11 @@ components:
       mcp: mcp
       projector: projector
       reports: reports
+      relay: relay
+      sweep: sweep
     nativeScenarios:
+    - inbound-journey
+    - inbound-receiving
     - yard-journey
     clusterChecks: []
   ecosystem:
@@ -527,6 +531,9 @@ components:
       mcp: mcp
       projector: yard-projector
       reports: yard-reports
+      relay: relay
     nativeScenarios:
+    - inbound-journey
+    - inbound-receiving
     - yard-journey
     clusterChecks: []

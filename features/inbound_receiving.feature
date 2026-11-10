@@ -10,10 +10,17 @@ Feature: inbound-receiving takes goods from ASN to staged stock
   Services started by scripts/03-up-services.sh for this feature:
   product-master (SKU existence; inbound-receiving runs PRODUCT_MODE=kafka, so
   an ASN line for a SKU it has not heard of is refused with 422 unknown-sku),
-  inbound-receiving and inventory-storage (INBOUND_RECEIPT_CONSUMER_GROUP set).
-  Dock doors stay in DOCK_DOOR_MODE=permissive: a door code is accepted
-  without a facility-layout dock slot, so no scenario depends on facility
-  data. Nothing is injected; every fact comes from a real service.
+  facility-layout, dock-scheduling and yard-management (the appointment
+  scenario), inbound-receiving and inventory-storage
+  (INBOUND_RECEIPT_CONSUMER_GROUP set).
+  Dock appointments are NOT inbound-receiving's to write any more (its ADR
+  0019: POST /appointments and /check-ins answer 410 appointment-moved).
+  dock-scheduling owns the booking and yard-management the gate check-in; the
+  appointment scenario drives those owners and reads inbound-receiving's LOCAL
+  COPY of the appointment, which fills over Kafka (eventually consistent, so
+  every read of the copy is a poll). The dock door is real: a Dock slot
+  declared in facility-layout, which all three services learn over Kafka.
+  Nothing is injected; every fact comes from a real service.
 
   What makes each assertion discriminating:
   - The ASN expects 50 units and the dock receives 40, so the Short
@@ -30,9 +37,14 @@ Feature: inbound-receiving takes goods from ASN to staged stock
     Kafka key, so same partition order): once the Good line's StockReceived is
     seen, a Damaged line that had been booked would already be there as a
     second event, and the "exactly 1 event totalling 6 units" check fails.
-  - The overlapping booking is refused with the door-window-overlap problem,
-    not just any 409, while a window that starts exactly when the first one
-    ends (the window is half-open) is accepted.
+  - The overlapping booking is refused by dock-scheduling with the
+    door-double-booked problem, not just any 409, while a window that starts
+    exactly when the first one ends (the window is half-open) is accepted.
+  - The gate check-in is yard-management's and reaches dock-scheduling as
+    CHECKED_IN; inbound-receiving's copy holds only Booked and Cancelled (ADR
+    0019), so it is read as Booked throughout. The receipt's close releases the
+    unload in yard-management; only the door release (the check-out) completes
+    the appointment in dock-scheduling.
 
   Every mutable id is run-scoped. The world is shared by all scenarios of a
   process, so each scenario also owns its own ASN and SKU tokens.
@@ -69,28 +81,39 @@ Feature: inbound-receiving takes goods from ASN to staged stock
     Then the usable inventory for SKU "SKU-INB-STOW-<run>" in inventory-storage is 40
 
   @e2e @inbound-receiving
-  Scenario: A dock appointment guards its door, checks in and completes when the receipt closes
-    Given SKU "SKU-INB-APPT-<run>" is registered in product-master
+  Scenario: A dock appointment booked in dock-scheduling is checked in at the yard gate and completes when the receipt closes
+    Given dock-scheduling, yard-management and facility-layout are healthy
+    And an Inbound dock door "INBD<run>-DOCK-DR-A01-01-01-A" exists in facility-layout
+    And the dock calendar of site "INBD<run>" is declared in dock-scheduling with 5 minute slots and 60 minutes of arrival tolerance
+    And SKU "SKU-INB-APPT-<run>" is registered in product-master
     And ASN "ASN-INB-APPT-<run>" from supplier "ACME" expecting 5 units of SKU "SKU-INB-APPT-<run>" is eventually registered in inbound-receiving
     And ASN "ASN-INB-APPT2-<run>" from supplier "ACME" expecting 5 units of SKU "SKU-INB-APPT-<run>" is eventually registered in inbound-receiving
 
-    When a dock appointment at door "E2E-INB-DOOR-<run>" for carrier "ACME Freight" and ASN "ASN-INB-APPT-<run>" is booked to start in 10 minutes for 60 minutes in inbound-receiving
-    Then the appointment of ASN "ASN-INB-APPT-<run>" in inbound-receiving is "Booked"
-    And booking a dock appointment at door "E2E-INB-DOOR-<run>" for ASN "ASN-INB-APPT2-<run>" to start in 40 minutes for 60 minutes in inbound-receiving is refused with 409 "door-window-overlap"
+    When a dock appointment at door "INBD<run>-DOCK-DR-A01-01-01-A" for carrier "ACME Freight" and ASN "ASN-INB-APPT-<run>" is booked in dock-scheduling to start in 0 minutes for 60 minutes
+    Then dock-scheduling eventually shows the appointment of ASN "ASN-INB-APPT-<run>" as BOOKED
+    And inbound-receiving's copy of the appointment of ASN "ASN-INB-APPT-<run>" is eventually "Booked"
+    And booking a dock appointment at door "INBD<run>-DOCK-DR-A01-01-01-A" for ASN "ASN-INB-APPT2-<run>" in dock-scheduling to start in 30 minutes for 60 minutes is refused with 409 "door-double-booked"
 
     # The window is half-open: the next one may start exactly when this ends.
-    When a dock appointment at door "E2E-INB-DOOR-<run>" for carrier "ACME Freight" and ASN "ASN-INB-APPT2-<run>" is booked to start in 70 minutes for 30 minutes in inbound-receiving
-    And the appointment of ASN "ASN-INB-APPT2-<run>" in inbound-receiving is cancelled
-    Then the appointment of ASN "ASN-INB-APPT2-<run>" in inbound-receiving is "Cancelled"
+    When a dock appointment at door "INBD<run>-DOCK-DR-A01-01-01-A" for carrier "ACME Freight" and ASN "ASN-INB-APPT2-<run>" is booked in dock-scheduling to start in 60 minutes for 30 minutes
+    And the appointment of ASN "ASN-INB-APPT2-<run>" is cancelled in dock-scheduling
+    Then dock-scheduling eventually shows the appointment of ASN "ASN-INB-APPT2-<run>" as CANCELLED
+    And inbound-receiving's copy of the appointment of ASN "ASN-INB-APPT2-<run>" is eventually "Cancelled"
 
-    When the carrier of ASN "ASN-INB-APPT-<run>"'s appointment checks in at inbound-receiving
-    Then the appointment of ASN "ASN-INB-APPT-<run>" in inbound-receiving is "CheckedIn"
+    When the carrier of ASN "ASN-INB-APPT-<run>" checks in at the gate of yard-management
+    Then dock-scheduling eventually shows the appointment of ASN "ASN-INB-APPT-<run>" as CHECKED_IN
+    # The copy holds only Booked and Cancelled (ADR 0019): the arrival stays in yard-management and dock-scheduling.
+    And inbound-receiving's copy of the appointment of ASN "ASN-INB-APPT-<run>" is still "Booked"
+    When the gate clerk docks the trailer of ASN "ASN-INB-APPT-<run>" at its appointment door in yard-management
 
     When a receipt is opened for ASN "ASN-INB-APPT-<run>" from its appointment in inbound-receiving
     And 5 Good units of line 1 are received on the receipt of ASN "ASN-INB-APPT-<run>" in inbound-receiving
     And the receipt of ASN "ASN-INB-APPT-<run>" is closed in inbound-receiving
-    Then the appointment of ASN "ASN-INB-APPT-<run>" in inbound-receiving is "Completed"
-    And inbound-receiving published DockAppointmentCompleted for the appointment of ASN "ASN-INB-APPT-<run>"
+    # The close releases the unload (yard-management's AutoCompleteUnload); the door release completes the appointment.
+    Then yard-management eventually completes the unload of the trailer of ASN "ASN-INB-APPT-<run>" after the receipt closed
+    And dock-scheduling still shows the appointment of ASN "ASN-INB-APPT-<run>" as CHECKED_IN
+    When the visit of ASN "ASN-INB-APPT-<run>" checks out in yard-management and its door is released
+    Then dock-scheduling eventually shows the appointment of ASN "ASN-INB-APPT-<run>" as COMPLETED
 
   @e2e @inbound-receiving
   Scenario: A Damaged line is recorded on the receipt and is not booked as staged stock

@@ -353,8 +353,20 @@ func (w *world) containersSealed(n, perCase int, asn, sku string) error {
 // seededBins picks one Active slot in a storage zone for sealed cases and one
 // for loose eaches from the site layout facility-layout already serves.
 func (w *world) seededBins(site string) error {
+	site = w.rs(site)
 	if err := w.doJSON(http.MethodGet, facilityBaseURL+"/sites/"+site+"/layout", nil); err != nil {
 		return err
+	}
+	if w.last.status == http.StatusNotFound || !strings.Contains(string(w.last.body), "-STOR1-RSV") {
+		// No pilot layout (scripts/09-seed-inventory.sh) on this estate, e.g. the
+		// native CI job (the site may exist for another reason, such as a dock
+		// door): declare the two zones the scenario needs.
+		if err := w.provisionStorageSite(site); err != nil {
+			return fmt.Errorf("site %s has no layout and could not be provisioned: %w", site, err)
+		}
+		if err := w.doJSON(http.MethodGet, facilityBaseURL+"/sites/"+site+"/layout", nil); err != nil {
+			return err
+		}
 	}
 	if w.last.status != http.StatusOK {
 		return fmt.Errorf("GET layout of %s = %d (%s)", site, w.last.status, w.last.body)
@@ -421,6 +433,35 @@ func (w *world) seededBins(site string) error {
 		if err := w.expectOK2xx(w.doJSON(http.MethodPut, facilityBaseURL+"/locations/"+url.PathEscape(bin)+"/handling-unit",
 			map[string]any{"handlingUnit": unit})); err != nil {
 			return fmt.Errorf("declare handling unit %s on %s: %w", unit, bin, err)
+		}
+	}
+	return nil
+}
+
+// provisionStorageSite declares, in facility-layout, the layout seededBins
+// looks for: a reserve zone STOR1-RSV with three case slots and a forward zone
+// STOR1-FWD with one loose slot (each of an ordinary Shelf type), so the
+// scenario owns its precondition instead of relying on a pilot seed. Every
+// declaration tolerates a 409.
+func (w *world) provisionStorageSite(site string) error {
+	if err := w.ensureSite(site, "Storage E2E "+site); err != nil {
+		return err
+	}
+	if err := w.ensureLocationType(slotLocationType, slotLocationTypeWeightKg, slotLocationTypeVolumeM3); err != nil {
+		return err
+	}
+	for zone, slots := range map[string][]string{"RSV": {"A", "B", "C"}, "FWD": {"A"}} {
+		zoneID := site + "-STOR1-" + zone
+		if err := w.ensureZone("STOR1", zone, site, "Ambient", false); err != nil {
+			return fmt.Errorf("zone %s: %w", zoneID, err)
+		}
+		if err := w.ensureAisle("A01", zoneID, 1, "TwoWay"); err != nil {
+			return fmt.Errorf("aisle A01 of %s: %w", zoneID, err)
+		}
+		for _, pos := range slots {
+			if err := w.ensureLocationSlot(zoneID+"-A01-01-01-"+pos, slotLocationType); err != nil {
+				return fmt.Errorf("slot %s: %w", pos, err)
+			}
 		}
 	}
 	return nil

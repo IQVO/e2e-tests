@@ -389,8 +389,8 @@ ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E
 
 # inbound-receiving <-> inventory-storage handover. inbound-receiving keeps a
 # local copy of product-master's ProductRegistered (PRODUCT_MODE=kafka +
-# PRODUCT_CONSUMER_GROUP; its dock-door copy stays PERMISSIVE here, so no
-# DOCK_DOOR_CONSUMER_GROUP). inventory-storage's consumer of
+# PRODUCT_CONSUMER_GROUP; its dock-door copy is fed by facility-layout's dock
+# slots through DOCK_DOOR_CONSUMER_GROUP, below). inventory-storage's consumer of
 # ReceiptLineReceived (its ADR 0037) does not exist unless
 # INBOUND_RECEIPT_CONSUMER_GROUP is set. Both are per-run groups, never the
 # live cluster's: a first start under a new group reads from the first offset.
@@ -473,6 +473,56 @@ NIP_TRANSFER_FACT_CONSUMER_GROUP="nip-transfer-fact-${E2E_CONSUMER_GROUP_SUFFIX}
 # would join the live cluster's groups -- always override.
 WAREHOUSE_PLANNING_LABOR_CONSUMER_GROUP="warehouse-planning-labor-${E2E_CONSUMER_GROUP_SUFFIX}"
 WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP="warehouse-planning-storage-${E2E_CONSUMER_GROUP_SUFFIX}"
+# Real-wiring standard (each service's ADR on develop): every consumer always
+# runs and its group env var is mandatory with no default, so a service that
+# gained a consumer since this file was written fails its boot until the group
+# is added here. Per-run groups, never the live cluster's.
+#
+# warehouse-planning: order-demand and task-completion (observed capacity)
+# consumers plus the dock-appointment consumer fed by dock-scheduling (its ADR
+# 0020). DEMAND_SITE_ID is the one site every consumed order and task
+# completion is attributed to; the transfer scenario creates its plans with an
+# explicit assigned_demand, so no run reads that attribution.
+WAREHOUSE_PLANNING_DEMAND_CONSUMER_GROUP="warehouse-planning-demand-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_DOCK_APPOINTMENT_CONSUMER_GROUP="warehouse-planning-dock-appointment-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_OBSERVED_CAPACITY_CONSUMER_GROUP="warehouse-planning-observed-capacity-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_DEMAND_SITE_ID="${WAREHOUSE_PLANNING_DEMAND_SITE_ID:-E2E-DEMAND}"
+# NIP's pack-level consumer (product-master ProductPackLevel* facts).
+NIP_PACK_LEVEL_CONSUMER_GROUP="nip-pack-level-${E2E_CONSUMER_GROUP_SUFFIX}"
+# wes-work-planning: the pack-level view (ADR-0045) and the pick-face
+# replenishment consumer (ADR-0042). fulfillment-execution: the pack-level view
+# (ADR 0054; it MUST differ from PRODUCT_CLASSIFICATION_CONSUMER_GROUP, both
+# read warehouse.product-master.events) and the task-interleaving hint consumer.
+WES_PACK_VIEW_CONSUMER_GROUP="wes-work-planning-pack-view-${E2E_CONSUMER_GROUP_SUFFIX}"
+WES_REPLENISHMENT_CONSUMER_GROUP="wes-work-planning-replenishment-${E2E_CONSUMER_GROUP_SUFFIX}"
+FULFILLMENT_PACK_VIEW_CONSUMER_GROUP="fulfillment-execution-pack-view-${E2E_CONSUMER_GROUP_SUFFIX}"
+FULFILLMENT_TASK_INTERLEAVING_CONSUMER_GROUP="fulfillment-execution-task-interleaving-${E2E_CONSUMER_GROUP_SUFFIX}"
+# slotting-optimization's two further consumers: inventory-storage's
+# StockRelocated (plan execution progress, its ADR 0010) and product-master's
+# pack levels (its ADR 0012).
+SLOTTING_RELOCATION_CONSUMER_GROUP="slotting-optimization-relocation-${E2E_CONSUMER_GROUP_SUFFIX}"
+SLOTTING_PACK_LEVEL_CONSUMER_GROUP="slotting-optimization-pack-level-${E2E_CONSUMER_GROUP_SUFFIX}"
+# inbound-receiving's six consumers (its ADR 0011 / 0019 / 0021): product
+# (INBOUND_PRODUCT_CONSUMER_GROUP above), dock door (facility-layout dock
+# slots), packaging, dock appointment (the local copy fed by dock-scheduling),
+# visit arrival (yard-management VisitCheckedIn) and carton stow
+# (inventory-storage ContainerStowed).
+# (defined once, above)
+# exception-management's four further consumers (carton discrepancy from
+# inbound-receiving, yard-management, dock-scheduling, outbound-shipping).
+EXCEPTIONS_CARTON_DISCREPANCY_CONSUMER_GROUP="exception-management-carton-discrepancy-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_YARD_MANAGEMENT_CONSUMER_GROUP="exception-management-yard-management-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_DOCK_SCHEDULING_CONSUMER_GROUP="exception-management-dock-scheduling-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_OUTBOUND_SHIPPING_CONSUMER_GROUP="exception-management-outbound-shipping-${E2E_CONSUMER_GROUP_SUFFIX}"
+# dock-scheduling's four mandatory consumers (yard-management's gate and unload
+# facts, facility-layout's dock slots and operating hours, inbound-receiving's
+# ASN, process-path-management's cut-off times) and yard-management's three
+# (dock-scheduling's appointments, facility-layout, inbound-receiving's
+# ReceiptClosed for the auto-complete). Its legacy importer
+# (DOCK_LEGACY_IMPORT_CONSUMER_GROUP) stays unset: that is the strangler
+# stage A migration aid and would replay a shared broker's history.
+# (The DOCK_* / YARD_* group variables themselves are defined once, in the
+# "yard journey" block above.)
 
 # ---- inter-warehouse transfer saga configuration --------------------
 # The pick leg's path is `pick-transfer` (inside the existing PICK family,

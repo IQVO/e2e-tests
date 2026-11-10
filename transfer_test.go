@@ -447,8 +447,11 @@ func (w *world) approveTransfer(qty int, sku, origin, dest string) error {
 	if got["state"] != "ALLOCATING" {
 		return fmt.Errorf("approved transfer state = %v, want ALLOCATING (body: %s)", got["state"], w.last.body)
 	}
-	if got["replayed"] != false {
-		return fmt.Errorf("approval unexpectedly reported replayed=%v", got["replayed"])
+	// network-inventory-planning reports a replayed Idempotency-Key with the
+	// Idempotency-Replayed response header (the body carries no such field
+	// any more); a first approval must not carry it.
+	if replayed := w.last.header.Get("Idempotency-Replayed"); replayed == "true" {
+		return fmt.Errorf("approval unexpectedly reported Idempotency-Replayed=%s", replayed)
 	}
 	st.pickDemand = st.id + ":pick"
 	st.dispatchDemand = st.id + ":dispatch"
