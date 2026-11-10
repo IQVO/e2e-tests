@@ -400,6 +400,44 @@ func (w *world) copyIsInState(asn, want string) error {
 	})
 }
 
+// copyIsStill reads the copy ONCE: inbound-receiving's copy holds only Booked and
+// Cancelled (ADR 0019 point 4); the arrival and the completion are not copied,
+// they stay in yard-management and dock-scheduling.
+func (w *world) copyIsStill(asn, want string) error {
+	asn = w.rs(asn)
+	id, err := w.appointmentIDFor(asn)
+	if err != nil {
+		return err
+	}
+	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/appointments/%s", inboundBaseURL, id), nil); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusOK {
+		return fmt.Errorf("GET inbound-receiving appointment %s = %d (%s)", id, w.last.status, w.last.body)
+	}
+	if got := w.last.json()["state"]; got != want {
+		return fmt.Errorf("inbound-receiving's copy of %s is %v, want it still %s (body: %s)", id, got, want, w.last.body)
+	}
+	return nil
+}
+
+// dockStateIsNow reads dock-scheduling ONCE: used to prove a state has NOT moved yet.
+func (w *world) dockStateIsNow(asn, want string) error {
+	asn = w.rs(asn)
+	a, err := w.dockAppointment(asn)
+	if err != nil {
+		return err
+	}
+	got, err := w.readDockAppointment(a["appointmentId"].(string))
+	if err != nil {
+		return err
+	}
+	if got["state"] != want {
+		return fmt.Errorf("dock-scheduling appointment %v is %v, want it still %s (body: %s)", a["appointmentId"], got["state"], want, w.last.body)
+	}
+	return nil
+}
+
 // copyMirrors requires inbound-receiving's copy to carry exactly what
 // dock-scheduling holds: door, window, ASN and the version (the copy's
 // ordering guard, ADR 0020).
@@ -872,6 +910,8 @@ func registerDockChainSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^dock-scheduling eventually shows the appointment of ASN "([^"]*)" as (BOOKED|CHECKED_IN|COMPLETED|CANCELLED)$`, w.dockStateIs)
 
 	sc.Step(`^inbound-receiving's copy of the appointment of ASN "([^"]*)" is eventually "([^"]*)"$`, w.copyIsInState)
+	sc.Step(`^inbound-receiving's copy of the appointment of ASN "([^"]*)" is still "([^"]*)"$`, w.copyIsStill)
+	sc.Step(`^dock-scheduling still shows the appointment of ASN "([^"]*)" as (CHECKED_IN)$`, w.dockStateIsNow)
 	sc.Step(`^inbound-receiving's copy of the appointment of ASN "([^"]*)" eventually mirrors dock-scheduling's door, window, ASN and version$`, w.copyMirrors)
 	sc.Step(`^inbound-receiving never holds a copy of the outbound appointment for shipment "([^"]*)"$`, w.copyNeverAppears)
 	sc.Step(`^opening the receipt of ASN "([^"]*)" in inbound-receiving from the appointment of "([^"]*)" is refused with (\d+) "([^"]*)"$`, w.openReceiptRefused)

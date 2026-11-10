@@ -462,7 +462,7 @@ jobs:
           build_one planning               "${WAREHOUSE_PLANNING_REPO}" api
           build_one nip                    "${NIP_REPO}" network-inventory-planning
 
-      - name: Start the 10 services and run @inter-warehouse-transfer
+      - name: Start the 10 services and run @inter-warehouse-transfer && ~@blocked
         working-directory: e2e-tests
         run: |
           set -euo pipefail
@@ -486,7 +486,7 @@ jobs:
 
           export FACILITY_BASE_URL INVENTORY_BASE_URL WES_BASE_URL FULFILLMENT_BASE_URL WORKFORCE_BASE_URL ORDER_BASE_URL PRODUCT_MASTER_BASE_URL PROCESS_PATH_BASE_URL NIP_BASE_URL WAREHOUSE_PLANNING_BASE_URL NIP_DB_URL KAFKA_BROKERS NIP_TRANSFER_PICK_PATH_ID NIP_TRANSFER_DISPATCH_PATH_ID
           # godog tag expression: a comma is OR.
-          export GODOG_TAGS="@inter-warehouse-transfer"
+          export GODOG_TAGS="@inter-warehouse-transfer && ~@blocked"
           go test -v -run TestMain -timeout 10m .
 
       - name: Dump service logs on failure

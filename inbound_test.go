@@ -12,7 +12,7 @@ package main
 //     stowed units), so "the handover booked N units" is proved by the
 //     StockReceived it raises on warehouse.inventory.analytics (ADR 0037 §2),
 //     which is exactly how a staged receipt becomes visible to the estate.
-//   - ReceiptClosed / DockAppointmentCompleted are read from
+//   - ReceiptClosed is read from
 //     warehouse.inbound-receiving.events next to the REST read, so the
 //     published contract (snake_case, full type) is asserted too.
 //
@@ -33,9 +33,8 @@ const (
 	topicInboundEvents      = "warehouse.inbound-receiving.events"
 	topicInventoryAnalytics = "warehouse.inventory.analytics"
 
-	typeReceiptClosed        = "com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed"
-	typeAppointmentCompleted = "com.warehouse.wms.inbound-receiving.dockappointment.DockAppointmentCompleted"
-	typeStockReceived        = "com.warehouse.wms.inventory-storage.stock.StockReceived"
+	typeReceiptClosed = "com.warehouse.wms.inbound-receiving.receipt.ReceiptClosed"
+	typeStockReceived = "com.warehouse.wms.inventory-storage.stock.StockReceived"
 )
 
 // inboundState remembers the ids inbound-receiving minted. The world is
@@ -452,24 +451,6 @@ func (w *world) inventoryStagesUnits(units int, sku string, events int) error {
 // Dock appointments
 // ---------------------------------------------------------------------
 
-func (w *world) appointmentCompletedEventPublished(asn string) error {
-	asn = w.rs(asn)
-	id, err := w.appointmentIDFor(asn)
-	if err != nil {
-		return err
-	}
-	door := w.ib().doorByASN[asn]
-	p, err := expectKafkaEvent(topicInboundEvents, typeAppointmentCompleted,
-		func(p map[string]any) bool { return p["appointment_id"] == id }, "appointment "+id)
-	if err != nil {
-		return err
-	}
-	if p["door_code"] != door {
-		return fmt.Errorf("DockAppointmentCompleted door_code = %v, want %s (payload: %v)", p["door_code"], door, p)
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------
 // registration
 // ---------------------------------------------------------------------
@@ -490,5 +471,4 @@ func registerInboundSteps(sc *godog.ScenarioContext, w *world) {
 
 	sc.Step(`^inventory-storage eventually stages (\d+) units of SKU "([^"]*)" in exactly (\d+) StockReceived events?$`, w.inventoryStagesUnits)
 
-	sc.Step(`^inbound-receiving published DockAppointmentCompleted for the appointment of ASN "([^"]*)"$`, w.appointmentCompletedEventPublished)
 }

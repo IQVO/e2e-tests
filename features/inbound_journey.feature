@@ -12,7 +12,7 @@ Feature: Inbound journey - the whole dock chain, with real services only
 
   Everything between the owners travels over Kafka, so each cross-service
   assertion is a poll (the copy of the appointment, the CHECKED_IN and COMPLETED
-  states in dock-scheduling, the auto-completed unload in yard-management); every
+  state in dock-scheduling, the auto-completed unload in yard-management); every
   fact that is read from a topic is read-only (the harness never writes to Kafka).
 
   Services started by scripts/03-up-services.sh for this feature: facility-layout,
@@ -28,6 +28,10 @@ Feature: Inbound journey - the whole dock chain, with real services only
     VISITING_DRIVER TO_DOOR move to exactly that door, not a parking spot.
   - VisitCheckedIn carries the same arrival instant as the visit REST answer, and
     that instant is the arrived_at of ReceiptStowCompleted.
+  - The appointment is completed by the door release, not by the receipt: after the
+    close dock-scheduling still shows CHECKED_IN, and only the check-out (the
+    trailer leaving the door) makes it COMPLETED. inbound-receiving's copy holds only
+    Booked and Cancelled (ADR 0019), so it reads Booked throughout.
   - The unload is released by the receipt, not by the clerk: while door work is
     IN_PROGRESS the visit cannot check out (409 trailer-not-released); once the
     receipt is Closed yard-management completes the door work (EMPTY) on its own
@@ -68,7 +72,8 @@ Feature: Inbound journey - the whole dock chain, with real services only
     Then yard-management published VisitCheckedIn for the appointment of ASN "ASN-JRN-<run>" with the arrival of the visit
     And yard-management raised no seal exception for the appointment of ASN "ASN-JRN-<run>"
     And dock-scheduling eventually shows the appointment of ASN "ASN-JRN-<run>" as CHECKED_IN
-    And inbound-receiving's copy of the appointment of ASN "ASN-JRN-<run>" is eventually "CheckedIn"
+    # The copy holds only Booked and Cancelled (ADR 0019): arrival and completion are not copied.
+    And inbound-receiving's copy of the appointment of ASN "ASN-JRN-<run>" is still "Booked"
     When the gate clerk docks the trailer of ASN "ASN-JRN-<run>" at its appointment door in yard-management
     And door work starts on the trailer of ASN "ASN-JRN-<run>" in yard-management
 
@@ -77,13 +82,11 @@ Feature: Inbound journey - the whole dock chain, with real services only
     And every carton SSCC of ASN "ASN-JRN-<run>" is scanned on its receipt in inbound-receiving and each scan is accepted
     Then yard-management refuses to check out the visit of ASN "ASN-JRN-<run>" while its trailer is still being unloaded
 
-    # 4. The close releases the unload and completes the appointment.
+    # 4. The close releases the unload; the appointment stays CHECKED_IN until the door is released.
     When the receipt of ASN "ASN-JRN-<run>" is closed in inbound-receiving
     Then the receipt of ASN "ASN-JRN-<run>" in inbound-receiving is Closed with no discrepancy, 36 eaches booked and every carton Accepted
-    And inbound-receiving published DockAppointmentCompleted for the appointment of ASN "ASN-JRN-<run>"
     And yard-management eventually completes the unload of the trailer of ASN "ASN-JRN-<run>" after the receipt closed
-    And inbound-receiving's copy of the appointment of ASN "ASN-JRN-<run>" is eventually "Completed"
-    And dock-scheduling eventually shows the appointment of ASN "ASN-JRN-<run>" as COMPLETED
+    And dock-scheduling still shows the appointment of ASN "ASN-JRN-<run>" as CHECKED_IN
     And inventory-storage eventually holds 3 SEALED containers of 12 eaches each for the cartons of ASN "ASN-JRN-<run>" and SKU "SKU-JRN-<run>"
 
     # 5. The RF stow closes the dock-to-stock measure (inbound-receiving ADR 0021).
@@ -91,8 +94,9 @@ Feature: Inbound journey - the whole dock chain, with real services only
     Then inbound-receiving published ReceiptStowCompleted for ASN "ASN-JRN-<run>" with the gate arrival, the last of its 3 stows and the exact dock-to-stock seconds
     And the usable inventory of SKU "SKU-JRN-<run>" in inventory-storage is 36 eaches, 0 loose and 3 reservable cases
 
-    # 6. The released trailer leaves and the door is free again.
-    And the visit of ASN "ASN-JRN-<run>" checks out in yard-management and its door is released
+    # 6. The released trailer leaves: the door is free again and dock-scheduling completes the appointment.
+    When the visit of ASN "ASN-JRN-<run>" checks out in yard-management and its door is released
+    Then dock-scheduling eventually shows the appointment of ASN "ASN-JRN-<run>" as COMPLETED
 
   @e2e @inbound-journey
   Scenario: Only a live inbound appointment reaches a receipt, and a reschedule moves the door of the next one

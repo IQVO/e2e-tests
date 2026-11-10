@@ -357,9 +357,10 @@ func (w *world) seededBins(site string) error {
 	if err := w.doJSON(http.MethodGet, facilityBaseURL+"/sites/"+site+"/layout", nil); err != nil {
 		return err
 	}
-	if w.last.status == http.StatusNotFound {
+	if w.last.status == http.StatusNotFound || !strings.Contains(string(w.last.body), "-STOR1-RSV") {
 		// No pilot layout (scripts/09-seed-inventory.sh) on this estate, e.g. the
-		// native CI job: declare the two zones the scenario needs.
+		// native CI job (the site may exist for another reason, such as a dock
+		// door): declare the two zones the scenario needs.
 		if err := w.provisionStorageSite(site); err != nil {
 			return fmt.Errorf("site %s has no layout and could not be provisioned: %w", site, err)
 		}

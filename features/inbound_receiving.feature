@@ -40,9 +40,11 @@ Feature: inbound-receiving takes goods from ASN to staged stock
   - The overlapping booking is refused by dock-scheduling with the
     door-double-booked problem, not just any 409, while a window that starts
     exactly when the first one ends (the window is half-open) is accepted.
-  - The gate check-in is yard-management's: dock-scheduling and inbound-
-    receiving's copy both reach CHECKED_IN / CheckedIn only through it, and the
-    completion comes back through inbound-receiving's DockAppointmentCompleted.
+  - The gate check-in is yard-management's and reaches dock-scheduling as
+    CHECKED_IN; inbound-receiving's copy holds only Booked and Cancelled (ADR
+    0019), so it is read as Booked throughout. The receipt's close releases the
+    unload in yard-management; only the door release (the check-out) completes
+    the appointment in dock-scheduling.
 
   Every mutable id is run-scoped. The world is shared by all scenarios of a
   process, so each scenario also owns its own ASN and SKU tokens.
@@ -100,14 +102,18 @@ Feature: inbound-receiving takes goods from ASN to staged stock
 
     When the carrier of ASN "ASN-INB-APPT-<run>" checks in at the gate of yard-management
     Then dock-scheduling eventually shows the appointment of ASN "ASN-INB-APPT-<run>" as CHECKED_IN
-    And inbound-receiving's copy of the appointment of ASN "ASN-INB-APPT-<run>" is eventually "CheckedIn"
+    # The copy holds only Booked and Cancelled (ADR 0019): the arrival stays in yard-management and dock-scheduling.
+    And inbound-receiving's copy of the appointment of ASN "ASN-INB-APPT-<run>" is still "Booked"
+    When the gate clerk docks the trailer of ASN "ASN-INB-APPT-<run>" at its appointment door in yard-management
 
     When a receipt is opened for ASN "ASN-INB-APPT-<run>" from its appointment in inbound-receiving
     And 5 Good units of line 1 are received on the receipt of ASN "ASN-INB-APPT-<run>" in inbound-receiving
     And the receipt of ASN "ASN-INB-APPT-<run>" is closed in inbound-receiving
-    Then inbound-receiving's copy of the appointment of ASN "ASN-INB-APPT-<run>" is eventually "Completed"
-    And inbound-receiving published DockAppointmentCompleted for the appointment of ASN "ASN-INB-APPT-<run>"
-    And dock-scheduling eventually shows the appointment of ASN "ASN-INB-APPT-<run>" as COMPLETED
+    # The close releases the unload (yard-management's AutoCompleteUnload); the door release completes the appointment.
+    Then yard-management eventually completes the unload of the trailer of ASN "ASN-INB-APPT-<run>" after the receipt closed
+    And dock-scheduling still shows the appointment of ASN "ASN-INB-APPT-<run>" as CHECKED_IN
+    When the visit of ASN "ASN-INB-APPT-<run>" checks out in yard-management and its door is released
+    Then dock-scheduling eventually shows the appointment of ASN "ASN-INB-APPT-<run>" as COMPLETED
 
   @e2e @inbound-receiving
   Scenario: A Damaged line is recorded on the receipt and is not booked as staged stock
