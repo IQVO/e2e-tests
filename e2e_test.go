@@ -156,6 +156,10 @@ type world struct {
 	// scenarios 2 and 3). See returns_test.go.
 	exc *exceptionsState
 
+	// yard is the yard-journey correlation (appointment, visit, trailer and move
+	// ids by run-scoped label). See yard_journey_test.go.
+	yard *yardJourneyState
+
 	// pathListing is every item of the last process-paths listing (all pages), see listPaths.
 	pathListing []map[string]any
 }
@@ -1856,6 +1860,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerPhase5ASteps(sc, w)
 	registerReturnsSteps(sc, w)
 	registerSlottingSteps(sc, w)
+	registerYardJourneySteps(sc, w)
 	registerPhase5BSteps(sc, w)
 	registerPhase5CasePickSteps(sc, w)
 	registerPhase5OrderSiteSteps(sc, w)
