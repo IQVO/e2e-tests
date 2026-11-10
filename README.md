@@ -45,9 +45,16 @@ Ports and DSNs live in `env.sh` only; this table mirrors it.
 | network-fulfillment | `netfulfil` | 8089 | 5449 | — |
 | network-inventory-planning | `network-inventory-planning` | 8099 | 5451 | — |
 | warehouse-planning | `api` | 8100 | 5452 | — |
-| **inbound-receiving** | `api` | 8108 | 5453 | ASN / dock appointment / receipt (`/asns`, `/appointments`, `/receipts`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`), dock doors permissive; publishes `warehouse.inbound-receiving.events` |
+| **dock-scheduling** | `api` | 8112 | 5457 | owns appointment booking (`/appointments`, `/sites/{site}/dock-calendar`; inbound-receiving ADR 0019); its outbox relay runs in-process; learns doors from facility-layout, ASNs from inbound-receiving and arrivals / dock moves from yard-management (four per-run consumer groups); publishes `warehouse.dock-scheduling.events` |
+| **yard-management** | `api`, `relay` | 8113 (relay health 8114) | 5458 | owns the gate check-in (`POST /visits`), dock moves, door work and departure; learns doors from facility-layout, appointments from dock-scheduling and receipts from inbound-receiving (three per-run consumer groups); the outbox relay is its own binary (`cmd/relay`), started after the API; publishes `warehouse.yard-management.events` |
+| **inbound-receiving** | `api` | 8108 | 5453 | ASN / receipt (`/asns`, `/receipts`) and a LOCAL COPY of dock-scheduling's appointments (`GET /appointments`, deprecated; its writes answer `410 appointment-moved`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`), dock doors from facility-layout's Dock slots (`DOCK_DOOR_CONSUMER_GROUP`); six more per-run consumer groups; publishes `warehouse.inbound-receiving.events` |
 | **slotting-optimization** | `api` | 8109 | 5454 | forward-slot planner (`/slot-plans`, `/forward-slots`, `/sku-velocity`); three local copies, all `kafka` mode: product-master's classification and physical profile (`PRODUCT_MODE`), facility-layout's zones and slots (`LAYOUT_MODE`), order-management's `SiteSkuDemandChanged` (`DEMAND_MODE`, injected by the scenarios); publishes `warehouse.slotting-optimization.events` |
 | warehouse-ops-agent | `agent` | 8096 | — | — |
+
+Every service runs with the real wiring (every consumer on, every
+`*_CONSUMER_GROUP` variable mandatory, no `*_MODE=permissive`); each service's
+environment is defined once, in `scripts/services.sh`, and shared by
+`scripts/03-up-services.sh` and the CI workflow.
 
 Every local copy uses a per-run consumer group derived from
 `E2E_CONSUMER_GROUP_SUFFIX` (never the cluster's group): that includes

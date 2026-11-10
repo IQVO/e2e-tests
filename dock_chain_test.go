@@ -554,7 +554,7 @@ func (w *world) carrierChecksInAtGate(asn string) error {
 	if err := w.yardKnowsDoor(site, door); err != nil {
 		return err
 	}
-	tag := tail(asn, 20)
+	tag := strings.TrimLeft(tail(asn, 20), "-")
 	// yard-management learns the appointment from dock-scheduling over Kafka: a
 	// check-in naming one it has not consumed yet is refused 422 and persists
 	// nothing, so retrying is what a gate clerk would do.
@@ -638,9 +638,11 @@ func (w *world) visitCheckedInPublished(asn string) error {
 	if err != nil {
 		return err
 	}
+	// The REST visit carries the arrival with sub-second precision; the event
+	// (and everything downstream of it) carries whole seconds.
 	at, err := parseTime(p["arrived_at"])
-	if err != nil || !at.Equal(w.dock().arrived[asn]) {
-		return fmt.Errorf("VisitCheckedIn arrived_at = %v, want the visit's %s (payload: %v)", p["arrived_at"], w.dock().arrived[asn].Format(time.RFC3339Nano), p)
+	if err != nil || !at.Equal(w.dock().arrived[asn].Truncate(time.Second)) {
+		return fmt.Errorf("VisitCheckedIn arrived_at = %v, want the visit's %s to the second (payload: %v)", p["arrived_at"], w.dock().arrived[asn].Format(time.RFC3339Nano), p)
 	}
 	ts, _ := p["trailers"].([]any)
 	if p["visit_id"] != visit["visitId"] || p["site_id"] != siteOfDoor(a["doorCode"].(string)) || p["purpose"] != "LIVE_UNLOAD" || len(ts) != 1 ||
@@ -865,16 +867,16 @@ func (w *world) receiptStowCompleted(asn string, cartons int) error {
 	if p["asn_number"] != asn || p["appointment_id"] != a["appointmentId"] || n != cartons {
 		return fmt.Errorf("ReceiptStowCompleted = %v, want ASN %s, appointment %v, %d cartons", p, asn, a["appointmentId"], cartons)
 	}
-	if !arrivedAt.Equal(w.dock().arrived[asn]) {
-		return fmt.Errorf("ReceiptStowCompleted arrived_at = %v, want the gate arrival %s", p["arrived_at"], w.dock().arrived[asn].Format(time.RFC3339Nano))
+	if !arrivedAt.Equal(w.dock().arrived[asn].Truncate(time.Second)) {
+		return fmt.Errorf("ReceiptStowCompleted arrived_at = %v, want the gate arrival %s to the second", p["arrived_at"], w.dock().arrived[asn].Format(time.RFC3339Nano))
 	}
-	if !stowedAt.Equal(last) {
-		return fmt.Errorf("ReceiptStowCompleted stowed_at = %v, want the latest ContainerStowed %s", p["stowed_at"], last.Format(time.RFC3339Nano))
+	if !stowedAt.Equal(last) && !stowedAt.Equal(last.Truncate(time.Second)) {
+		return fmt.Errorf("ReceiptStowCompleted stowed_at = %v, want the latest ContainerStowed %s (to the second)", p["stowed_at"], last.Format(time.RFC3339Nano))
 	}
-	if !closedAt.Equal(wantClosed) {
+	if !closedAt.Equal(wantClosed) && !closedAt.Equal(wantClosed.Truncate(time.Second)) {
 		return fmt.Errorf("ReceiptStowCompleted closed_at = %v, want the receipt's closedAt %v", p["closed_at"], rec["closedAt"])
 	}
-	if want := int(last.Sub(arrivedAt) / time.Second); secs != want || secs <= 0 {
+	if want := int(stowedAt.Sub(arrivedAt) / time.Second); secs != want || secs <= 0 {
 		return fmt.Errorf("dock_to_stock_seconds = %d, want stowed_at - arrived_at = %d (> 0)", secs, want)
 	}
 	// Exactly once, whatever order the facts arrived in.
