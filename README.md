@@ -13,7 +13,8 @@ This repo is a study-project companion to the bounded-context repos
 `wes-work-planning`, `fulfillment-execution`, `workforce-management`,
 `order-management`, `process-path-management`, `labor-performance`,
 `network-fulfillment`, `network-inventory-planning`, `warehouse-planning`,
-`inbound-receiving`, `slotting-optimization`)
+`inbound-receiving`, `slotting-optimization`, `dock-scheduling`,
+`yard-management`, `outbound-shipping`)
 plus the read-side decision-support agent `warehouse-ops-agent`, all siblings
 under the same `warehouse-systems/` workspace root — see `env.sh`'s
 `REPOS_ROOT` for the layout this harness assumes (it is overridable:
@@ -45,8 +46,11 @@ Ports and DSNs live in `env.sh` only; this table mirrors it.
 | network-fulfillment | `netfulfil` | 8089 | 5449 | — |
 | network-inventory-planning | `network-inventory-planning` | 8099 | 5451 | — |
 | warehouse-planning | `api` | 8100 | 5452 | — |
-| **inbound-receiving** | `api` | 8108 | 5453 | ASN / dock appointment / receipt (`/asns`, `/appointments`, `/receipts`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`), dock doors permissive; publishes `warehouse.inbound-receiving.events` |
+| **inbound-receiving** | `api` | 8108 | 5453 | ASN / dock appointment / receipt (`/asns`, `/appointments`, `/receipts`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`); all six consumer groups are mandatory on current develop (dock doors from facility-layout, appointments from dock-scheduling, arrivals from yard-management, carton stows from inventory-storage, packaging); publishes `warehouse.inbound-receiving.events` |
 | **slotting-optimization** | `api` | 8109 | 5454 | forward-slot planner (`/slot-plans`, `/forward-slots`, `/sku-velocity`); three local copies, all `kafka` mode: product-master's classification and physical profile (`PRODUCT_MODE`), facility-layout's zones and slots (`LAYOUT_MODE`), order-management's `SiteSkuDemandChanged` (`DEMAND_MODE`, injected by the scenarios); publishes `warehouse.slotting-optimization.events` |
+| **dock-scheduling** | `api` | 8112 | 5457 | the door calendar (`/appointments`, `/sites/{siteId}/dock-calendar/*`, `/doors/{doorCode}/availability`); four event-fed copies (`YARD_`, `FACILITY_`, `ASN_`, `CPT_CONSUMER_GROUP`; the legacy importer group stays unset); relays its outbox in-process; publishes `warehouse.dock-scheduling.events` |
+| **yard-management** | `api` + `relay` | 8113 (relay health 8114) | 5458 | the yard: gate (`/visits`), trailers, moves, door work, `/sites/{siteId}/yard-board` and `/yard-policy`; three consumers (`DOCK_SCHEDULING_`, `FACILITY_`, `INBOUND_RECEIVING_CONSUMER_GROUP`); the API does NOT relay its outbox, the separate `relay` binary does (both run); publishes `warehouse.yard-management.events` |
+| **outbound-shipping** | `api` | 8115 | 5459 | outbound loads, packages and bills of lading (`/loads`, `/packages/{id}/stagings\|loadings`); six consumers (`FULFILLMENT_`, `DOCK_`, `YARD_`, `CPT_`, `LAYOUT_`, `ANALYTICS_CONSUMER_GROUP`); relays in-process; publishes `warehouse.outbound-shipping.events` |
 | warehouse-ops-agent | `agent` | 8096 | — | — |
 
 Every local copy uses a per-run consumer group derived from
@@ -55,13 +59,15 @@ inbound-receiving's product copy (`PRODUCT_CONSUMER_GROUP`),
 inventory-storage's consumer of inbound-receiving
 (`INBOUND_RECEIPT_CONSUMER_GROUP`, which does not exist when unset) and
 slotting-optimization's three copies (`DEMAND_CONSUMER_GROUP`,
-`PRODUCT_CONSUMER_GROUP`, `LAYOUT_CONSUMER_GROUP`, required in `kafka` mode).
+`PRODUCT_CONSUMER_GROUP`, `LAYOUT_CONSUMER_GROUP`, required in `kafka` mode),
+and the yard contexts' groups (dock-scheduling four, yard-management three,
+outbound-shipping six, inbound-receiving's five others), all in `env.sh`.
 `PRODUCT_CLASSIFICATION_MODE=http` no longer exists: the three readers
 refuse to boot with it.
 
 ## What's covered
 
-14 feature files (the inter-warehouse transfer feature has two scenarios,
+21 feature files (the inter-warehouse transfer feature has two scenarios,
 the inbound-receiving and slotting-optimization ones four each,
 returns/exceptions three):
 
@@ -85,6 +91,30 @@ returns/exceptions three):
   ahead) as `due_at`, while a plan counts only lines due in
   `[now - lookback, now)`; the scenarios publish the same
   `SiteSkuDemandChanged` it would, as the transfer feature does.
+
+- **`features/yard_journey.feature`** (`@yard-journey`, three scenarios) — one
+  trailer's visit across facility-layout, inbound-receiving, dock-scheduling and
+  yard-management (plus outbound-shipping), which never call one another and
+  agree only over Kafka; the one place those contracts are exercised for real.
+  (1) An inbound visit with an appointment: the layout is registered in
+  facility-layout only, the ASN in inbound-receiving only, the appointment in
+  dock-scheduling (which starts `BOOKED`, then turns `CHECKED_IN` and
+  `COMPLETED` by yard events alone); the gate directs the trailer to the door
+  (`TO_DOOR`), it docks, the receipt is opened on the appointment and closed
+  and the door work completes by `ReceiptClosed` alone (no completion call),
+  the visit leaves and the yard board is empty; then it reads
+  `warehouse.yard-management.events` from the first offset on a fresh consumer
+  group and requires `VisitCheckedIn`, `TrailerDocked`, `DoorWorkCompleted` and
+  `TrailerDeparted` for THIS run's trailer (the regression guard for the
+  integration/analytics topic split). (2) A walk-in goes to the policy's holding
+  spot, an appointment-only site turns it away (and persists nothing), a seal
+  mismatch under `REJECT` is rejected with `SealExceptionRaised` and cancels
+  exactly the appointment it names (`TURNED_AWAY`). (3) Ship-confirm follows the
+  physical departure: the load is `CLOSED` with everything but the departure in
+  place and `SHIP_CONFIRMED` only after the check-out, with the yard's trailer
+  and seal in `ShipmentConfirmed`. Every site is run-scoped. Scenario 3 injects
+  two upstream facts (PackageManifested, CPTScheduleChanged; see the feature for
+  why the CPT schedule is not the real producer's).
 
 - **`features/inbound_receiving.feature`** (`@inbound-receiving`) — the inbound
   dock workflow and its handover, against inbound-receiving, product-master
@@ -219,14 +249,15 @@ missing).
 
 ```bash
 cd e2e-tests
-bash scripts/02-up-infra.sh      # Postgres (14 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
-bash scripts/01-build.sh         # builds all 22 binaries (14 HTTP incl. product-master, inbound-receiving, slotting-optimization, network-inventory-planning, warehouse-planning + 7 MCP + ops-agent)
-bash scripts/03-up-services.sh   # starts them as background processes (product-master, inbound-receiving and slotting-optimization before inventory-storage; NIP last)
+bash scripts/02-up-infra.sh      # Postgres (19 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
+bash scripts/01-build.sh         # builds all 28 binaries (20 HTTP incl. product-master, inbound-receiving, slotting-optimization, network-inventory-planning, warehouse-planning, dock-scheduling, yard-management + its relay, outbound-shipping + 7 MCP + ops-agent)
+bash scripts/03-up-services.sh   # starts them as background processes (product-master, inbound-receiving and slotting-optimization before inventory-storage; NIP last; then dock-scheduling, yard-management, its relay and outbound-shipping)
 bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)
 GODOG_TAGS=@product-master bash scripts/04-run-tests.sh  # just the product-master scenario
 GODOG_TAGS=@inbound-receiving bash scripts/04-run-tests.sh  # just the inbound-receiving scenarios
 GODOG_TAGS=@slotting bash scripts/04-run-tests.sh  # just the slotting-optimization scenarios
 GODOG_TAGS=@returns-exceptions bash scripts/04-run-tests.sh  # just the returns/exceptions scenarios
+GODOG_TAGS=@yard-journey bash scripts/04-run-tests.sh  # just the yard journey (facility, inbound, dock-scheduling, yard, outbound-shipping)
 bash scripts/06-run-soak.sh      # OPTIONAL: the long-running @soak backlog-ramp run (see below)
 bash scripts/05-down-services.sh # stops only what this harness started
 ```
@@ -685,16 +716,16 @@ suite itself is not a CI job (see CI below).
 `.github/workflows/ci.yml` runs `gofmt`, `go build`/`go vet`, a shell
 syntax check on every `scripts/*.sh`, and `docker compose config`
 validation. The full godog suite is NOT run in CI: it is a genuinely
-multi-repo black-box harness (it builds and runs binaries from fourteen
-sibling bounded-context repos, product-master, inbound-receiving and
-slotting-optimization included, plus
+multi-repo black-box harness (it builds and runs binaries from seventeen
+sibling bounded-context repos, product-master, inbound-receiving,
+slotting-optimization, dock-scheduling, yard-management and outbound-shipping included, plus
 `warehouse-ops-agent`, none of which are checked out in
 a single-repo GitHub Actions run) — it is run and verified locally as part
 of every change that touches it, the same pattern `e2s-tests`' equivalent
 harness follows.
 
 `.github/workflows/e2e-behaviour.yml` (weekly + manual dispatch) is the
-exception, with five jobs. The first checks out the 7 core repos
+exception, with six jobs. The first checks out the 7 core repos
 (facility-layout, product-master, inventory-storage, wes-work-planning,
 fulfillment-execution, workforce-management, order-management), starts them
 against a throwaway Kafka and per-service Postgres, and runs
@@ -709,7 +740,12 @@ pre-created topics. The fifth (`@returns-exceptions`) needs only
 returns-processing, exception-management and inventory-storage (with its
 `RETURN_LINE_CONSUMER_GROUP`); the feature injects the upstream facts
 itself, so no order-management, fulfillment-execution or product-master
-checkout is needed.
+checkout is needed. The sixth (`@yard-journey`) needs facility-layout,
+product-master, inbound-receiving, dock-scheduling, yard-management (API and its
+separate relay) and outbound-shipping, with every consumer group per-run and 16
+pre-created single-partition topics; the outbound leg injects
+PackageManifested and CPTScheduleChanged, so no fulfillment-execution or
+process-path-management checkout is needed.
 
 ### Order fulfillment site (`@order-site`)
 
