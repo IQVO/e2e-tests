@@ -95,13 +95,13 @@ var topics = []string{
 	"warehouse.task-interleaving.analytics",
 	"warehouse.network-fulfillment.events",
 	"warehouse.network-fulfillment.analytics",
-	// The inbound dock chain. dock-scheduling and yard-management publish
-	// these (their outbox relays publish BOTH topics per event); a group on a
-	// missing topic is never assigned a partition, and these are consumed by
-	// inbound-receiving (appointment copy, visit arrival), warehouse-planning
-	// (dock appointments) and exception-management (yard, dock, outbound
-	// shipping exceptions), all of which refuse to boot without the group and
-	// would stall silently without the topic.
+	// The yard journey (features/yard_journey.feature). dock-scheduling's and
+	// yard-management's consumers (and inbound-receiving's appointment and
+	// visit-arrival copies, and outbound-shipping's) subscribe to the integration
+	// topics of one another, and a group on a topic that does not exist yet is
+	// never assigned a partition. Their relays publish BOTH topics per event, so
+	// each analytics topic must exist too (the yard's TrailerDeparted and
+	// DoorWorkCompleted also go there; the feature scans the integration topic).
 	"warehouse.dock-scheduling.events",
 	"warehouse.dock-scheduling.analytics",
 	"warehouse.yard-management.events",

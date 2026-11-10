@@ -27,6 +27,10 @@ export NIP_BASE_URL WAREHOUSE_PLANNING_BASE_URL NIP_DB_URL KAFKA_BROKERS NIP_TRA
 # returns_test.go match env.sh, exported so the shell and the Go binary can
 # never drift).
 export RETURNS_BASE_URL EXCEPTIONS_BASE_URL
+# yard_journey.feature: dock-scheduling, yard-management and outbound-shipping, next to the
+# facility-layout, product-master and inbound-receiving URLs exported above (the
+# broker it reads is KAFKA_BROKERS, exported with the transfer vars).
+export DOCK_SCHEDULING_BASE_URL YARD_BASE_URL OUTBOUND_SHIPPING_BASE_URL
 
 # The *_DB_URL values above deliberately carry NO password in the URL
 # itself (see env.sh's own comment) -- e2e_test.go's dbOpen helper fills

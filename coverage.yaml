@@ -46,6 +46,7 @@ components:
     nativeScenarios:
     - inbound-journey
     - inbound-receiving
+    - yard-journey
     clusterChecks: []
   ecosystem:
     kinds:
@@ -85,6 +86,7 @@ components:
     nativeScenarios:
     - facility-layout-propagation
     - mcp-smoke
+    - yard-journey
     clusterChecks:
     - api
     - mcp
@@ -128,7 +130,8 @@ components:
       projector: inbound-projector
       reports: inbound-reports
     remote: inbound_mfe/App
-    nativeScenarios: []
+    nativeScenarios:
+    - yard-journey
     clusterChecks: []
   inventory-storage:
     kinds:
@@ -532,4 +535,5 @@ components:
     nativeScenarios:
     - inbound-journey
     - inbound-receiving
+    - yard-journey
     clusterChecks: []

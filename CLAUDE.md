@@ -79,8 +79,8 @@ bash scripts/05-down-services.sh
 
 CI: `.github/workflows/ci.yml` (every PR) only compile-checks (gofmt, vet,
 `go test -c`, shell syntax, blocking `guide-lint`). The weekly/manual
-`.github/workflows/e2e-behaviour.yml` runs ONLY `@bootstrap` against the 6
-core services; the rest of the suite still runs only locally. Widen CI one
+`.github/workflows/e2e-behaviour.yml` runs `@bootstrap` against the 6
+core services plus the per-feature slices listed in `.claude/rules/harness-infra-and-ci.md` (incl. `@yard-journey`); the rest of the suite still runs only locally. Widen CI one
 feature at a time.
 
 ## Skills and rules

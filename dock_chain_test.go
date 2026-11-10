@@ -22,14 +22,11 @@ import (
 	"github.com/cucumber/godog"
 )
 
-var (
-	dockSchedulingBaseURL = envOrDefault("DOCK_SCHEDULING_BASE_URL", "http://localhost:8112")
-	yardBaseURL           = envOrDefault("YARD_MANAGEMENT_BASE_URL", "http://localhost:8113")
-)
+// dockSchedulingBaseURL, yardBaseURL and topicYardEvents are declared once, in
+// yard_journey_test.go (YARD_BASE_URL is the harness variable); so are
+// readTrailer and doorWorkStarted, which this file calls by trailer unit number.
 
 const (
-	topicYardEvents = "warehouse.yard-management.events"
-
 	typeVisitCheckedIn      = "com.warehouse.wms.yard-management.yardvisit.VisitCheckedIn"
 	typeTrailerDocked       = "com.warehouse.wms.yard-management.trailer.TrailerDocked"
 	typeDoorWorkCompleted   = "com.warehouse.wms.yard-management.trailer.DoorWorkCompleted"
@@ -57,6 +54,7 @@ type dockChainState struct {
 	appt    map[string]map[string]any // key -> dock-scheduling's appointment (last answer)
 	checkIn map[string]map[string]any // ASN -> yard-management's CheckIn answer
 	arrived map[string]time.Time      // ASN -> the visit's arrivedAt
+	unit    map[string]string         // ASN -> the unit number of its trailer (key of yj().trailers)
 }
 
 func (w *world) dock() *dockChainState {
@@ -66,6 +64,7 @@ func (w *world) dock() *dockChainState {
 			appt:    map[string]map[string]any{},
 			checkIn: map[string]map[string]any{},
 			arrived: map[string]time.Time{},
+			unit:    map[string]string{},
 		}
 	}
 	return in.dock
@@ -605,6 +604,11 @@ func (w *world) carrierChecksInAtGate(asn string) error {
 	}
 	w.dock().checkIn[asn] = got
 	w.dock().arrived[asn] = arrived
+	// Register the trailer with the yard journey's bookkeeping, so the one
+	// readTrailer / doorWorkStarted of yard_journey_test.go serve both journeys.
+	unit := "TR-" + tag
+	w.dock().unit[asn] = unit
+	w.yj().trailers[unit] = fmt.Sprint(tr["trailerId"])
 	return nil
 }
 
@@ -619,14 +623,10 @@ func (w *world) checkInOf(asn string) (visit, trailer, move map[string]any, err 
 	return visit, trailer, move, nil
 }
 
-func (w *world) readTrailer(id string) (map[string]any, error) {
-	if err := w.doJSON(http.MethodGet, yardBaseURL+"/trailers/"+id, nil); err != nil {
-		return nil, err
-	}
-	if w.last.status != http.StatusOK {
-		return nil, fmt.Errorf("GET trailer %s = %d (%s)", id, w.last.status, w.last.body)
-	}
-	return w.last.json(), nil
+// trailerOfASN reads the trailer of an ASN's visit through yard_journey_test.go's
+// readTrailer (by unit number).
+func (w *world) trailerOfASN(asn string) (map[string]any, error) {
+	return w.readTrailer(w.dock().unit[asn])
 }
 
 // visitCheckedInPublished requires yard-management's VisitCheckedIn on its
@@ -677,7 +677,7 @@ func (w *world) trailerIsDocked(asn string) error {
 	if mv := w.last.json(); w.last.status != http.StatusOK || mv["state"] != "COMPLETED" {
 		return fmt.Errorf("complete move: status %d state %v (body: %s)", w.last.status, mv["state"], w.last.body)
 	}
-	got, err := w.readTrailer(trailer["trailerId"].(string))
+	got, err := w.trailerOfASN(asn)
 	if err != nil {
 		return err
 	}
@@ -698,19 +698,16 @@ func (w *world) trailerIsDocked(asn string) error {
 	return nil
 }
 
-func (w *world) doorWorkStarted(asn string) error {
+// doorWorkStartsOnTrailerOf starts the door work of the trailer of an ASN's
+// visit; the call and its IN_PROGRESS check are yard_journey_test.go's
+// doorWorkStarted.
+func (w *world) doorWorkStartsOnTrailerOf(asn string) error {
 	asn = w.rs(asn)
-	_, trailer, _, err := w.checkInOf(asn)
-	if err != nil {
-		return err
+	unit, ok := w.dock().unit[asn]
+	if !ok {
+		return fmt.Errorf("no gate check-in has been recorded for ASN %s in this process", asn)
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/trailers/%s/door-work-starts", yardBaseURL, trailer["trailerId"]), nil)); err != nil {
-		return fmt.Errorf("start door work: %w", err)
-	}
-	if got := w.last.json(); w.last.status != http.StatusOK || got["doorWork"] != "IN_PROGRESS" {
-		return fmt.Errorf("door work after the start = %s, want IN_PROGRESS", w.last.body)
-	}
-	return nil
+	return w.doorWorkStarted(unit)
 }
 
 func (w *world) checkOut(asn string) error {
@@ -742,7 +739,7 @@ func (w *world) yardCompletesUnload(asn string) error {
 	}
 	tid, _ := trailer["trailerId"].(string)
 	if err := eventually(func() error {
-		got, err := w.readTrailer(tid)
+		got, err := w.trailerOfASN(asn)
 		if err != nil {
 			return err
 		}
@@ -770,7 +767,7 @@ func (w *world) visitChecksOutAndDoorIsReleased(asn string) error {
 	asn = w.rs(asn)
 	a, _ := w.dockAppointment(asn)
 	door, _ := a["doorCode"].(string)
-	visit, trailer, _, err := w.checkInOf(asn)
+	visit, _, _, err := w.checkInOf(asn)
 	if err != nil {
 		return err
 	}
@@ -780,7 +777,7 @@ func (w *world) visitChecksOutAndDoorIsReleased(asn string) error {
 	if got := w.last.json(); w.last.status != http.StatusOK || got["state"] != "CHECKED_OUT" {
 		return fmt.Errorf("check-out answered %d state %v, want 200 CHECKED_OUT (body: %s)", w.last.status, got["state"], w.last.body)
 	}
-	tr, err := w.readTrailer(trailer["trailerId"].(string))
+	tr, err := w.trailerOfASN(asn)
 	if err != nil {
 		return err
 	}
@@ -929,7 +926,7 @@ func registerDockChainSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^the carrier of ASN "([^"]*)" checks in at the gate of yard-management$`, w.carrierChecksInAtGate)
 	sc.Step(`^yard-management published VisitCheckedIn for the appointment of ASN "([^"]*)" with the arrival of the visit$`, w.visitCheckedInPublished)
 	sc.Step(`^the gate clerk docks the trailer of ASN "([^"]*)" at its appointment door in yard-management$`, w.trailerIsDocked)
-	sc.Step(`^door work starts on the trailer of ASN "([^"]*)" in yard-management$`, w.doorWorkStarted)
+	sc.Step(`^door work starts on the trailer of ASN "([^"]*)" in yard-management$`, w.doorWorkStartsOnTrailerOf)
 	sc.Step(`^yard-management refuses to check out the visit of ASN "([^"]*)" while its trailer is still being unloaded$`, w.checkOutRefusedWhileUnloading)
 	sc.Step(`^yard-management eventually completes the unload of the trailer of ASN "([^"]*)" after the receipt closed$`, w.yardCompletesUnload)
 	sc.Step(`^the visit of ASN "([^"]*)" checks out in yard-management and its door is released$`, w.visitChecksOutAndDoorIsReleased)

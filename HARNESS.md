@@ -30,7 +30,7 @@ harness-template: v4
 | `build-and-vet` job: gofmt check, `go vet ./...`, `go test -c` (compile-check of the godog suite; it is not run) | ci.yml | PR + push | yes |
 | `seed-products-tests` job: offline tests of the seeders (`cmd/seed-*`), `cmd/warehouse-day`, `internal/...` against contract fakes; `scripts/test_harvest_fulfilment_products.py` | ci.yml | PR + push | yes |
 | `scripts-sanity` job: `bash -n scripts/*.sh`, `docker compose config` | ci.yml | PR + push | yes |
-| E2E Behaviour: `bootstrap-scenario`, `inter-warehouse-transfer-scenario`, `inbound-receiving-scenario`, `slotting-optimization-scenario`, `returns-exceptions-scenario` (real multi-repo checkout, real Kafka and Postgres) | `.github/workflows/e2e-behaviour.yml` | weekly (Mon 07:00 UTC) + manual | scheduled signal; `bootstrap-scenario` opens/closes a `harness:red` issue via `red_issue.py` |
+| E2E Behaviour: `bootstrap-scenario`, `inter-warehouse-transfer-scenario`, `inbound-receiving-scenario`, `slotting-optimization-scenario`, `returns-exceptions-scenario`, `yard-journey-scenario` (real multi-repo checkout, real Kafka and Postgres) | `.github/workflows/e2e-behaviour.yml` | weekly (Mon 07:00 UTC) + manual | scheduled signal; `bootstrap-scenario` opens/closes a `harness:red` issue via `red_issue.py` |
 | CodeQL (Go) | `.github/workflows/codeql.yml` | PR, push, weekly | yes |
 | AI review (advisory) | `.github/workflows/ai-review.yml` | PR into develop touching `internal/domain`, `apis`, `charts` paths (none exist here, so it does not fire) | no |
 | The full godog suite (`bash scripts/04-run-tests.sh`, `make run`) | local only | before merging a scenario change | by hand |

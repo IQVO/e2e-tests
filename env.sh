@@ -109,16 +109,21 @@ NIP_REPO="${REPOS_ROOT}/network-inventory-planning"
 # features/inter_warehouse_transfer.feature's header for which of the three
 # this harness can produce from a real service and which it must inject).
 WAREHOUSE_PLANNING_REPO="${REPOS_ROOT}/warehouse-planning"
-# dock-scheduling (dock appointment scheduling: operating hours, closures,
-# door capacity, booking; its ADR 0001+). Since inbound-receiving ADR 0019 it
-# OWNS the appointment writes (book, reschedule, cancel); inbound-receiving
-# keeps a local copy. cmd/api runs its outbox relay in-process.
+# dock-scheduling (WMS-tier door calendar: every booked window on every dock
+# door, inbound and outbound; its ADR 0001/0002). Door and ASN knowledge are
+# event-fed copies (facility-layout, inbound-receiving, process-path-management);
+# it learns arrivals and door release ONLY from yard-management's events.
+# cmd/api relays its outbox inline, so it needs no separate relay process.
 DOCK_SCHEDULING_REPO="${REPOS_ROOT}/dock-scheduling"
-# yard-management (yard and trailer operations: gate check-in, seal check,
-# dock the trailer, unload, release). Owns the gate check-in of an appointment
-# (VisitCheckedIn); its outbox relay is a SEPARATE binary (cmd/relay), started
-# after the API (it needs the API's migrations).
-YARD_MANAGEMENT_REPO="${REPOS_ROOT}/yard-management"
+# yard-management (WMS-tier yard: gate, trailers, moves, door work; its ADR
+# 0001/0002). Locations, appointments, ASNs and receipts are event-fed copies of
+# facility-layout, dock-scheduling and inbound-receiving. cmd/api serves REST and
+# the three consumers; the outbox is relayed by the SEPARATE cmd/relay binary,
+# which must run too or nothing reaches Kafka.
+YARD_REPO="${REPOS_ROOT}/yard-management"
+# outbound-shipping (WMS-tier outbound loads, ship-confirm follows the physical
+# departure; its ADR 0001/0002). cmd/api relays its outbox in-process.
+OUTBOUND_SHIPPING_REPO="${REPOS_ROOT}/outbound-shipping"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
@@ -161,12 +166,14 @@ SLOTTING_HTTP_PORT=8109
 # slotting-optimization's :8109.
 RETURNS_HTTP_PORT=8110
 EXCEPTIONS_HTTP_PORT=8111
-# dock-scheduling / yard-management and yard-management's separate relay
-# worker (its /healthz defaults to :8081, which is facility-layout's) -- the
-# next free slots after exception-management's :8111.
+# dock-scheduling / yard-management / outbound-shipping -- the next free slots
+# after exception-management's :8111. yard-management's separate outbox relay
+# serves its /healthz on YARD_RELAY_HEALTH_PORT (its own default :8081 would
+# collide with facility-layout).
 DOCK_SCHEDULING_HTTP_PORT=8112
-YARD_MANAGEMENT_HTTP_PORT=8113
-YARD_MANAGEMENT_RELAY_HEALTH_PORT=8114
+YARD_HTTP_PORT=8113
+YARD_RELAY_HEALTH_PORT=8114
+OUTBOUND_SHIPPING_HTTP_PORT=8115
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -185,8 +192,9 @@ SLOTTING_BASE_URL="http://localhost:${SLOTTING_HTTP_PORT}"
 RETURNS_BASE_URL="http://localhost:${RETURNS_HTTP_PORT}"
 EXCEPTIONS_BASE_URL="http://localhost:${EXCEPTIONS_HTTP_PORT}"
 DOCK_SCHEDULING_BASE_URL="http://localhost:${DOCK_SCHEDULING_HTTP_PORT}"
-YARD_MANAGEMENT_BASE_URL="http://localhost:${YARD_MANAGEMENT_HTTP_PORT}"
-YARD_MANAGEMENT_RELAY_HEALTH_URL="http://localhost:${YARD_MANAGEMENT_RELAY_HEALTH_PORT}"
+YARD_BASE_URL="http://localhost:${YARD_HTTP_PORT}"
+YARD_RELAY_BASE_URL="http://localhost:${YARD_RELAY_HEALTH_PORT}"
+OUTBOUND_SHIPPING_BASE_URL="http://localhost:${OUTBOUND_SHIPPING_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -321,12 +329,13 @@ RETURNS_DB_URL="postgres://returns_processing@localhost:5455/returns_processing?
 # Same shape: no compose of its own, user/db "exception_management",
 # migrations embedded.
 EXCEPTIONS_DB_URL="postgres://exception_management@localhost:5456/exception_management?sslmode=disable"
-# dock-scheduling / yard-management -- the next free slots after
-# exception-management's :5456. No compose file of their own: user/db
-# "dock_scheduling" and "yard_management" follow the fleet's <context> naming
-# (the registry's role and database names). Migrations are embedded.
+# dock-scheduling / yard-management / outbound-shipping -- the next free slots
+# after exception-management's :5456. None ships a docker-compose of its own;
+# user/db follow the fleet's <context> naming and migrations are embedded in the
+# binaries.
 DOCK_SCHEDULING_DB_URL="postgres://dock_scheduling@localhost:5457/dock_scheduling?sslmode=disable"
-YARD_MANAGEMENT_DB_URL="postgres://yard_management@localhost:5458/yard_management?sslmode=disable"
+YARD_DB_URL="postgres://yard_management@localhost:5458/yard_management?sslmode=disable"
+OUTBOUND_SHIPPING_DB_URL="postgres://outbound_shipping@localhost:5459/outbound_shipping?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
@@ -411,6 +420,38 @@ EXCEPTIONS_ORDER_CORRELATION_CONSUMER_GROUP="exception-management-order-correlat
 EXCEPTIONS_INVENTORY_CONSUMER_GROUP="exception-management-inventory-${E2E_CONSUMER_GROUP_SUFFIX}"
 EXCEPTIONS_RETURNS_CONSUMER_GROUP="exception-management-returns-${E2E_CONSUMER_GROUP_SUFFIX}"
 
+# inbound-receiving's remaining always-on consumers (all mandatory env on its
+# develop, no default): the facility-layout dock-door copy, the packaging view,
+# dock-scheduling's appointment copy (its ADR 0019/0020), yard-management's
+# VisitCheckedIn arrival copy and inventory-storage's ContainerStowed copy (its
+# ADR 0021). A first start under a new group reads from the first offset.
+INBOUND_DOCK_DOOR_CONSUMER_GROUP="inbound-receiving-dock-door-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_PACKAGING_CONSUMER_GROUP="inbound-receiving-packaging-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_DOCK_APPOINTMENT_CONSUMER_GROUP="inbound-receiving-dock-appointment-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_VISIT_ARRIVAL_CONSUMER_GROUP="inbound-receiving-visit-arrival-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_CARTON_STOW_CONSUMER_GROUP="inbound-receiving-carton-stow-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# The yard journey (features/yard_journey.feature). Every consumer group is
+# mandatory env on its service (no default) and per-run, so a harness process
+# never joins the live cluster's group for warehouse.dock-scheduling.events,
+# warehouse.yard-management.events or warehouse.facility.events.
+# dock-scheduling: yard facts, facility doors, ASNs, CPT schedules.
+DOCK_YARD_CONSUMER_GROUP="dock-scheduling-yard-${E2E_CONSUMER_GROUP_SUFFIX}"
+DOCK_FACILITY_CONSUMER_GROUP="dock-scheduling-facility-${E2E_CONSUMER_GROUP_SUFFIX}"
+DOCK_ASN_CONSUMER_GROUP="dock-scheduling-asn-${E2E_CONSUMER_GROUP_SUFFIX}"
+DOCK_CPT_CONSUMER_GROUP="dock-scheduling-cpt-${E2E_CONSUMER_GROUP_SUFFIX}"
+# yard-management: appointments, facility locations, ASNs and receipts.
+YARD_DOCK_CONSUMER_GROUP="yard-management-dock-scheduling-${E2E_CONSUMER_GROUP_SUFFIX}"
+YARD_FACILITY_CONSUMER_GROUP="yard-management-facility-${E2E_CONSUMER_GROUP_SUFFIX}"
+YARD_INBOUND_CONSUMER_GROUP="yard-management-inbound-receiving-${E2E_CONSUMER_GROUP_SUFFIX}"
+# outbound-shipping: six groups (fulfillment, dock, yard, CPT, layout, analytics).
+OUTBOUND_FULFILLMENT_CONSUMER_GROUP="outbound-shipping-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_DOCK_CONSUMER_GROUP="outbound-shipping-dock-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_YARD_CONSUMER_GROUP="outbound-shipping-yard-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_CPT_CONSUMER_GROUP="outbound-shipping-cpt-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_LAYOUT_CONSUMER_GROUP="outbound-shipping-layout-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_ANALYTICS_CONSUMER_GROUP="outbound-shipping-analytics-${E2E_CONSUMER_GROUP_SUFFIX}"
+
 # slotting-optimization's three local-copy consumers (DEMAND_MODE,
 # PRODUCT_MODE, LAYOUT_MODE=kafka; each needs its group and has no default),
 # all per-run groups so a harness process never joins the live cluster's.
@@ -466,11 +507,7 @@ SLOTTING_PACK_LEVEL_CONSUMER_GROUP="slotting-optimization-pack-level-${E2E_CONSU
 # slots), packaging, dock appointment (the local copy fed by dock-scheduling),
 # visit arrival (yard-management VisitCheckedIn) and carton stow
 # (inventory-storage ContainerStowed).
-INBOUND_DOCK_DOOR_CONSUMER_GROUP="inbound-receiving-dock-door-${E2E_CONSUMER_GROUP_SUFFIX}"
-INBOUND_PACKAGING_CONSUMER_GROUP="inbound-receiving-packaging-${E2E_CONSUMER_GROUP_SUFFIX}"
-INBOUND_DOCK_APPOINTMENT_CONSUMER_GROUP="inbound-receiving-dock-appointment-${E2E_CONSUMER_GROUP_SUFFIX}"
-INBOUND_VISIT_ARRIVAL_CONSUMER_GROUP="inbound-receiving-visit-arrival-${E2E_CONSUMER_GROUP_SUFFIX}"
-INBOUND_CARTON_STOW_CONSUMER_GROUP="inbound-receiving-carton-stow-${E2E_CONSUMER_GROUP_SUFFIX}"
+# (defined once, above)
 # exception-management's four further consumers (carton discrepancy from
 # inbound-receiving, yard-management, dock-scheduling, outbound-shipping).
 EXCEPTIONS_CARTON_DISCREPANCY_CONSUMER_GROUP="exception-management-carton-discrepancy-${E2E_CONSUMER_GROUP_SUFFIX}"
@@ -484,13 +521,8 @@ EXCEPTIONS_OUTBOUND_SHIPPING_CONSUMER_GROUP="exception-management-outbound-shipp
 # ReceiptClosed for the auto-complete). Its legacy importer
 # (DOCK_LEGACY_IMPORT_CONSUMER_GROUP) stays unset: that is the strangler
 # stage A migration aid and would replay a shared broker's history.
-DOCK_YARD_CONSUMER_GROUP="dock-scheduling-yard-${E2E_CONSUMER_GROUP_SUFFIX}"
-DOCK_FACILITY_CONSUMER_GROUP="dock-scheduling-facility-${E2E_CONSUMER_GROUP_SUFFIX}"
-DOCK_ASN_CONSUMER_GROUP="dock-scheduling-asn-${E2E_CONSUMER_GROUP_SUFFIX}"
-DOCK_CPT_CONSUMER_GROUP="dock-scheduling-cpt-${E2E_CONSUMER_GROUP_SUFFIX}"
-YARD_DOCK_SCHEDULING_CONSUMER_GROUP="yard-management-dock-scheduling-${E2E_CONSUMER_GROUP_SUFFIX}"
-YARD_FACILITY_CONSUMER_GROUP="yard-management-facility-${E2E_CONSUMER_GROUP_SUFFIX}"
-YARD_INBOUND_RECEIVING_CONSUMER_GROUP="yard-management-inbound-receiving-${E2E_CONSUMER_GROUP_SUFFIX}"
+# (The DOCK_* / YARD_* group variables themselves are defined once, in the
+# "yard journey" block above.)
 
 # ---- inter-warehouse transfer saga configuration --------------------
 # The pick leg's path is `pick-transfer` (inside the existing PICK family,

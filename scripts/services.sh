@@ -405,18 +405,18 @@ up_dock_scheduling() {
 # its own Deployment in the chart): without it VisitCheckedIn and every other
 # yard fact stays in the outbox.
 up_yard_management() {
-  log "starting yard-management on ${YARD_MANAGEMENT_BASE_URL}"
+  log "starting yard-management on ${YARD_BASE_URL}"
   start_service yard-management "${BIN_DIR}/yard-management" \
-    HTTP_ADDR=":${YARD_MANAGEMENT_HTTP_PORT}" \
-    DATABASE_URL="${YARD_MANAGEMENT_DB_URL}" \
+    HTTP_ADDR=":${YARD_HTTP_PORT}" \
+    DATABASE_URL="${YARD_DB_URL}" \
     PGPASSWORD="yard_management" \
     KAFKA_BROKERS="${KAFKA_BROKERS}" \
-    DOCK_SCHEDULING_CONSUMER_GROUP="${YARD_DOCK_SCHEDULING_CONSUMER_GROUP}" \
+    DOCK_SCHEDULING_CONSUMER_GROUP="${YARD_DOCK_CONSUMER_GROUP}" \
     FACILITY_CONSUMER_GROUP="${YARD_FACILITY_CONSUMER_GROUP}" \
-    INBOUND_RECEIVING_CONSUMER_GROUP="${YARD_INBOUND_RECEIVING_CONSUMER_GROUP}" \
+    INBOUND_RECEIVING_CONSUMER_GROUP="${YARD_INBOUND_CONSUMER_GROUP}" \
     SHUTDOWN_DRAIN_DELAY=0 \
     LOG_LEVEL=info
-  wait_for_http "${YARD_MANAGEMENT_BASE_URL}/healthz"
+  wait_for_http "${YARD_BASE_URL}/healthz"
 }
 
 # yard-management's outbox relay worker. It serves /healthz on RELAY_HEALTH_ADDR
@@ -424,13 +424,37 @@ up_yard_management() {
 # Started AFTER the API: the API owns the (embedded) migrations of the outbox
 # table the relay drains.
 up_yard_management_relay() {
-  log "starting yard-management relay on ${YARD_MANAGEMENT_RELAY_HEALTH_URL}"
-  start_service yard-management-relay "${BIN_DIR}/yard-management-relay" \
-    DATABASE_URL="${YARD_MANAGEMENT_DB_URL}" \
+  log "starting yard-management outbox relay on ${YARD_RELAY_BASE_URL}"
+  start_service yard-relay "${BIN_DIR}/yard-relay" \
+    DATABASE_URL="${YARD_DB_URL}" \
     PGPASSWORD="yard_management" \
     KAFKA_BROKERS="${KAFKA_BROKERS}" \
     OUTBOX_POLL_INTERVAL="500ms" \
-    RELAY_HEALTH_ADDR=":${YARD_MANAGEMENT_RELAY_HEALTH_PORT}" \
+    RELAY_HEALTH_ADDR=":${YARD_RELAY_HEALTH_PORT}" \
     LOG_LEVEL=info
-  wait_for_http "${YARD_MANAGEMENT_RELAY_HEALTH_URL}/healthz"
+  wait_for_http "${YARD_RELAY_BASE_URL}/healthz"
+}
+
+# outbound-shipping: cmd/api, migrations embedded. SIX mandatory consumer groups
+# (fulfillment-execution, dock-scheduling, yard-management, CPT schedules,
+# facility-layout, analytics), all per-run. The outbox relay runs in this
+# process (it publishes warehouse.outbound-shipping.events and .analytics, both
+# pre-created by cmd/ensure-topics). The listen address variable is ADDR, not
+# HTTP_ADDR.
+up_outbound_shipping() {
+  log "starting outbound-shipping on ${OUTBOUND_SHIPPING_BASE_URL}"
+  start_service outbound-shipping "${BIN_DIR}/outbound-shipping" \
+    ADDR=":${OUTBOUND_SHIPPING_HTTP_PORT}" \
+    DATABASE_URL="${OUTBOUND_SHIPPING_DB_URL}" \
+    PGPASSWORD="outbound_shipping" \
+    KAFKA_BROKERS="${KAFKA_BROKERS}" \
+    FULFILLMENT_CONSUMER_GROUP="${OUTBOUND_FULFILLMENT_CONSUMER_GROUP}" \
+    DOCK_CONSUMER_GROUP="${OUTBOUND_DOCK_CONSUMER_GROUP}" \
+    YARD_CONSUMER_GROUP="${OUTBOUND_YARD_CONSUMER_GROUP}" \
+    CPT_CONSUMER_GROUP="${OUTBOUND_CPT_CONSUMER_GROUP}" \
+    LAYOUT_CONSUMER_GROUP="${OUTBOUND_LAYOUT_CONSUMER_GROUP}" \
+    ANALYTICS_CONSUMER_GROUP="${OUTBOUND_ANALYTICS_CONSUMER_GROUP}" \
+    OUTBOX_INTERVAL_MS=250 \
+    LOG_LEVEL=info
+  wait_for_http "${OUTBOUND_SHIPPING_BASE_URL}/healthz"
 }

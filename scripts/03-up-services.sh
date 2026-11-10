@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 18 bounded-context HTTP services (+ yard-management's relay worker) as background processes
+# Starts all 20 bounded-context HTTP processes as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -150,6 +150,27 @@
 #                           calls no sibling over REST. Started LAST: it
 #                           watches facts from nearly every other context,
 #                           and every topic it reads exists by then.
+#  13. dock-scheduling    — the WMS-tier door calendar (appointments, closures;
+#                           its ADR 0001/0002). Four event-fed consumers, each
+#                           with its own per-run group: yard-management's facts
+#                           (arrival, door release), facility-layout's doors,
+#                           inbound-receiving's ASNs and process-path-
+#                           management's CPT schedules. cmd/api relays its
+#                           outbox inline. Started at step 3a, right after
+#                           product-master (inbound-receiving's appointment
+#                           copy needs it up).
+#  14. yard-management    — the WMS-tier yard (gate visits, trailers, moves,
+#                           door work; its ADR 0001/0002). cmd/api serves REST
+#                           and three consumers (dock-scheduling, facility-
+#                           layout, inbound-receiving); the outbox is relayed
+#                           by its SEPARATE cmd/relay binary, started right
+#                           after it (yard-relay). Also started at step 3a.
+#  15. outbound-shipping  — the WMS-tier outbound loads (ship-confirm follows
+#                           the physical departure, its ADR 0002). Six consumers
+#                           (fulfillment, dock-scheduling, yard-management,
+#                           process-path-management, facility-layout and its
+#                           own analytics topic); cmd/api relays inline.
+#                           Started last, after the producers it reads.
 #
 # All eight publisher-capable services run with EVENT_PUBLISHER=kafka
 # against the shared broker (labor-performance is the exception -- it has
@@ -189,14 +210,15 @@ up_network
 up_planning
 up_nip
 up_exceptions
+up_outbound_shipping
 
-log "all 18 services (+ the yard relay worker) up and healthy"
+log "all 20 processes up and healthy (19 services + the yard outbox relay)"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
 printf '  %-24s %s\n' dock-scheduling        "${DOCK_SCHEDULING_BASE_URL}"
-printf '  %-24s %s\n' yard-management        "${YARD_MANAGEMENT_BASE_URL}"
-printf '  %-24s %s\n' yard-management-relay  "${YARD_MANAGEMENT_RELAY_HEALTH_URL}"
+printf '  %-24s %s\n' yard-management        "${YARD_BASE_URL}"
+printf '  %-24s %s\n' yard-relay             "${YARD_RELAY_BASE_URL}"
 printf '  %-24s %s\n' inbound-receiving      "${INBOUND_BASE_URL}"
 printf '  %-24s %s\n' slotting-optimization   "${SLOTTING_BASE_URL}"
 printf '  %-24s %s\n' returns-processing     "${RETURNS_BASE_URL}"
@@ -210,6 +232,7 @@ printf '  %-24s %s\n' network-fulfillment    "${NETWORK_BASE_URL}"
 printf '  %-24s %s\n' warehouse-planning     "${WAREHOUSE_PLANNING_BASE_URL}"
 printf '  %-24s %s\n' network-inventory-planning "${NIP_BASE_URL}"
 printf '  %-24s %s\n' exception-management   "${EXCEPTIONS_BASE_URL}"
+printf '  %-24s %s\n' outbound-shipping      "${OUTBOUND_SHIPPING_BASE_URL}"
 
 # --- MCP servers (cmd/mcp), one per context, pointed at the SAME
 # Postgres each HTTP service above just started against — so a fact an
