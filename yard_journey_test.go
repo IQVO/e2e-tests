@@ -868,22 +868,19 @@ func (w *world) outboundIsHealthy() error {
 // cptScheduleIsPublished publishes the site's CPT schedule on
 // warehouse.process-path-management.events.
 //
-// INJECTED, NOT REAL, AND NOT THE REAL SHAPE: process-path-management owns this
-// fact (PUT /sites/{siteId}/cpt-schedule) and its CPTScheduleChanged carries no
-// `version`; outbound-shipping's consumer requires `version >= 1` and
-// dead-letters the real event ("cpt schedule change needs site_id, timezone,
-// version and time"), so no load can ever be planned from the real producer. The
-// fact is therefore published here in the shape outbound-shipping accepts (with
-// version 1). dock-scheduling reads the same event and ignores the extra field.
-// The mismatch is a defect between those two contexts, reported in the PR that
-// added this scenario, not something this suite hides by agreeing with the
-// consumer: when it is fixed this step should publish the producer's real shape
-// (or call the real endpoint).
+// INJECTED, NOT REAL: process-path-management owns this fact (PUT
+// /sites/{siteId}/cpt-schedule), but the scenario needs the cutoff at a known
+// time, so it is published here in the PRODUCER's real shape: a full snapshot
+// with site_id, timezone and cutoffs and NO `version`. (outbound-shipping used
+// to dead-letter that shape, "cpt schedule change needs site_id, timezone,
+// version and time"; this step used to add version: 1 to work around it, which
+// hid the defect. Keeping the real shape makes the scenario fail if the
+// consumer ever requires a version again.)
 func (w *world) cptScheduleIsPublished(site, cpt string) error {
 	site, cpt = w.rs(site), w.rs(cpt)
 	return publishInjectedCloudEvent(topicProcessPathEvents, "/warehouse/process-path-management", typeCPTScheduleChanged,
 		"urn:warehouse:process-path-management:events:CPTScheduleChanged:v1", site, time.Now(), map[string]any{
-			"site_id": site, "timezone": "UTC", "version": 1,
+			"site_id": site, "timezone": "UTC",
 			"cutoffs": []map[string]any{{
 				"cpt_id": cpt, "local_time": "16:00", "ship_method": "STD-2DAY",
 				"days_of_week": []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
