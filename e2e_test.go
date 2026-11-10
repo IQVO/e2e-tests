@@ -1852,6 +1852,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
 	registerMastercaseSteps(sc, w)
+	registerDockChainSteps(sc, w)
 	registerSellerInboundSteps(sc, w)
 	registerPhase5ASteps(sc, w)
 	registerReturnsSteps(sc, w)

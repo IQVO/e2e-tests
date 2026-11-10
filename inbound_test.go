@@ -45,10 +45,13 @@ type inboundState struct {
 	receiptByASN     map[string]string // ASN number -> receipt id
 	appointmentByASN map[string]string // first ASN number -> appointment id
 	doorByASN        map[string]string // first ASN number -> door code
-	// anchor is the instant every appointment window of the booking
-	// scenario is measured from, so "starts when the other one ends" is
-	// exact instead of depending on the clock between two calls.
+	// anchor is the instant every appointment window of the scenario is
+	// measured from (on the dock calendar's slot granularity, dockLeadMinutes
+	// ahead), so "starts when the other one ends" is exact instead of
+	// depending on the clock between two calls.
 	anchor time.Time
+	// dock is the dock-chain memory (dock_chain_test.go).
+	dock *dockChainState
 }
 
 func (w *world) ib() *inboundState {
@@ -449,89 +452,6 @@ func (w *world) inventoryStagesUnits(units int, sku string, events int) error {
 // Dock appointments
 // ---------------------------------------------------------------------
 
-// window returns the half-open window [anchor+startMin, anchor+startMin+durMin)
-// in whole seconds, anchoring on the first call of the process.
-func (w *world) window(startMin, durMin int) (time.Time, time.Time) {
-	in := w.ib()
-	if in.anchor.IsZero() {
-		in.anchor = time.Now().UTC().Truncate(time.Second)
-	}
-	start := in.anchor.Add(time.Duration(startMin) * time.Minute)
-	return start, start.Add(time.Duration(durMin) * time.Minute)
-}
-
-func (w *world) bookAppointment(door, carrier, asn string, startMin, durMin int) error {
-	start, end := w.window(startMin, durMin)
-	return w.doJSON(http.MethodPost, inboundBaseURL+"/appointments", map[string]any{
-		"doorCode": door, "carrier": carrier,
-		"windowStart": start.Format(time.RFC3339), "windowEnd": end.Format(time.RFC3339),
-		"asnNumbers": []string{asn},
-	})
-}
-
-func (w *world) appointmentIsBooked(door, carrier, asn string, startMin, durMin int) error {
-	door, asn = w.rs(door), w.rs(asn)
-	if err := w.expectOK2xx(w.bookAppointment(door, carrier, asn, startMin, durMin)); err != nil {
-		return fmt.Errorf("book %s at %s: %w", asn, door, err)
-	}
-	got := w.last.json()
-	id, _ := got["appointmentId"].(string)
-	if w.last.status != http.StatusCreated || id == "" || got["state"] != "Booked" {
-		return fmt.Errorf("book %s at %s: status %d state %v id %q, want 201 Booked (body: %s)", asn, door, w.last.status, got["state"], id, w.last.body)
-	}
-	w.ib().appointmentByASN[asn] = id
-	w.ib().doorByASN[asn] = door
-	return nil
-}
-
-func (w *world) bookingIsRefused(door, asn string, startMin, durMin, status int, slug string) error {
-	door, asn = w.rs(door), w.rs(asn)
-	if err := w.bookAppointment(door, "ACME Freight", asn, startMin, durMin); err != nil {
-		return err
-	}
-	return w.problemIs(status, slug)
-}
-
-func (w *world) appointmentAction(asn, action, wantState string) error {
-	asn = w.rs(asn)
-	id, err := w.appointmentIDFor(asn)
-	if err != nil {
-		return err
-	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/appointments/%s/%s", inboundBaseURL, id, action), nil)); err != nil {
-		return fmt.Errorf("%s appointment %s: %w", action, id, err)
-	}
-	if got := w.last.json()["state"]; got != wantState {
-		return fmt.Errorf("%s appointment %s: state %v, want %s (body: %s)", action, id, got, wantState, w.last.body)
-	}
-	return nil
-}
-
-func (w *world) carrierChecksIn(asn string) error {
-	return w.appointmentAction(asn, "check-ins", "CheckedIn")
-}
-func (w *world) appointmentIsCancelled(asn string) error {
-	return w.appointmentAction(asn, "cancellations", "Cancelled")
-}
-
-func (w *world) appointmentIsInState(asn, want string) error {
-	asn = w.rs(asn)
-	id, err := w.appointmentIDFor(asn)
-	if err != nil {
-		return err
-	}
-	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/appointments/%s", inboundBaseURL, id), nil); err != nil {
-		return err
-	}
-	if w.last.status != http.StatusOK {
-		return fmt.Errorf("GET appointment %s: status %d (body: %s)", id, w.last.status, w.last.body)
-	}
-	if got := w.last.json()["state"]; got != want {
-		return fmt.Errorf("appointment %s state = %v, want %s (body: %s)", id, got, want, w.last.body)
-	}
-	return nil
-}
-
 func (w *world) appointmentCompletedEventPublished(asn string) error {
 	asn = w.rs(asn)
 	id, err := w.appointmentIDFor(asn)
@@ -570,10 +490,5 @@ func registerInboundSteps(sc *godog.ScenarioContext, w *world) {
 
 	sc.Step(`^inventory-storage eventually stages (\d+) units of SKU "([^"]*)" in exactly (\d+) StockReceived events?$`, w.inventoryStagesUnits)
 
-	sc.Step(`^a dock appointment at door "([^"]*)" for carrier "([^"]*)" and ASN "([^"]*)" is booked to start in (\d+) minutes for (\d+) minutes in inbound-receiving$`, w.appointmentIsBooked)
-	sc.Step(`^booking a dock appointment at door "([^"]*)" for ASN "([^"]*)" to start in (\d+) minutes for (\d+) minutes in inbound-receiving is refused with (\d+) "([^"]*)"$`, w.bookingIsRefused)
-	sc.Step(`^the carrier of ASN "([^"]*)"'s appointment checks in at inbound-receiving$`, w.carrierChecksIn)
-	sc.Step(`^the appointment of ASN "([^"]*)" in inbound-receiving is cancelled$`, w.appointmentIsCancelled)
-	sc.Step(`^the appointment of ASN "([^"]*)" in inbound-receiving is "([^"]*)"$`, w.appointmentIsInState)
 	sc.Step(`^inbound-receiving published DockAppointmentCompleted for the appointment of ASN "([^"]*)"$`, w.appointmentCompletedEventPublished)
 }
