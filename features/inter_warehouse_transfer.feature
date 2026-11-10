@@ -143,7 +143,7 @@ Feature: Inter-warehouse transfer saga across real services
     And inventory-storage's reservation for the transfer is revoked
     And network-inventory-planning eventually reports the transfer as CANCELLED
 
-    # --- nothing was worked, nothing can arrive
-    And network-inventory-planning has released no work demand for the transfer
-    And wes-work-planning has no work unit for the transfer
-    And fulfillment-execution has no task for the transfer
+    # NOT asserted here, on purpose: the pick work demand is released when the transfer becomes
+    # ALLOCATED (ADR 0005), i.e. BEFORE this cancel, and no ADR withdraws it (ADR 0022
+    # compensates the stock hold only). "No work unit / no task after cancel" is therefore a
+    # design decision still open (see the inbound/transfer evolution plan), not a settled contract.
