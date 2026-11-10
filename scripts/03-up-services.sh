@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-tests/scripts/03-up-services.sh
 #
-# Starts all 14 bounded-context HTTP services as background processes
+# Starts all 20 bounded-context HTTP processes as background processes
 # against Postgres + Kafka, in dependency order:
 #   1. process-path-management — no deps (Generic Subdomain owning the
 #                           fleet's declared process-path catalogue;
@@ -141,6 +141,25 @@
 #                           calls no sibling over REST. Started LAST: it
 #                           watches facts from nearly every other context,
 #                           and every topic it reads exists by then.
+#  13. dock-scheduling    — the WMS-tier door calendar (appointments, closures;
+#                           its ADR 0001/0002). Four event-fed consumers, each
+#                           with its own per-run group: yard-management's facts
+#                           (arrival, door release), facility-layout's doors,
+#                           inbound-receiving's ASNs and process-path-
+#                           management's CPT schedules. cmd/api relays its
+#                           outbox inline. Started after the producers whose
+#                           topics it reads.
+#  14. yard-management    — the WMS-tier yard (gate visits, trailers, moves,
+#                           door work; its ADR 0001/0002). cmd/api serves REST
+#                           and three consumers (dock-scheduling, facility-
+#                           layout, inbound-receiving); the outbox is relayed
+#                           by its SEPARATE cmd/relay binary, started right
+#                           after it (yard-relay).
+#  15. outbound-shipping  — the WMS-tier outbound loads (ship-confirm follows
+#                           the physical departure, its ADR 0002). Six consumers
+#                           (fulfillment, dock-scheduling, yard-management,
+#                           process-path-management, facility-layout and its
+#                           own analytics topic); cmd/api relays inline.
 #
 # All eight publisher-capable services run with EVENT_PUBLISHER=kafka
 # against the shared broker (labor-performance is the exception -- it has
@@ -166,7 +185,8 @@ start_service process-path "${BIN_DIR}/process-path" \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
   LOG_LEVEL=info
 wait_for_http "${PROCESS_PATH_BASE_URL}/healthz"
-"${SCRIPT_DIR}/seed-process-paths.sh"
+# bash, not a direct exec: the script is committed without its execute bit.
+bash "${SCRIPT_DIR}/seed-process-paths.sh"
 
 log "starting facility-layout on ${FACILITY_BASE_URL}"
 start_service facility "${BIN_DIR}/facility" \
@@ -198,7 +218,11 @@ log "starting inbound-receiving on ${INBOUND_BASE_URL}"
 # PRODUCT_MODE=kafka makes it refuse an ASN line whose SKU product-master has
 # not announced yet (422 unknown-sku), fed by a per-run consumer group.
 # OUTBOX_RELAY_INTERVAL keeps the handover fast. SHUTDOWN_DRAIN_DELAY=0 for the
-# same reason as product-master above.
+# same reason as product-master above. On current develop ALL SIX consumer groups
+# are mandatory env and the permissive door/product modes are refused: the dock-door
+# copy is fed by facility-layout (so a receipt's door must be a registered Dock
+# slot), the appointment copy by dock-scheduling (ADR 0019) and the arrival copy by
+# yard-management (ADR 0021).
 start_service inbound-receiving "${BIN_DIR}/inbound-receiving" \
   HTTP_ADDR=":${INBOUND_HTTP_PORT}" \
   DATABASE_URL="${INBOUND_DB_URL}" \
@@ -207,6 +231,11 @@ start_service inbound-receiving "${BIN_DIR}/inbound-receiving" \
   KAFKA_BROKERS="${KAFKA_BROKERS}" \
   PRODUCT_MODE=kafka \
   PRODUCT_CONSUMER_GROUP="${INBOUND_PRODUCT_CONSUMER_GROUP}" \
+  DOCK_DOOR_CONSUMER_GROUP="${INBOUND_DOCK_DOOR_CONSUMER_GROUP}" \
+  PACKAGING_CONSUMER_GROUP="${INBOUND_PACKAGING_CONSUMER_GROUP}" \
+  DOCK_APPOINTMENT_CONSUMER_GROUP="${INBOUND_DOCK_APPOINTMENT_CONSUMER_GROUP}" \
+  VISIT_ARRIVAL_CONSUMER_GROUP="${INBOUND_VISIT_ARRIVAL_CONSUMER_GROUP}" \
+  CARTON_STOW_CONSUMER_GROUP="${INBOUND_CARTON_STOW_CONSUMER_GROUP}" \
   OUTBOX_RELAY_INTERVAL="500ms" \
   SHUTDOWN_DRAIN_DELAY=0 \
   LOG_LEVEL=info
@@ -462,7 +491,74 @@ start_service exceptions "${BIN_DIR}/exceptions" \
   LOG_LEVEL=info
 wait_for_http "${EXCEPTIONS_BASE_URL}/healthz"
 
-log "all 16 services up and healthy"
+log "starting dock-scheduling on ${DOCK_SCHEDULING_BASE_URL}"
+# dock-scheduling: cmd/api, migrations embedded (no MIGRATIONS_PATH). Its four
+# consumer groups are mandatory env (no defaults), all per-run; the legacy importer
+# group (DOCK_LEGACY_IMPORT_CONSUMER_GROUP) is deliberately left UNSET so that
+# stage-A importer stays off (it would replay the cluster's appointment history).
+# OUTBOX_RELAY_INTERVAL keeps DockAppointmentBooked prompt; the in-process relay
+# publishes both topics, so both are pre-created by cmd/ensure-topics.
+start_service dock-scheduling "${BIN_DIR}/dock-scheduling" \
+  HTTP_ADDR=":${DOCK_SCHEDULING_HTTP_PORT}" \
+  DATABASE_URL="${DOCK_SCHEDULING_DB_URL}" \
+  PGPASSWORD="dock_scheduling" \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  YARD_CONSUMER_GROUP="${DOCK_YARD_CONSUMER_GROUP}" \
+  FACILITY_CONSUMER_GROUP="${DOCK_FACILITY_CONSUMER_GROUP}" \
+  ASN_CONSUMER_GROUP="${DOCK_ASN_CONSUMER_GROUP}" \
+  CPT_CONSUMER_GROUP="${DOCK_CPT_CONSUMER_GROUP}" \
+  OUTBOX_RELAY_INTERVAL="500ms" \
+  SHUTDOWN_DRAIN_DELAY=0 \
+  LOG_LEVEL=info
+wait_for_http "${DOCK_SCHEDULING_BASE_URL}/healthz"
+
+log "starting yard-management on ${YARD_BASE_URL}"
+# yard-management: cmd/api (REST and the three consumers), migrations embedded.
+# The three consumer groups are mandatory env and per-run. The API does NOT relay
+# its outbox: cmd/relay (next block) does, against the same database, and it must
+# start after the API because only the API migrates.
+start_service yard-management "${BIN_DIR}/yard-management" \
+  HTTP_ADDR=":${YARD_HTTP_PORT}" \
+  DATABASE_URL="${YARD_DB_URL}" \
+  PGPASSWORD="yard_management" \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  DOCK_SCHEDULING_CONSUMER_GROUP="${YARD_DOCK_CONSUMER_GROUP}" \
+  FACILITY_CONSUMER_GROUP="${YARD_FACILITY_CONSUMER_GROUP}" \
+  INBOUND_RECEIVING_CONSUMER_GROUP="${YARD_INBOUND_CONSUMER_GROUP}" \
+  SHUTDOWN_DRAIN_DELAY=0 \
+  LOG_LEVEL=info
+wait_for_http "${YARD_BASE_URL}/healthz"
+
+log "starting yard-management outbox relay on ${YARD_RELAY_BASE_URL}"
+# RELAY_HEALTH_ADDR: the relay's default :8081 is facility-layout's port here.
+start_service yard-relay "${BIN_DIR}/yard-relay" \
+  DATABASE_URL="${YARD_DB_URL}" \
+  PGPASSWORD="yard_management" \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  OUTBOX_POLL_INTERVAL="500ms" \
+  RELAY_HEALTH_ADDR=":${YARD_RELAY_HEALTH_PORT}"
+wait_for_http "${YARD_RELAY_BASE_URL}/healthz"
+
+log "starting outbound-shipping on ${OUTBOUND_SHIPPING_BASE_URL}"
+# outbound-shipping: cmd/api, migrations embedded. Six consumer groups are
+# mandatory env (per-run here); the in-process relay publishes
+# warehouse.outbound-shipping.events and .analytics (both pre-created).
+start_service outbound-shipping "${BIN_DIR}/outbound-shipping" \
+  ADDR=":${OUTBOUND_SHIPPING_HTTP_PORT}" \
+  DATABASE_URL="${OUTBOUND_SHIPPING_DB_URL}" \
+  PGPASSWORD="outbound_shipping" \
+  KAFKA_BROKERS="${KAFKA_BROKERS}" \
+  FULFILLMENT_CONSUMER_GROUP="${OUTBOUND_FULFILLMENT_CONSUMER_GROUP}" \
+  DOCK_CONSUMER_GROUP="${OUTBOUND_DOCK_CONSUMER_GROUP}" \
+  YARD_CONSUMER_GROUP="${OUTBOUND_YARD_CONSUMER_GROUP}" \
+  CPT_CONSUMER_GROUP="${OUTBOUND_CPT_CONSUMER_GROUP}" \
+  LAYOUT_CONSUMER_GROUP="${OUTBOUND_LAYOUT_CONSUMER_GROUP}" \
+  ANALYTICS_CONSUMER_GROUP="${OUTBOUND_ANALYTICS_CONSUMER_GROUP}" \
+  OUTBOX_INTERVAL_MS=250 \
+  LOG_LEVEL=info
+wait_for_http "${OUTBOUND_SHIPPING_BASE_URL}/healthz"
+
+log "all 20 processes up and healthy (19 services + the yard outbox relay)"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"
 printf '  %-24s %s\n' facility-layout        "${FACILITY_BASE_URL}"
 printf '  %-24s %s\n' product-master         "${PRODUCT_MASTER_BASE_URL}"
@@ -479,6 +575,10 @@ printf '  %-24s %s\n' network-fulfillment    "${NETWORK_BASE_URL}"
 printf '  %-24s %s\n' warehouse-planning     "${WAREHOUSE_PLANNING_BASE_URL}"
 printf '  %-24s %s\n' network-inventory-planning "${NIP_BASE_URL}"
 printf '  %-24s %s\n' exception-management   "${EXCEPTIONS_BASE_URL}"
+printf '  %-24s %s\n' dock-scheduling        "${DOCK_SCHEDULING_BASE_URL}"
+printf '  %-24s %s\n' yard-management        "${YARD_BASE_URL}"
+printf '  %-24s %s\n' yard-relay             "${YARD_RELAY_BASE_URL}"
+printf '  %-24s %s\n' outbound-shipping      "${OUTBOUND_SHIPPING_BASE_URL}"
 
 # --- MCP servers (cmd/mcp), one per context, pointed at the SAME
 # Postgres each HTTP service above just started against — so a fact an

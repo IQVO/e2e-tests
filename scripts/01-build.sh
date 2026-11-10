@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib.sh"
 
-log "building 16 service binaries into ${BIN_DIR}"
+log "building 20 service binaries into ${BIN_DIR}"
 
 build_one() {
   local name="$1" repo="$2" cmd_pkg="$3"
@@ -70,6 +70,18 @@ build_one nip           "${NIP_REPO}"           network-inventory-planning
 # cmd/mcp, cmd/planning-projector and cmd/planning-reports, none of which
 # this harness runs).
 build_one planning      "${WAREHOUSE_PLANNING_REPO}" api
+# dock-scheduling: cmd/api is its HTTP binary (REST, the Kafka consumers and an
+# in-process outbox relay; migrations embedded). Its projector, reports, sweep and
+# mcp binaries are not run by this harness.
+build_one dock-scheduling "${DOCK_SCHEDULING_REPO}" api
+# yard-management: cmd/api is the REST and consumer process (migrations embedded)
+# and cmd/relay the SEPARATE outbox relay: the API never relays, so without the
+# relay nothing reaches Kafka. Its projector, reports and mcp are not run here.
+build_one yard-management "${YARD_REPO}" api
+build_one yard-relay "${YARD_REPO}" relay
+# outbound-shipping: cmd/api is its HTTP binary (REST, six consumers and the
+# in-process outbox relay). Its cmd/mcp is not run by this harness.
+build_one outbound-shipping "${OUTBOUND_SHIPPING_REPO}" api
 
 log "building 7 MCP server binaries into ${BIN_DIR} (cmd/mcp — the agentic see-layer)"
 build_one facility-mcp     "${FACILITY_REPO}"     mcp
@@ -83,5 +95,5 @@ build_one order-mcp        "${ORDER_REPO}"        mcp
 log "building warehouse-ops-agent (cmd/agent — the agentic analyze/act layer, T5)"
 build_one ops-agent "${OPS_AGENT_REPO}" agent
 
-log "all 24 binaries built"
+log "all 28 binaries built"
 ls -la "${BIN_DIR}"
