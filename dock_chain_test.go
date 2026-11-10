@@ -142,6 +142,14 @@ func slotAnchor(now time.Time) time.Time {
 	return now.UTC().Add(time.Duration(dockLeadMinutes) * time.Minute).Truncate(slot).Add(slot)
 }
 
+// sameInstant compares two instants published with different precisions
+// (microseconds on the event, nanoseconds on the REST read): equal to the
+// millisecond.
+func sameInstant(a, b time.Time) bool {
+	diff := a.Sub(b)
+	return diff > -time.Millisecond && diff < time.Millisecond
+}
+
 func siteOfDoor(door string) string { return strings.SplitN(door, "-", 2)[0] }
 
 func parseTime(v any) (time.Time, error) {
@@ -870,10 +878,10 @@ func (w *world) receiptStowCompleted(asn string, cartons int) error {
 	if !arrivedAt.Equal(w.dock().arrived[asn].Truncate(time.Second)) {
 		return fmt.Errorf("ReceiptStowCompleted arrived_at = %v, want the gate arrival %s to the second", p["arrived_at"], w.dock().arrived[asn].Format(time.RFC3339Nano))
 	}
-	if !stowedAt.Equal(last) && !stowedAt.Equal(last.Truncate(time.Second)) {
-		return fmt.Errorf("ReceiptStowCompleted stowed_at = %v, want the latest ContainerStowed %s (to the second)", p["stowed_at"], last.Format(time.RFC3339Nano))
+	if !sameInstant(stowedAt, last) {
+		return fmt.Errorf("ReceiptStowCompleted stowed_at = %v, want the latest ContainerStowed %s (to the millisecond)", p["stowed_at"], last.Format(time.RFC3339Nano))
 	}
-	if !closedAt.Equal(wantClosed) && !closedAt.Equal(wantClosed.Truncate(time.Second)) {
+	if !sameInstant(closedAt, wantClosed) {
 		return fmt.Errorf("ReceiptStowCompleted closed_at = %v, want the receipt's closedAt %v", p["closed_at"], rec["closedAt"])
 	}
 	if want := int(stowedAt.Sub(arrivedAt) / time.Second); secs != want || secs <= 0 {
