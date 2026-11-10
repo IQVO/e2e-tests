@@ -34,9 +34,10 @@
 #                           copy of product-master's ProductRegistered
 #                           (PRODUCT_MODE=kafka + a per-run
 #                           PRODUCT_CONSUMER_GROUP), so it is started right
-#                           after product-master. Its dock-door copy stays
-#                           permissive (DOCK_DOOR_MODE unset): no scenario
-#                           here needs a facility-layout dock slot.
+#                           after product-master. Six mandatory consumer
+#                           groups (services.sh); its dock-door copy is fed
+#                           by facility-layout's dock slots, so a receipt
+#                           needs a declared door.
 #   3c. slotting-optimization — the WMS-tier planner of forward pick slots
 #                           (SlotPlan, its ADR 0001/0002). Three event-fed
 #                           local copies (ADR 0003), each a kafka-mode
@@ -155,312 +156,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/services.sh"
 
-log "starting process-path-management on ${PROCESS_PATH_BASE_URL}"
-start_service process-path "${BIN_DIR}/process-path" \
-  HTTP_ADDR=":${PROCESS_PATH_HTTP_PORT}" \
-  DATABASE_URL="${PROCESS_PATH_DB_URL}" \
-  PGPASSWORD="process_path" \
-  MIGRATIONS_PATH="${PROCESS_PATH_REPO}/migrations" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  LOG_LEVEL=info
-wait_for_http "${PROCESS_PATH_BASE_URL}/healthz"
-"${SCRIPT_DIR}/seed-process-paths.sh"
-
-log "starting facility-layout on ${FACILITY_BASE_URL}"
-start_service facility "${BIN_DIR}/facility" \
-  HTTP_ADDR=":${FACILITY_HTTP_PORT}" \
-  DATABASE_URL="${FACILITY_DB_URL}" \
-  PGPASSWORD="facility" \
-  MIGRATIONS_PATH="${FACILITY_REPO}/migrations" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  LOG_LEVEL=info
-wait_for_http "${FACILITY_BASE_URL}/healthz"
-
-log "starting product-master on ${PRODUCT_MASTER_BASE_URL}"
-# product-master: cmd/api, migrations embedded in the binary (no
-# MIGRATIONS_PATH). SHUTDOWN_DRAIN_DELAY=0 so stop_service's bounded wait
-# is not spent idling on the default 5s readiness drain.
-start_service product-master "${BIN_DIR}/product-master" \
-  HTTP_ADDR=":${PRODUCT_MASTER_HTTP_PORT}" \
-  DATABASE_URL="${PRODUCT_MASTER_DB_URL}" \
-  PGPASSWORD="product_master" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  SHUTDOWN_DRAIN_DELAY=0 \
-  LOG_LEVEL=info
-wait_for_http "${PRODUCT_MASTER_BASE_URL}/healthz"
-
-log "starting inbound-receiving on ${INBOUND_BASE_URL}"
-# inbound-receiving: cmd/api, migrations embedded (no MIGRATIONS_PATH).
-# PRODUCT_MODE=kafka makes it refuse an ASN line whose SKU product-master has
-# not announced yet (422 unknown-sku), fed by a per-run consumer group.
-# OUTBOX_RELAY_INTERVAL keeps the handover fast. SHUTDOWN_DRAIN_DELAY=0 for the
-# same reason as product-master above.
-start_service inbound-receiving "${BIN_DIR}/inbound-receiving" \
-  HTTP_ADDR=":${INBOUND_HTTP_PORT}" \
-  DATABASE_URL="${INBOUND_DB_URL}" \
-  PGPASSWORD="inbound_receiving" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  PRODUCT_MODE=kafka \
-  PRODUCT_CONSUMER_GROUP="${INBOUND_PRODUCT_CONSUMER_GROUP}" \
-  OUTBOX_RELAY_INTERVAL="500ms" \
-  SHUTDOWN_DRAIN_DELAY=0 \
-  LOG_LEVEL=info
-wait_for_http "${INBOUND_BASE_URL}/healthz"
-
-log "starting slotting-optimization on ${SLOTTING_BASE_URL}"
-# slotting-optimization: cmd/api, migrations embedded (no MIGRATIONS_PATH).
-# FORWARD_ZONE_CODES is left at its default (FWD). OUTBOX_RELAY_INTERVAL keeps
-# SlotPlanApproved prompt; SHUTDOWN_DRAIN_DELAY=0 as for product-master above.
-start_service slotting-optimization "${BIN_DIR}/slotting-optimization" \
-  HTTP_ADDR=":${SLOTTING_HTTP_PORT}" \
-  DATABASE_URL="${SLOTTING_DB_URL}" \
-  PGPASSWORD="slotting" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  DEMAND_MODE=kafka \
-  DEMAND_CONSUMER_GROUP="${SLOTTING_DEMAND_CONSUMER_GROUP}" \
-  PRODUCT_MODE=kafka \
-  PRODUCT_CONSUMER_GROUP="${SLOTTING_PRODUCT_CONSUMER_GROUP}" \
-  LAYOUT_MODE=kafka \
-  LAYOUT_CONSUMER_GROUP="${SLOTTING_LAYOUT_CONSUMER_GROUP}" \
-  OUTBOX_RELAY_INTERVAL="500ms" \
-  SHUTDOWN_DRAIN_DELAY=0 \
-  LOG_LEVEL=info
-wait_for_http "${SLOTTING_BASE_URL}/healthz"
-
-log "starting returns-processing on ${RETURNS_BASE_URL}"
-# returns-processing: cmd/api, migrations embedded (no MIGRATIONS_PATH).
-# Its three local-copy consumer groups are mandatory env (no defaults), all
-# per-run. OUTBOX_RELAY_INTERVAL keeps DispositionDecided /
-# ReturnLineStaged prompt; SHUTDOWN_DRAIN_DELAY=0 as for product-master
-# above. Started BEFORE inventory-storage so warehouse.returns-processing.
-# events exists when inventory-storage's RETURN_LINE consumer subscribes.
-start_service returns "${BIN_DIR}/returns" \
-  HTTP_ADDR=":${RETURNS_HTTP_PORT}" \
-  DATABASE_URL="${RETURNS_DB_URL}" \
-  PGPASSWORD="returns_processing" \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${RETURNS_PRODUCT_CLASSIFICATION_CONSUMER_GROUP}" \
-  ORDER_LINES_CONSUMER_GROUP="${RETURNS_ORDER_LINES_CONSUMER_GROUP}" \
-  MANIFEST_CONSUMER_GROUP="${RETURNS_MANIFEST_CONSUMER_GROUP}" \
-  OUTBOX_RELAY_INTERVAL="500ms" \
-  SHUTDOWN_DRAIN_DELAY=0 \
-  LOG_LEVEL=info
-wait_for_http "${RETURNS_BASE_URL}/healthz"
-
-log "starting inventory-storage on ${INVENTORY_BASE_URL}"
-start_service inventory "${BIN_DIR}/inventory" \
-  HTTP_ADDR=":${INVENTORY_HTTP_PORT}" \
-  DATABASE_URL="${INVENTORY_DB_URL}" \
-  PGPASSWORD="inventory" \
-  MIGRATIONS_PATH="${INVENTORY_REPO}/migrations" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  LOCATION_LOOKUP_MODE=kafka \
-  FACILITY_LAYOUT_BASE_URL="${FACILITY_BASE_URL}" \
-  PRODUCT_MASTER_CONSUMER_GROUP="${INVENTORY_PRODUCT_MASTER_CONSUMER_GROUP}" \
-  INBOUND_RECEIPT_CONSUMER_GROUP="${INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP}" \
-  RETURN_LINE_CONSUMER_GROUP="${INVENTORY_RETURN_LINE_CONSUMER_GROUP}" \
-  TASK_COMPLETED_CONSUMER_GROUP="${INVENTORY_TASK_COMPLETED_CONSUMER_GROUP}" \
-  TRANSFER_ALLOCATION_CONSUMER_MODE=kafka \
-  TRANSFER_ALLOCATION_CONSUMER_GROUP="${INVENTORY_TRANSFER_CONSUMER_GROUP}" \
-  LOG_LEVEL=info
-wait_for_http "${INVENTORY_BASE_URL}/healthz"
-
-log "starting wes-work-planning on ${WES_BASE_URL}"
-start_service wes "${BIN_DIR}/wes" \
-  HTTP_ADDR=":${WES_HTTP_PORT}" \
-  DATABASE_URL="${WES_DB_URL}" \
-  PGPASSWORD="wes" \
-  MIGRATIONS_PATH="${WES_REPO}/migrations" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  KAFKA_CONSUMER_GROUP="${WES_CONSUMER_GROUP}" \
-  PRODUCT_CLASSIFICATION_MODE=kafka \
-  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${WES_CLASSIFICATION_CONSUMER_GROUP}" \
-  PATH_CATALOGUE_SOURCE=kafka \
-  LOG_LEVEL=info
-wait_for_http "${WES_BASE_URL}/healthz"
-
-log "starting fulfillment-execution on ${FULFILLMENT_BASE_URL}"
-# fulfillment-execution's main() hardcodes postgres.Migrate(databaseURL,
-# "migrations") — a relative path, unlike the other services which read
-# MIGRATIONS_PATH from the environment — so it must be launched with its
-# CWD set to the repo root for that relative path to resolve.
-start_service_in execution "${FULFILLMENT_REPO}" "${BIN_DIR}/execution" \
-  HTTP_ADDR=":${FULFILLMENT_HTTP_PORT}" \
-  DATABASE_URL="${FULFILLMENT_DB_URL}" \
-  PGPASSWORD="fulfillment" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  WORK_RELEASED_CONSUMER_GROUP="${FULFILLMENT_CONSUMER_GROUP}" \
-  PRODUCT_CLASSIFICATION_MODE=kafka \
-  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${FULFILLMENT_CLASSIFICATION_CONSUMER_GROUP}" \
-  PATH_CATALOGUE_SOURCE=kafka \
-  LOG_LEVEL=info
-wait_for_http "${FULFILLMENT_BASE_URL}/healthz"
-
-log "starting labor-performance on ${LABOR_BASE_URL}"
-# labor-performance (7th bounded context): consumes fulfillment-execution's
-# TaskCompleted event (unconditional -- no PATH_CATALOGUE-style toggle;
-# see env.sh's own comment) to compute engineered-labor-standards
-# performance scoring. Started right after fulfillment-execution so a
-# real TaskCompleted has already been published by the time any scenario
-# exercises it.
-start_service labor "${BIN_DIR}/labor" \
-  HTTP_ADDR=":${LABOR_HTTP_PORT}" \
-  DATABASE_URL="${LABOR_DB_URL}" \
-  PGPASSWORD="labor" \
-  MIGRATIONS_PATH="${LABOR_REPO}/migrations" \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  KAFKA_CONSUMER_GROUP="${LABOR_CONSUMER_GROUP}" \
-  LOG_LEVEL=info
-wait_for_http "${LABOR_BASE_URL}/healthz"
-
-log "starting workforce-management on ${WORKFORCE_BASE_URL}"
-start_service workforce "${BIN_DIR}/workforce" \
-  HTTP_ADDR=":${WORKFORCE_HTTP_PORT}" \
-  DATABASE_URL="${WORKFORCE_DB_URL}" \
-  PGPASSWORD="workforce" \
-  MIGRATIONS_PATH="${WORKFORCE_REPO}/migrations" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  PATH_CATALOGUE_SOURCE=kafka \
-  INSTALLED_CAPACITY_MODE=http \
-  FULFILLMENT_EXECUTION_BASE_URL="${FULFILLMENT_BASE_URL}" \
-  LOG_LEVEL=info
-wait_for_http "${WORKFORCE_BASE_URL}/healthz"
-
-log "starting order-management on ${ORDER_BASE_URL}"
-# order-management (6th bounded context): the choreographed-release
-# redesign. It calls inventory-storage over HTTP (synchronous allocation,
-# unchanged) and — instead of also calling wes-work-planning's HTTP API —
-# publishes OrderAllocated/OrderPartiallyAllocated to Kafka topic
-# warehouse.order-management.events, which wes-work-planning's 4th
-# consumer subscription (already started above) picks up and turns into a
-# work unit via its existing EnqueueWorkUnit use case. No
-# WES_WORK_PLANNING_BASE_URL/WES_WORK_PLANNING_MODE is set here: this
-# service's HTTP release path (POST /paths/{pathId}/work-units) is no
-# longer part of its choreographed flow at all.
-start_service order "${BIN_DIR}/order" \
-  HTTP_ADDR=":${ORDER_HTTP_PORT}" \
-  DATABASE_URL="${ORDER_DB_URL}" \
-  PGPASSWORD="order" \
-  MIGRATIONS_PATH="${ORDER_REPO}/migrations" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  PATH_CATALOGUE_SOURCE=kafka \
-  INVENTORY_STORAGE_MODE=http \
-  INVENTORY_STORAGE_BASE_URL="${INVENTORY_BASE_URL}" \
-  PRODUCT_CLASSIFICATION_MODE=kafka \
-  PRODUCT_CLASSIFICATION_CONSUMER_GROUP="${ORDER_CLASSIFICATION_CONSUMER_GROUP}" \
-  LOG_LEVEL=info
-wait_for_http "${ORDER_BASE_URL}/healthz"
-
-log "starting network-fulfillment on ${NETWORK_BASE_URL}"
-# network-fulfillment (9th bounded context): the anti-corruption layer to
-# the external retail network (ADR 0001). Started LAST because its only
-# outbound dependency is order-management (ORDER_MANAGEMENT_URL, HTTP,
-# POST /orders with releaseOnAllocation=false -- the same held-order
-# pattern ADR 0020 documents), which must already be up. NETWORK_MODE is
-# left at its default (stub) deliberately -- see that package's own doc
-# comment: the kind cluster and this harness must never need real network
-# credentials. Inbound demand arrives ONLY via NETWORK_SEED_FILE (there is
-# no HTTP intake endpoint, ADR 0001 §5) and PRODUCT_TRANSLATION_FILE is
-# the ACL dictionary without which every seeded order rejects as
-# untranslatable -- both fixtures live in this repo's own
-# fixtures/network-fulfillment/, not network-fulfillment's.
-start_service network "${BIN_DIR}/network" \
-  PORT="${NETWORK_HTTP_PORT}" \
-  DATABASE_URL="${NETWORK_DB_URL}" \
-  PGPASSWORD="network" \
-  MIGRATIONS_PATH="${NETWORK_REPO}/migrations" \
-  ORDER_MANAGEMENT_URL="${ORDER_BASE_URL}" \
-  PRODUCT_TRANSLATION_FILE="${NETWORK_PRODUCT_TRANSLATION_FILE}" \
-  NETWORK_SEED_FILE="${NETWORK_SEED_FILE}" \
-  POLL_INTERVAL="5s" \
-  SWEEP_INTERVAL="30s" \
-  LOG_LEVEL=info
-wait_for_http "${NETWORK_BASE_URL}/healthz"
-
-log "starting warehouse-planning on ${WAREHOUSE_PLANNING_BASE_URL}"
-# warehouse-planning: the real producer of CapacityPlanPublished (one of
-# the three fail-closed read-model inputs network-inventory-planning needs).
-# Its plans are created through its own REST API by the inter-warehouse
-# transfer scenario. EVENT_PUBLISHER=kafka makes its outbox relay publish to
-# warehouse.warehouse-planning.events. Its two inbound consumers (labor
-# capacity, facility storage tally) have LITERAL default consumer groups, so
-# both are overridden with the run-scoped suffix; its order-demand consumer
-# stays off (no DEMAND_CONSUMER_GROUP). Plans here are created with an
-# explicit assigned_demand, which never reads that consumer's read model.
-start_service planning "${BIN_DIR}/planning" \
-  HTTP_ADDR=":${WAREHOUSE_PLANNING_HTTP_PORT}" \
-  DATABASE_URL="${WAREHOUSE_PLANNING_DB_URL}" \
-  PGPASSWORD="planning" \
-  MIGRATIONS_PATH="${WAREHOUSE_PLANNING_REPO}/internal/adapters/outbound/postgres/migrations" \
-  EVENT_PUBLISHER=kafka \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  LABOR_CAPACITY_CONSUMER_GROUP="${WAREHOUSE_PLANNING_LABOR_CONSUMER_GROUP}" \
-  STORAGE_CAPACITY_CONSUMER_GROUP="${WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP}" \
-  OUTBOX_RELAY_INTERVAL="500ms" \
-  LOG_LEVEL=info
-wait_for_http "${WAREHOUSE_PLANNING_BASE_URL}/healthz"
-
-log "starting network-inventory-planning on ${NIP_BASE_URL}"
-# network-inventory-planning (NIP): started after every context it
-# exchanges events with. No HTTP calls out; Kafka + its own Postgres. Each
-# consumer group env var is its own on-switch (no defaults, so a local
-# process can never join the live cluster's group). OUTBOX_RELAY_ENABLED
-# turns on the relay that drains approvals / work demands onto
-# warehouse.network-inventory-planning.events; without it POST
-# /v1/transfer-approvals would persist but never emit. TRANSFER_PICK_PATH_ID
-# has no default (unset => approve answers 503 config-incomplete).
-start_service nip "${BIN_DIR}/nip" \
-  HTTP_ADDR=":${NIP_HTTP_PORT}" \
-  DATABASE_URL="${NIP_DB_URL}" \
-  PGPASSWORD="nip" \
-  MIGRATIONS_PATH="${NIP_REPO}/internal/adapters/outbound/postgres/migrations" \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  SITE_CAPABILITY_CONSUMER_GROUP="${NIP_CAPABILITY_CONSUMER_GROUP}" \
-  SITE_SKU_DEMAND_CONSUMER_GROUP="${NIP_DEMAND_CONSUMER_GROUP}" \
-  CAPACITY_PLAN_CONSUMER_GROUP="${NIP_CAPACITY_PLAN_CONSUMER_GROUP}" \
-  TRANSFER_REPLY_CONSUMER_GROUP="${NIP_TRANSFER_REPLY_CONSUMER_GROUP}" \
-  TRANSFER_FACT_CONSUMER_GROUP="${NIP_TRANSFER_FACT_CONSUMER_GROUP}" \
-  OUTBOX_RELAY_ENABLED=true \
-  TRANSFER_PICK_PATH_ID="${NIP_TRANSFER_PICK_PATH_ID}" \
-  TRANSFER_DISPATCH_PATH_ID="${NIP_TRANSFER_DISPATCH_PATH_ID}" \
-  PLANNING_MAX_STALENESS="${NIP_PLANNING_MAX_STALENESS}" \
-  LOG_LEVEL=info
-wait_for_http "${NIP_BASE_URL}/healthz"
-
-log "starting exception-management on ${EXCEPTIONS_BASE_URL}"
-# exception-management: cmd/api, migrations embedded (no MIGRATIONS_PATH).
-# Its six fact-consumer group envs are mandatory (no defaults), all per-run
-# so this harness process never joins the live cluster's groups. The outbox
-# relay publishes ExceptionOpened/Triaged/Assigned/Resolved/AutoResolved and
-# the policy declarations; 500ms keeps them inside the scenarios' windows.
-# SLA_SWEEP_INTERVAL stays at its 1m default (escalation is not under test
-# here). Started LAST: every topic its six consumers read exists by now.
-start_service exceptions "${BIN_DIR}/exceptions" \
-  HTTP_ADDR=":${EXCEPTIONS_HTTP_PORT}" \
-  DATABASE_URL="${EXCEPTIONS_DB_URL}" \
-  PGPASSWORD="exception_management" \
-  KAFKA_BROKERS="${KAFKA_BROKERS}" \
-  FULFILLMENT_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_FULFILLMENT_CONSUMER_GROUP}" \
-  WORK_PLANNING_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_WORK_PLANNING_CONSUMER_GROUP}" \
-  NETWORK_FULFILLMENT_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_NETWORK_FULFILLMENT_CONSUMER_GROUP}" \
-  ORDER_CORRELATION_CONSUMER_GROUP="${EXCEPTIONS_ORDER_CORRELATION_CONSUMER_GROUP}" \
-  INVENTORY_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_INVENTORY_CONSUMER_GROUP}" \
-  RETURNS_EXCEPTIONS_CONSUMER_GROUP="${EXCEPTIONS_RETURNS_CONSUMER_GROUP}" \
-  OUTBOX_RELAY_INTERVAL="500ms" \
-  SHUTDOWN_DRAIN_DELAY=0 \
-  LOG_LEVEL=info
-wait_for_http "${EXCEPTIONS_BASE_URL}/healthz"
+# The environment of every service lives in services.sh (one up_<service>
+# function each, shared with the CI workflow); this script only fixes the
+# dependency order described in the header above.
+up_process_path
+up_facility
+up_product_master
+up_inbound_receiving
+up_slotting
+up_returns
+up_inventory
+up_wes
+up_execution
+up_labor
+up_workforce
+up_order
+up_network
+up_planning
+up_nip
+up_exceptions
 
 log "all 16 services up and healthy"
 printf '  %-24s %s\n' process-path-management "${PROCESS_PATH_BASE_URL}"

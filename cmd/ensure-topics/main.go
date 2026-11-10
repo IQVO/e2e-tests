@@ -95,6 +95,19 @@ var topics = []string{
 	"warehouse.task-interleaving.analytics",
 	"warehouse.network-fulfillment.events",
 	"warehouse.network-fulfillment.analytics",
+	// The inbound dock chain. dock-scheduling and yard-management publish
+	// these (their outbox relays publish BOTH topics per event); a group on a
+	// missing topic is never assigned a partition, and these are consumed by
+	// inbound-receiving (appointment copy, visit arrival), warehouse-planning
+	// (dock appointments) and exception-management (yard, dock, outbound
+	// shipping exceptions), all of which refuse to boot without the group and
+	// would stall silently without the topic.
+	"warehouse.dock-scheduling.events",
+	"warehouse.dock-scheduling.analytics",
+	"warehouse.yard-management.events",
+	"warehouse.yard-management.analytics",
+	"warehouse.outbound-shipping.events",
+	"warehouse.outbound-shipping.analytics",
 }
 
 const leaderWait = 30 * time.Second

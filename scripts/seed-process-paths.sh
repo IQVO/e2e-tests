@@ -23,4 +23,10 @@ seed_path PICK pick pick 90s
 seed_path PACK pack pack 60s
 seed_path REBIN rebin rebin 45s
 seed_path SLAM slam slam 30s
+# The inter-warehouse transfer saga's dispatch leg (a DISPATCH task type whose
+# `dispatch-*` family must be declared before such work can be released,
+# fulfillment-execution ADR-0036); same entry as fixtures/process-paths/
+# sortable-fc.yaml. Every catalogue client reads the catalogue from Kafka now,
+# so the family has to exist in process-path-management itself.
+seed_path DISPATCH dispatch dispatch 120s
 ok "process-path catalogue seeded through REST"
