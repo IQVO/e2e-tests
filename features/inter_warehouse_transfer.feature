@@ -118,15 +118,9 @@ Feature: Inter-warehouse transfer saga across real services
     And fulfillment-execution has no task for the transfer
     And destination site "E2E-DEST" scanning 5 units against the transfer's rejected line is quarantined by inventory-storage
 
-  # @blocked @wip-known-defect: a SERVICE defect, not a harness one (reported in the PR).
-  # network-inventory-planning applies TransferStockAllocationReleased with an UPDATE
-  # that sets state CANCELLED but keeps reservation_id, and its own CHECK
-  # inter_warehouse_transfer_reservation_id_check (migration 0009) admits a
-  # reservation_id only in ALLOCATED/RELEASING/PICKED/IN_TRANSIT/ARRIVED/RECEIVED: the
-  # message fails with SQLSTATE 23514 and is retried forever, so the transfer stays
-  # RELEASING and never reaches CANCELLED. Everything up to and including the
-  # reservation revoke in inventory-storage passes. Run it with GODOG_TAGS=@wip-known-defect.
-  @e2e @inter-warehouse-transfer @blocked @wip-known-defect
+  # Was parked as @blocked @wip-known-defect: network-inventory-planning kept reservation_id
+  # on a CANCELLED transfer and its own CHECK refused it (ADR 0023 there, fixed in #111).
+  @e2e @inter-warehouse-transfer
   Scenario: Cancelling an ALLOCATED transfer releases the origin hold and closes the saga
     Given the harness injects facility-layout's SiteCapabilityChanged for site "E2E-ORIGIN" with transfer origin and destination enabled
     And the harness injects facility-layout's SiteCapabilityChanged for site "E2E-DEST" with transfer origin and destination enabled
@@ -149,7 +143,7 @@ Feature: Inter-warehouse transfer saga across real services
     And inventory-storage's reservation for the transfer is revoked
     And network-inventory-planning eventually reports the transfer as CANCELLED
 
-    # --- nothing was worked, nothing can arrive
-    And network-inventory-planning has released no work demand for the transfer
-    And wes-work-planning has no work unit for the transfer
-    And fulfillment-execution has no task for the transfer
+    # NOT asserted here, on purpose: the pick work demand is released when the transfer becomes
+    # ALLOCATED (ADR 0005), i.e. BEFORE this cancel, and no ADR withdraws it (ADR 0022
+    # compensates the stock hold only). "No work unit / no task after cancel" is therefore a
+    # design decision still open (see the inbound/transfer evolution plan), not a settled contract.
