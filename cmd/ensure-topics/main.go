@@ -95,6 +95,19 @@ var topics = []string{
 	"warehouse.task-interleaving.analytics",
 	"warehouse.network-fulfillment.events",
 	"warehouse.network-fulfillment.analytics",
+	// The yard journey (features/yard_journey.feature). dock-scheduling's and
+	// yard-management's consumers (and inbound-receiving's appointment and
+	// visit-arrival copies, and outbound-shipping's) subscribe to the integration
+	// topics of one another, and a group on a topic that does not exist yet is
+	// never assigned a partition. Their relays publish BOTH topics per event, so
+	// each analytics topic must exist too (the yard's TrailerDeparted and
+	// DoorWorkCompleted also go there; the feature scans the integration topic).
+	"warehouse.dock-scheduling.events",
+	"warehouse.dock-scheduling.analytics",
+	"warehouse.yard-management.events",
+	"warehouse.yard-management.analytics",
+	"warehouse.outbound-shipping.events",
+	"warehouse.outbound-shipping.analytics",
 }
 
 const leaderWait = 30 * time.Second
