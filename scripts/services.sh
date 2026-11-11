@@ -74,6 +74,18 @@ up_product_master() {
 # by facility-layout's dock slots, its appointment copy by dock-scheduling and
 # its arrival copy by yard-management, so a scenario that opens a receipt
 # against an appointment needs those three running.
+#
+# The two GS1 label env vars of ADR 0024 are harness literals, one definition
+# here (the scenarios in labels_test.go mirror them and say so):
+#   RECEIVING_SITE_GLNS=0614141000012 -- ONE valid 13-digit test GLN (mod-10
+#     check digit 2) under the same test company prefix as the SSCCs below; it
+#     turns the AI 410 destination rule ON, so a label naming any other GLN is
+#     refused as WrongDestination. Unset, the rule would be off and those
+#     scenarios could not run.
+#   RECEIVER_GS1_COMPANY_PREFIX=0614141 -- the 7-digit test prefix (the same
+#     one the chart render test uses as data), so AssignSscc allocates real
+#     SSCCs (extension 0 + prefix + serial, e.g. 00614141000000014) instead of
+#     answering 409 sscc-prefix-not-configured.
 up_inbound_receiving() {
   log "starting inbound-receiving on ${INBOUND_BASE_URL}"
   start_service inbound-receiving "${BIN_DIR}/inbound-receiving" \
@@ -89,6 +101,8 @@ up_inbound_receiving() {
     DOCK_APPOINTMENT_CONSUMER_GROUP="${INBOUND_DOCK_APPOINTMENT_CONSUMER_GROUP}" \
     VISIT_ARRIVAL_CONSUMER_GROUP="${INBOUND_VISIT_ARRIVAL_CONSUMER_GROUP}" \
     CARTON_STOW_CONSUMER_GROUP="${INBOUND_CARTON_STOW_CONSUMER_GROUP}" \
+    RECEIVING_SITE_GLNS="0614141000012" \
+    RECEIVER_GS1_COMPANY_PREFIX="0614141" \
     OUTBOX_RELAY_INTERVAL="500ms" \
     SHUTDOWN_DRAIN_DELAY=0 \
     LOG_LEVEL=info
