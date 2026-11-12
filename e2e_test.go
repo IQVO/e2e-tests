@@ -140,6 +140,10 @@ type world struct {
 	inb *inboundState
 	// mc is the mastercase correlation (GTINs, SSCCs, bins), see mastercase_test.go.
 	mc *mastercaseState
+	// lbl is the GS1-label/advice correlation (pallet SSCCs, the one
+	// sscc-assignment key and SSCC per ASN, the last scanned label). See
+	// labels_test.go.
+	lbl *labelsState
 
 	// si is the seller-inbound cross-org correlation. See seller_inbound_test.go.
 	si *siState
@@ -1856,6 +1860,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
 	registerMastercaseSteps(sc, w)
+	registerLabelSteps(sc, w)
 	registerDockChainSteps(sc, w)
 	registerSellerInboundSteps(sc, w)
 	registerPhase5ASteps(sc, w)
