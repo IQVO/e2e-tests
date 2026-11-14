@@ -29,9 +29,10 @@
 #
 # Isolated from the storefront: the orders are promised at the sim's own site
 # and its compressed UTC truck schedule goes to PUT /sites/<DAY_SITE>/cpt-schedule.
-# Before its first write the simulator reads the storefront's fulfilment site
-# (fixtures/storefront/fulfilment-site.json, siteId site-1) and refuses to run
-# (exit 2) when DAY_SITE or DAY_CPT_SITE is that site, unless -allow-live-site
+# Before its first write the simulator reads the storefront's two site ids
+# (fixtures/storefront/fulfilment-site.json: siteId site-1, the network's node,
+# and warehouseSiteId AUS3, the warehouse building serving it) and refuses to
+# run (exit 2) when DAY_SITE or DAY_CPT_SITE is either, unless -allow-live-site
 # is passed on purpose (then re-run make provision-storefront after it).
 #
 # Quick smoke: DAY_DURATION=90s DAY_ORDERS=20 bash scripts/07-run-warehouse-day.sh
