@@ -16,6 +16,11 @@ import (
 // wait for room that only picking makes.
 func (f *Floor) pickLines(ctx context.Context, st *orderState) error {
 	what := "order " + st.id + ": pick its lines"
+	// Work done before this floor knew the order (a run resumed, another simulator's picker, a
+	// release by somebody else followed by a claim here) is read from fulfillment-execution first.
+	if _, err := f.syncPicked(ctx, st); err != nil {
+		return err
+	}
 	err := await(ctx, f.clock, f.set.Work, what, func(ctx context.Context) (verdict, string, error) {
 		if err := st.failed(); err != nil {
 			return 0, "", err
@@ -35,6 +40,12 @@ func (f *Floor) pickLines(ctx context.Context, st *orderState) error {
 			return 0, "", err
 		}
 		if released || worked {
+			return vAgain, "", nil
+		}
+		// nothing to release and nothing to claim: somebody else may have completed one of our tasks
+		if synced, err := f.syncPicked(ctx, st); err != nil {
+			return 0, "", err
+		} else if synced {
 			return vAgain, "", nil
 		}
 		return vWait, fmt.Sprintf("lines %v unpicked; release: %s; claim: %s", st.unpicked(), orDash(whyRelease), orDash(whyClaim)), nil
@@ -166,8 +177,10 @@ func (f *Floor) workPick(ctx context.Context, s *station, o *orderState, ln *lin
 	if err := f.completeTask(ctx, s, t); err != nil {
 		return fmt.Errorf("pick line %d of order %s: %w", ln.No, o.id, err)
 	}
-	o.markPicked(ln, t.CPT, t.Fragile)
 	f.logf(s.Occupant, "picked %dx %s for line %d of %s (task %s)", ln.Qty, ln.SKU, ln.No, o.id, t.ID)
+	if !o.markPicked(ln, t.CPT, t.Fragile) {
+		return nil // the order's own look at fulfillment-execution saw the completed task first and scanned the line in
+	}
 	return f.rebin(ctx, o, ln)
 }
 
@@ -254,4 +267,56 @@ func orBy(station string) string {
 		return ""
 	}
 	return " by " + station
+}
+
+// syncPicked reads fulfillment-execution for lines whose work unit is no longer Pending and that this
+// floor has not picked, and takes over those whose PICK task somebody else already completed: the
+// line is picked, and, unless the order was consolidated already (a PACK task exists), it is scanned
+// into rebin. It reports whether any line was taken over.
+func (f *Floor) syncPicked(ctx context.Context, st *orderState) (bool, error) {
+	st.mu.Lock()
+	var cand []*lineState
+	for _, l := range st.lines {
+		if !l.picked && l.Unit.State != UnitPending {
+			cand = append(cand, l)
+		}
+	}
+	st.mu.Unlock()
+	progress, known, consolidated := false, false, false
+	for _, ln := range cand {
+		tasks, r := listAll[task](ctx, f.c, SvcExecution, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(ln.Unit.ID))
+		if !r.OK() {
+			return progress, refusal("read the tasks of "+ln.Unit.ID, r)
+		}
+		var done *task
+		for i := range tasks {
+			if tasks[i].Type == TypePick && tasks[i].Status == TaskCompleted {
+				done = &tasks[i]
+			}
+		}
+		if done == nil {
+			continue
+		}
+		if !known {
+			orderTasks, r := listAll[task](ctx, f.c, SvcExecution, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(st.id))
+			if !r.OK() {
+				return progress, refusal("read the tasks of order "+st.id, r)
+			}
+			for _, t := range orderTasks {
+				consolidated = consolidated || t.Type == TypePack
+			}
+			known = true
+		}
+		if !st.markPicked(ln, done.CPT, done.Fragile) {
+			continue // the picker who completed it marked it between our read and now: it scans it in
+		}
+		progress = true
+		f.logf("floor", "line %d of %s was picked by somebody else (task %s): taken over", ln.No, st.id, done.ID)
+		if !consolidated {
+			if err := f.rebin(ctx, st, ln); err != nil {
+				return progress, err
+			}
+		}
+	}
+	return progress, nil
 }

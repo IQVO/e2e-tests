@@ -191,13 +191,21 @@ func (o *orderState) unpicked() []int {
 	return out
 }
 
-func (o *orderState) markPicked(l *lineState, taskCPT string, fragile bool) {
+// markPicked records a line as picked and reports whether THIS call did: the one that marks a line
+// is the one that scans it into rebin, so a line is never scanned twice by two parties that noticed
+// its completed task at the same time (the picker who completed it, and the order's own look at
+// fulfillment-execution while it waits).
+func (o *orderState) markPicked(l *lineState, taskCPT string, fragile bool) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if l.picked {
+		return false
+	}
 	l.picked, l.fragile, l.cpt = true, fragile, taskCPT
 	if o.cpt == "" {
 		o.cpt = taskCPT
 	}
+	return true
 }
 
 // packHints are the PACK task's hints: fragile when any picked line was, gift wrap when any line asks.

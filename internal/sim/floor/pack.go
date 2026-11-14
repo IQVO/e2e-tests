@@ -12,6 +12,9 @@ import (
 // the rebin arrival that completes the order's line set created it.
 func (f *Floor) packOrder(ctx context.Context, st *orderState) error {
 	what := "order " + st.id + ": pack it"
+	if err := f.syncPackage(ctx, st); err != nil {
+		return err
+	}
 	err := await(ctx, f.clock, f.set.Work, what, func(ctx context.Context) (verdict, string, error) {
 		if err := st.failed(); err != nil {
 			return 0, "", err
@@ -27,6 +30,13 @@ func (f *Floor) packOrder(ctx context.Context, st *orderState) error {
 			return 0, "", err
 		}
 		if worked {
+			return vAgain, "", nil
+		}
+		// nothing to claim: somebody else may have sealed the package
+		if err := f.syncPackage(ctx, st); err != nil {
+			return 0, "", err
+		}
+		if st.sealed() != nil {
 			return vAgain, "", nil
 		}
 		return vWait, why, nil
@@ -103,9 +113,17 @@ func (f *Floor) sealAndComplete(ctx context.Context, s *station, o *orderState, 
 // does not re-pack it.
 func (f *Floor) slam(ctx context.Context, st *orderState, r *Result) error {
 	p := st.sealed()
+	what := fmt.Sprintf("SLAM package %s of order %s", p.ID, st.id)
+	if p.Status != PackageSealed {
+		// an earlier run (or somebody else) already ran the weigh-check: SLAM is once per package
+		r.Status = p.Status
+		if p.Status == PackageDiverted {
+			return fmt.Errorf("%s: the package was already DIVERTED to problem-solve: it is never manifested and the floor does not re-pack it", what)
+		}
+		return nil
+	}
 	actual, expected := f.set.Scale.Weigh(st.id, p.ScannedContents)
 	actual, expected = round3(actual), round3(expected)
-	what := fmt.Sprintf("SLAM package %s of order %s", p.ID, st.id)
 	res := f.call(ctx, SvcExecution, http.MethodPost, "/packages/{id}/slam-runs", "/packages/"+url.PathEscape(p.ID)+"/slam-runs", map[string]any{"actualWeight": actual, "expectedWeight": expected})
 	if res.Status != http.StatusNoContent {
 		return refusal(what, res)
@@ -153,4 +171,28 @@ func (f *Floor) diagnosePack(ctx context.Context, st *orderState) string {
 		seen = append(seen, fmt.Sprintf("%s %s %s", t.ID, t.Type, t.Status+orBy(t.LeaseStationID)))
 	}
 	return fmt.Sprintf("tasks of the order: %v", seen)
+}
+
+// syncPackage takes over a package fulfillment-execution already holds for the order (sealed by an
+// earlier run or by somebody else): the LABELED one first, else a SEALED one, else a DIVERTED one.
+func (f *Floor) syncPackage(ctx context.Context, st *orderState) error {
+	if st.sealed() != nil {
+		return nil
+	}
+	pkgs, r := listAll[pkgDTO](ctx, f.c, SvcExecution, "/packages?orderRef", "/packages?orderRef="+url.QueryEscape(st.id))
+	if !r.OK() {
+		return refusal("read the packages of order "+st.id, r)
+	}
+	rank := map[string]int{PackageLabeled: 3, PackageSealed: 2, PackageDiverted: 1}
+	var best *pkgDTO
+	for i := range pkgs {
+		if rank[pkgs[i].Status] > 0 && (best == nil || rank[pkgs[i].Status] > rank[best.Status]) {
+			best = &pkgs[i]
+		}
+	}
+	if best != nil {
+		f.logf("floor", "order %s already has package %s (%s): taken over", st.id, best.ID, best.Status)
+		st.setPackage(best, "")
+	}
+	return nil
 }

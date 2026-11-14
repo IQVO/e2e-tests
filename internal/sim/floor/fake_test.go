@@ -175,9 +175,10 @@ func (w *world) route(method, svc, path string, h func(r *http.Request, body []b
 		w.mu.Lock()
 		w.tick++
 		w.settle()
-		rp, replayed := w.serve(method, svc, r, body, h)
+		rp, _ := w.serve(method, svc, r, body, h)
+		// the answer is encoded under the lock: it may point at live state another request is about to change
+		rp.body = json.RawMessage(marshal(rp.body))
 		w.mu.Unlock()
-		_ = replayed
 		writeReply(rw, rp)
 	})
 }
@@ -368,4 +369,17 @@ func must(t *testing.T, cond bool, format string, args ...any) {
 	if !cond {
 		t.Fatalf(format, args...)
 	}
+}
+
+// countStatus counts the calls to an exact route that were answered with the status.
+func (w *world) countStatus(pattern string, status int) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for _, c := range w.calls {
+		if c.Route == pattern && c.Status == status {
+			n++
+		}
+	}
+	return n
 }

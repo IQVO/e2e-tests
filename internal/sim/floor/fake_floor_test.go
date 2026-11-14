@@ -791,3 +791,19 @@ func joinSorted(in []string) string {
 	sort.Strings(c)
 	return strings.Join(c, ",")
 }
+
+// addForeignUnit puts a Pending work unit of somebody else's order into a pool.
+func (w *world) addForeignUnit(id, ref, path, cpt string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.wes.units = append(w.wes.units, &wesUnit{ID: id, PathID: path, CPT: cpt, Reference: ref, State: UnitPending, LineNo: 1})
+}
+
+func (w *world) taskState(id string) (string, string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if t := w.fe.task(id); t != nil {
+		return t.Status, t.LeaseStationID
+	}
+	return "", ""
+}
