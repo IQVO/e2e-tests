@@ -72,8 +72,8 @@ refuse to boot with it.
 
 ## What's covered
 
-21 feature files (the inter-warehouse transfer feature has two scenarios,
-the inbound-receiving and slotting-optimization ones four each,
+22 feature files (the inter-warehouse transfer feature has three scenarios,
+the inbound-receiving one nine, the slotting-optimization one four,
 returns/exceptions three):
 
 - **`features/slotting_optimization.feature`** (`@slotting`) — the forward-slot
