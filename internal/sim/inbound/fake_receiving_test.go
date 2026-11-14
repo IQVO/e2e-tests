@@ -46,6 +46,9 @@ type fakeReceiving struct {
 	receipts map[string]*rcptRec
 	apptCopy map[string]*apptCopy
 	closed   map[string]bool // ASNs whose receipt is closed
+	// expectedDelta is added to every line's expected quantity when a receipt opens: the ASN was amended after
+	// the supplier announced it, so what arrives no longer matches the receipt's snapshot.
+	expectedDelta int
 }
 
 var asnNumberRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -205,7 +208,7 @@ func (f *fakeReceiving) openReceipt(c *fctx) reply {
 	}
 	r := &rcptRec{id: f.w.id("rcpt"), asn: number, appt: apptID, door: door, state: "Open", openedAt: f.w.clock.Now()}
 	for i, l := range a.lines {
-		r.lines = append(r.lines, &rcptLine{lineNo: i + 1, sku: l.SKU, expected: l.Qty})
+		r.lines = append(r.lines, &rcptLine{lineNo: i + 1, sku: l.SKU, expected: l.Qty + f.expectedDelta})
 	}
 	f.receipts[r.id] = r
 	a.state = "Receiving"

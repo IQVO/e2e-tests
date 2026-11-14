@@ -30,6 +30,8 @@ type fakeDock struct {
 	asnLag   map[string]*lag // ASN -> refusals left (unknown-asn) while dock-scheduling has not consumed ASNRegistered
 	calendar map[string]*calendar
 	appts    map[string]*apptRec
+	// storeSeal, when set, rewrites the seal a booking declared before it is stored.
+	storeSeal func(string) string
 }
 
 var scacRE = regexp.MustCompile(`^[A-Z]{2,4}$`)
@@ -166,6 +168,9 @@ func (f *fakeDock) book(c *fctx) reply {
 				}
 			}
 		}
+	}
+	if f.storeSeal != nil {
+		seal = f.storeSeal(seal)
 	}
 	a := &apptRec{
 		id: f.w.id("appt"), site: site, dir: dir, door: door, carrier: carrier, scac: scac, seal: seal, state: "BOOKED",
