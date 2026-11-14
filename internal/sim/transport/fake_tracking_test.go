@@ -42,10 +42,46 @@ type forder struct {
 type orderingFake struct {
 	w      *world
 	orders map[string]*forder
+	pos    map[string]*fpo
+}
+
+// fpo is a vendor-connectivity purchase order: labels are listed as soon as they are issued, the tracking
+// numbers only once the shipment confirmation succeeded (`[]` before), here after `showAfter` reads.
+type fpo struct {
+	vendor, state string
+	labels        []string
+	shipped       []string
+	showAfter     int
+	reads         int
 }
 
 func newOrderingFake(w *world) *orderingFake {
-	o := &orderingFake{w: w, orders: map[string]*forder{}}
+	o := &orderingFake{w: w, orders: map[string]*forder{}, pos: map[string]*fpo{}}
+	w.route("GET", SvcVendor, "/vendor/purchase-orders/{po}", func(r *http.Request, _ []byte) reply {
+		if bad := strictQuery(r, "vendorId"); bad != nil {
+			return *bad
+		}
+		if r.URL.Query().Get("vendorId") == "" {
+			return problem(422, "validation-failed", "vendorId is required")
+		}
+		po, found := o.pos[r.PathValue("po")]
+		if !found {
+			return problem(404, "not-found", "unknown purchase order")
+		}
+		if po.vendor != r.URL.Query().Get("vendorId") {
+			return problem(409, "node-not-owned-by-vendor", "purchase order of another vendor")
+		}
+		po.reads++
+		labels := []map[string]any{}
+		for i, tn := range po.labels {
+			labels = append(labels, map[string]any{"packageNo": i + 1, "labelRef": "lbl-" + tn, "trackingNumber": tn, "carrier": "NETWORK"})
+		}
+		shipped := []string{}
+		if po.reads > po.showAfter {
+			shipped = po.shipped
+		}
+		return ok(map[string]any{"poNumber": r.PathValue("po"), "vendorId": po.vendor, "nodeId": "site-1", "state": po.state, "labels": labels, "trackingNumbers": shipped})
+	})
 	w.route("GET", SvcOrdering, "/orders/{id}/tracking", func(r *http.Request, _ []byte) reply {
 		ord, found := o.orders[r.PathValue("id")]
 		if !found {
@@ -76,6 +112,13 @@ func newOrderingFake(w *world) *orderingFake {
 		return ok(map[string]any{"orderId": ord.id, "status": ord.status, "groups": gs})
 	})
 	return o
+}
+
+// addPO registers a purchase order of the vendor whose labels exist and whose shipment is confirmed after `showAfter` reads.
+func (w *world) addPO(po, vendor string, showAfter int, tns ...string) *fpo {
+	p := &fpo{vendor: vendor, state: "ACCEPTED", labels: tns, shipped: tns, showAfter: showAfter}
+	w.ordering.pos[po] = p
+	return p
 }
 
 // addOrder registers an order with one SHIPPED group whose packages show after `showAfter` reads.

@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -153,5 +154,51 @@ func TestOrderStatusReadsTheOrder(t *testing.T) {
 	st, err := tr.OrderStatus(context.Background(), "ord-1")
 	if err != nil || st != "DELIVERED" {
 		t.Fatalf("status = %q, %v", st, err)
+	}
+}
+
+// The vendor side lists the numbers too, but only the CONFIRMED ones in trackingNumbers: labels exist earlier.
+func TestPurchaseOrderTrackingNumbersWaitsForTheShipmentConfirmation(t *testing.T) {
+	w := newWorld(t)
+	w.addPO("PO-1", "V-WS", 2, "RN0000000000000001", "RN0000000000000002")
+	tr := newTracker(w)
+
+	got, err := tr.PurchaseOrderTrackingNumbers(context.Background(), "V-WS", "PO-1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"RN0000000000000001", "RN0000000000000002"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if reads := len(w.callsTo(SvcVendor, "GET /vendor/purchase-orders/PO-1")); reads != 3 {
+		t.Fatalf("%d reads, want 3 (2 before the confirmation, 1 after)", reads)
+	}
+	// vendorId is a required query parameter on every read
+	for _, c := range w.callsTo(SvcVendor, "GET") {
+		if !strings.Contains(c.Path, "vendorId=V-WS") {
+			t.Fatalf("read %q without vendorId", c.Path)
+		}
+	}
+}
+
+func TestPurchaseOrderTrackingNumbersEndsOnARefusalAndIsBounded(t *testing.T) {
+	w := newWorld(t)
+	w.addPO("PO-1", "V-WS", 0, "RN0000000000000001")
+	w.addPO("PO-2", "V-WS", 1<<30, "RN0000000000000002")
+	tr := newTracker(w)
+
+	// another vendor's purchase order is a refusal, not "not yet": no polling
+	if _, err := tr.PurchaseOrderTrackingNumbers(context.Background(), "V-OTHER", "PO-1", 1); !hasSlug(errors.Unwrap(err), "node-not-owned-by-vendor") {
+		t.Fatalf("err = %v, want node-not-owned-by-vendor", err)
+	}
+	if reads := len(w.callsTo(SvcVendor, "GET")); reads != 1 {
+		t.Fatalf("%d reads, want 1: a refusal must not be polled", reads)
+	}
+	// a shipment that is never confirmed
+	if _, err := tr.PurchaseOrderTrackingNumbers(context.Background(), "V-WS", "PO-2", 1); !IsTimeout(err) {
+		t.Fatalf("err = %v, want a timeout", err)
+	}
+	if elapsed := w.clock.Now().Sub(t0); elapsed > DefaultSettings().TrackingTimeout+time.Minute {
+		t.Fatalf("waited %s", elapsed)
 	}
 }

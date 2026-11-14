@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"time"
 
@@ -144,6 +145,40 @@ func (t *Tracker) OrderTrackingNumbers(ctx context.Context, orderID string, want
 		return nil, fmt.Errorf("tracking numbers of order %s: %w", orderID, err)
 	}
 	return slices.Clone(tns), nil
+}
+
+// PurchaseOrderTrackingNumbers is the vendor-side way to the same numbers:
+// vendor-connectivity GET /vendor/purchase-orders/{poNumber}?vendorId= lists
+// `trackingNumbers`, the ones CONFIRMED shipped (`[]` until the shipment
+// confirmation succeeds; the labels issued earlier are in `labels`, not here).
+// It polls, bounded by Settings.TrackingTimeout, until at least want (default 1)
+// are confirmed. A refusal other than not-found/5xx (an unknown vendor, a
+// purchase order of another vendor) ends the wait.
+func (t *Tracker) PurchaseOrderTrackingNumbers(ctx context.Context, vendorID, poNumber string, want int) ([]string, error) {
+	if want <= 0 {
+		want = 1
+	}
+	var tns []string
+	path := "/vendor/purchase-orders/" + pathEscape(poNumber) + "?vendorId=" + url.QueryEscape(vendorID)
+	err := await(ctx, t.Clock, t.Settings.TrackingTimeout, t.Settings.PollInterval, func(ctx context.Context) (bool, string, error) {
+		r := t.C.Call(ctx, SvcVendor, http.MethodGet, "GET /vendor/purchase-orders/{poNumber}", path, nil)
+		var po struct {
+			State           string   `json:"state"`
+			TrackingNumbers []string `json:"trackingNumbers"`
+		}
+		if err := decode("vendor-connectivity GET /vendor/purchase-orders/{poNumber}", r, &po); err != nil {
+			if transient(err) {
+				return false, err.Error(), nil
+			}
+			return false, "", err
+		}
+		tns = dedupe(po.TrackingNumbers)
+		return len(tns) >= want, fmt.Sprintf("%d of %d confirmed tracking numbers, purchase order %s", len(tns), want, po.State), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tracking numbers of purchase order %s: %w", poNumber, err)
+	}
+	return tns, nil
 }
 
 // Journey reads one package's journey and raises the timeline to its newest scan,

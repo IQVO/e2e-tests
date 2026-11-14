@@ -125,7 +125,7 @@ func (w *world) now() time.Time { return w.clock.Now().Add(w.skew).UTC() }
 // client returns a sim.Client against the fakes (a fresh Idempotency-Key per POST, as in production).
 func (w *world) client() *sim.Client {
 	base := map[string]string{}
-	for _, s := range []string{SvcLinehaul, SvcLastMile, SvcTracking, SvcNodes, SvcOrdering} {
+	for _, s := range []string{SvcLinehaul, SvcLastMile, SvcTracking, SvcNodes, SvcOrdering, SvcVendor} {
 		base[s] = w.srv.URL + "/" + s
 	}
 	c := sim.NewClient(base, sim.NewCallStats())

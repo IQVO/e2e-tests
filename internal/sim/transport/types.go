@@ -18,6 +18,7 @@ const (
 	SvcTracking = "shipping-and-tracking"
 	SvcNodes    = "node-topology"
 	SvcOrdering = "customer-ordering"
+	SvcVendor   = "vendor-connectivity"
 )
 
 // Attempt outcomes of last-mile-delivery POST /routes/{id}/attempts.
