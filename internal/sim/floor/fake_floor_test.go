@@ -351,6 +351,9 @@ type feFake struct {
 	// lastSlam is the weights of the last SLAM run per package id.
 	lastSlam map[string][2]float64
 	seq      int
+	// autoComplete lists work unit ids whose PICK task is completed the moment it is created: an
+	// associate who is not one of the floor's crew (another simulator's picker) got there first.
+	autoComplete map[string]bool
 	// rejectLocations makes POST /stations refuse a locationCode that is no WorkCenter (422).
 	rejectLocations bool
 	// sealRefusal, when set, makes the next seal answer that problem (status, slug).
@@ -651,8 +654,14 @@ func (f *feFake) pkg(id string) *fePackage {
 // orderRef is the work unit's id (an order's PICK task is per line).
 func (f *feFake) createPick(u *wesUnit) {
 	f.seq++
-	f.tasks = append(f.tasks, &feTask{ID: fmt.Sprintf("task-%d", f.seq), Type: TypePick, Status: TaskPending, CPT: u.CPT, OrderRef: u.ID,
-		RequiredCapabilities: []string{"pick"}, Fragile: u.fragile, GiftWrap: u.GiftWrap, unit: u})
+	t := &feTask{ID: fmt.Sprintf("task-%d", f.seq), Type: TypePick, Status: TaskPending, CPT: u.CPT, OrderRef: u.ID,
+		RequiredCapabilities: []string{"pick"}, Fragile: u.fragile, GiftWrap: u.GiftWrap, unit: u}
+	f.tasks = append(f.tasks, t)
+	if f.autoComplete[u.ID] {
+		t.Status, t.LeaseStationID = TaskCompleted, "SOMEONE-ELSE"
+		f.w.wes.onTaskCompleted(u.ID)
+		f.w.inv.onPickCompleted(u.Reference, u.LineNo)
+	}
 }
 
 // addForeignPick puts a PENDING PICK task of somebody else's order in the queue, visible at once.

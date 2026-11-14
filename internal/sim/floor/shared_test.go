@@ -418,3 +418,25 @@ func TestACancelledContextEndsTheRunWithAFindingAndNoWrites(t *testing.T) {
 		t.Fatalf("%d writes after the context was cancelled", w.writes()-before)
 	}
 }
+
+func TestATaskSomebodyElseCompletesWhileWeWaitIsTakenOver(t *testing.T) {
+	// An associate that is not on this floor's crew (another simulator's picker) completes line 2's
+	// task the moment it exists. This floor's pickers never get to claim it, so only the order's own
+	// look at fulfillment-execution while it waits can move the order on.
+	w := newWorld(t)
+	w.addOrder(std("OM-1"))
+	w.fe.autoComplete = map[string]bool{"OM-1-line-2": true}
+	f := provisioned(t, w, Settings{}, Crew{Pickers: 1, Packers: 1})
+	r := f.Process(context.Background(), "OM-1")
+	if !r.OK() {
+		t.Fatalf("problems %v", r.Problems)
+	}
+	if got := w.callsTo("POST /fulfillment-execution/rebin/arrivals"); got != 2 {
+		t.Fatalf("%d rebin arrivals, want one per line", got)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if got := len(w.fe.completedBy["RD01-PICK-01"]); got != 1 {
+		t.Fatalf("this floor's picker completed %d PICK tasks, want only line 1's", got)
+	}
+}

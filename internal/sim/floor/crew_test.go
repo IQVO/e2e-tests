@@ -136,3 +136,25 @@ func TestShutdownChecksEveryoneOutAndReportsWhoCouldNot(t *testing.T) {
 		t.Fatal("one failed check-out stopped the others")
 	}
 }
+
+func TestAStationWorksOneTaskAtATime(t *testing.T) {
+	w := newWorld(t)
+	f := newTestFloor(w, Settings{})
+	if err := f.Provision(context.Background(), Crew{Pickers: 2, Packers: 1}); err != nil {
+		t.Fatal(err)
+	}
+	a, b := f.acquire(&f.pickers), f.acquire(&f.pickers)
+	if a == nil || b == nil || a == b {
+		t.Fatalf("two pickers must get two different stations, got %v and %v", a, b)
+	}
+	if c := f.acquire(&f.pickers); c != nil {
+		t.Fatalf("a third task was handed to %s while both pickers were busy", c.ID)
+	}
+	if p := f.acquire(&f.packers); p == nil || p.Capability != "pack" {
+		t.Fatalf("the packer pool is separate from the pickers': %+v", p)
+	}
+	f.free(a)
+	if c := f.acquire(&f.pickers); c != a {
+		t.Fatalf("a freed station must be available again, got %v", c)
+	}
+}
