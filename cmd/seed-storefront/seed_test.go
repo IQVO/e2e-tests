@@ -25,6 +25,7 @@ func siblingNetworkData() string {
 
 type inputs struct {
 	fx      *Fixture
+	site    *SiteFixture // the committed fulfilment-site fixture: node site-1 and its building AUS3
 	phys    map[string]PhysicalProduct
 	titles  map[string]string // sku -> catalogue title used by the fake
 	network string            // network data file handed to the seeder
@@ -59,7 +60,11 @@ func loadInputs(t *testing.T) inputs {
 			titles[p.SKU] = "Stand-in catalogue title for " + p.SKU
 		}
 	}
-	return inputs{fx: fx, phys: phys, titles: titles, network: writeNetwork(t, titles)}
+	site, err := LoadSiteFixture(filepath.Join(repoRoot, "fixtures/storefront/fulfilment-site.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inputs{fx: fx, site: site, phys: phys, titles: titles, network: writeNetwork(t, titles)}
 }
 
 func writeNetwork(t *testing.T, titles map[string]string) string {
@@ -109,7 +114,10 @@ func writeNetwork(t *testing.T, titles map[string]string) string {
 // the network's items (ACTIVE, in stock), 5 legacy items, tax table and charge schedule v1 equal
 // to the fixture, the top-level Jewelry category, and site-1's CPT schedule as make
 // warehouse-day leaves it (UTC, simulated truck minutes), so every capability offer is
-// THROUGHPUT_CONSTRAINED 0 until the WMS step redefines it.
+// THROUGHPUT_CONSTRAINED 0 until the WMS step redefines it. The warehouse building (AUS3) is a
+// facility-layout site that already carries the fixture's schedule, so the tests of site-1's
+// behaviour keep their exact write counts; clusterBeforeTheBuildingSchedule is the cluster before
+// the first run that defines it.
 func clusterLike(in inputs) (*fakeCluster, map[string]string) {
 	f := newFakeCluster()
 	ids := map[string]string{}
@@ -118,6 +126,9 @@ func clusterLike(in inputs) (*fakeCluster, map[string]string) {
 		f.offerSKUs = append(f.offerSKUs, p.SKU)
 	}
 	f.cpt["site-1"] = simLeftoverSchedule()
+	f.sites[in.site.WarehouseSiteID] = "Active"
+	req := in.site.Request()
+	f.cpt[in.site.WarehouseSiteID] = &CPTSchedule{SiteID: in.site.WarehouseSiteID, Timezone: req.Timezone, Cutoffs: req.Cutoffs}
 	for _, legacy := range []string{"LEG-0001 legacy item one", "LEG-0002 legacy item two", "LEG-0003 legacy item three", "LEG-0004 legacy item four", "LEG-0005 legacy item five"} {
 		ids[legacy] = f.addItem(legacy, "ACTIVE")
 	}
@@ -125,6 +136,14 @@ func clusterLike(in inputs) (*fakeCluster, map[string]string) {
 	f.charges = &ChargeSchedule{ScheduleID: "sched-1", Version: 1, State: "CURRENT", Tiers: desiredTiers(in.fx.DeliveryCharges, "USD")}
 	f.cats = []Category{{CategoryID: "cat-80c58ef626f7", Name: "Jewelry", Path: "Jewelry"}}
 	f.catVer = 1
+	return f, ids
+}
+
+// clusterBeforeTheBuildingSchedule is clusterLike where process-path-management has no schedule for
+// the warehouse building yet: the state before the first run of this seeder version.
+func clusterBeforeTheBuildingSchedule(in inputs) (*fakeCluster, map[string]string) {
+	f, ids := clusterLike(in)
+	delete(f.cpt, in.site.WarehouseSiteID)
 	return f, ids
 }
 

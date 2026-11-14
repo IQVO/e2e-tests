@@ -61,8 +61,10 @@ type config struct {
 	// cptSiteID is the process-path-management site whose CPT schedule the
 	// simulated trucks replace; it defaults to siteCode (see site.go).
 	cptSiteID string
-	// storefrontSiteFixture declares the storefront's live fulfilment site,
-	// which siteGuard refuses to write unless allowLiveSite is set.
+	// storefrontSiteFixture declares the storefront's live fulfilment site
+	// (siteId, the network's node) and the warehouse building serving it
+	// (warehouseSiteId); siteGuard refuses to write either unless
+	// allowLiveSite is set.
 	storefrontSiteFixture string
 	allowLiveSite         bool
 	buildingID            string
@@ -125,8 +127,8 @@ func loadConfig() config {
 	flag.Float64Var(&c.packSeconds, "pack-seconds", envFloat("DAY_PACK_SECONDS", 2.0), "wall seconds a pack takes at standard")
 	flag.StringVar(&c.siteCode, "site", envOr("DAY_SITE", "SIM1"), "the simulated building's own site: facility-layout site code and the fulfillmentSiteId of every order (uppercase letters and digits)")
 	flag.StringVar(&c.cptSiteID, "cpt-site", envOr("DAY_CPT_SITE", ""), "process-path-management site whose CPT schedule the simulated trucks replace (empty = -site)")
-	flag.StringVar(&c.storefrontSiteFixture, "storefront-site-fixture", envOr("DAY_STOREFRONT_SITE_FIXTURE", defaultStorefrontSiteFixture), "fixture declaring the storefront's live fulfilment site (siteId); the run refuses to write that site")
-	flag.BoolVar(&c.allowLiveSite, "allow-live-site", false, "allow -site/-cpt-site to be the storefront's fulfilment site (overwrites its CPT schedule; re-run make provision-storefront after)")
+	flag.StringVar(&c.storefrontSiteFixture, "storefront-site-fixture", envOr("DAY_STOREFRONT_SITE_FIXTURE", defaultStorefrontSiteFixture), "fixture declaring the storefront's live fulfilment site (siteId) and the warehouse building serving it (warehouseSiteId); the run refuses to write either")
+	flag.BoolVar(&c.allowLiveSite, "allow-live-site", false, "allow -site/-cpt-site to be the storefront's node or warehouse building (overwrites its CPT schedule; re-run make provision-storefront after)")
 	flag.StringVar(&c.wesPickPath, "wes-pick-path", envOr("DAY_WES_PICK_PATH", "PICK"), "WES work pool for PICK work (the pathId order-management stamps on order lines: the catalogue path id, PICK — see ADR 0013)")
 	flag.StringVar(&c.buildingID, "building", envOr("DAY_BUILDING", "SIM1"), "workforce-management building id")
 	flag.StringVar(&c.reportDir, "report-dir", envOr("DAY_REPORT_DIR", "run"), "where the JSON audit report is written")
@@ -235,7 +237,7 @@ func jitter(r float64Source, base float64, spread float64) time.Duration {
 func main() {
 	cfg := loadConfig()
 	// Before any call to any service: never write the storefront's site.
-	warnings, err := siteGuard(cfg, func() (string, error) { return storefrontSiteID(cfg.storefrontSiteFixture) })
+	warnings, err := siteGuard(cfg, func() (storefrontSites, error) { return readStorefrontSites(cfg.storefrontSiteFixture) })
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "warehouse-day: WARNING:", w)
 	}

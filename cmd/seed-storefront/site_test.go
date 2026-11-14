@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,9 @@ func TestSiteFixtureAgreesWithTheNetworkNodeProfile(t *testing.T) {
 	}
 	if site.SiteID != "site-1" || site.Timezone != "America/Chicago" || !reflect.DeepEqual(site.Cutoffs, want) {
 		t.Fatalf("fulfilment-site fixture: %+v", site)
+	}
+	if site.WarehouseSiteID != "AUS3" {
+		t.Fatalf("warehouseSiteId = %q: the warehouse building serving node site-1 is AUS3 (ADR 0001 D1)", site.WarehouseSiteID)
 	}
 
 	path := siblingNetworkData()
@@ -68,6 +72,93 @@ func TestSiteValidateAndAgreeWithCatchInconsistencies(t *testing.T) {
 	got := strings.Join(ok.AgreeWith(&NodeProfile{VendorNodeCode: "site-1", Timezone: "America/Chicago", CutoffTimes: []string{"11:00", "17:00"}}), "\n")
 	if !strings.Contains(got, `timezone "UTC"`) || !strings.Contains(got, "cutoffs [09:39]") {
 		t.Fatalf("AgreeWith: %s", got)
+	}
+}
+
+// TestSiteFixtureDeclaresTheWarehouseBuilding pins ADR 0001 D1 in the fixture: the network's node
+// id (siteId, site-1) and the warehouse building that serves it (warehouseSiteId) are two ids,
+// the building's is a code facility-layout / order-management / outbound-shipping accept, and the
+// building's cutoffs ARE the node profile's: one list in the fixture feeds both ids, so they
+// cannot drift.
+func TestSiteFixtureDeclaresTheWarehouseBuilding(t *testing.T) {
+	site, err := LoadSiteFixture(filepath.Join(repoRoot, siteFixturePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems := site.Validate(); len(problems) > 0 {
+		t.Fatalf("%d problems:\n%v", len(problems), problems)
+	}
+	if site.WarehouseSiteID == "" {
+		t.Fatal("the fixture declares no warehouseSiteId")
+	}
+	if !warehouseSiteRE.MatchString(site.WarehouseSiteID) {
+		t.Fatalf("warehouseSiteId %q is not ^[A-Z0-9]+$ (order-management, facility-layout and outbound-shipping reject it)", site.WarehouseSiteID)
+	}
+	if strings.EqualFold(site.WarehouseSiteID, site.SiteID) {
+		t.Fatalf("siteId and warehouseSiteId are both %q: the network node and its building are two ids", site.SiteID)
+	}
+
+	// one source: the schedule planned for the building is byte-for-byte the one planned for the node
+	p := &Plan{}
+	planCPT(p, site, nil)
+	planBuildingCPT(p, site, nil)
+	if p.CPTSchedule == nil || p.BuildingSchedule == nil || !reflect.DeepEqual(*p.CPTSchedule, *p.BuildingSchedule) {
+		t.Fatalf("node schedule %+v, building schedule %+v: they must be equal", p.CPTSchedule, p.BuildingSchedule)
+	}
+	if p.CPTSite != site.SiteID || p.BuildingSite != site.WarehouseSiteID {
+		t.Fatalf("plan names node %q and building %q", p.CPTSite, p.BuildingSite)
+	}
+	if got := describeSchedule(p.BuildingSchedule.Timezone, p.BuildingSchedule.Cutoffs); got != "America/Chicago [aus-1100 11:00, aus-1700 17:00]" {
+		t.Fatalf("the building's schedule: %s", got)
+	}
+
+	path := siblingNetworkData()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skipf("sibling warehouse-infra data file %s is absent (single-repo checkout, e.g. CI): comparing the building's cutoffs with the node profile needs it; set STOREFRONT_NETWORK_DATA to point at it", path)
+	}
+	node, err := LoadNodeProfile(path, site.SiteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buildingTimes []string
+	for _, c := range p.BuildingSchedule.Cutoffs {
+		buildingTimes = append(buildingTimes, c.LocalTime)
+	}
+	sort.Strings(buildingTimes)
+	if p.BuildingSchedule.Timezone != node.Timezone || !reflect.DeepEqual(buildingTimes, node.CutoffTimes) {
+		t.Fatalf("the building %s: %s %v, the network node profile of %s: %s %v", site.WarehouseSiteID, p.BuildingSchedule.Timezone, buildingTimes, site.SiteID, node.Timezone, node.CutoffTimes)
+	}
+}
+
+// TestValidateChecksTheWarehouseSiteID: a missing, lower-case or node-equal building id is a
+// CHECK failure (nothing is written for it).
+func TestValidateChecksTheWarehouseSiteID(t *testing.T) {
+	base := func(building string) *SiteFixture {
+		return &SiteFixture{SiteID: "site-1", WarehouseSiteID: building, Timezone: "America/Chicago", Cutoffs: []Cutoff{
+			{CptID: "aus-1100", LocalTime: "11:00", DaysOfWeek: []string{"Mon"}, ShipMethod: "ground", EligiblePathIDs: []string{"PICK"}},
+		}}
+	}
+	for _, tc := range []struct {
+		name, building, want string
+	}{
+		{"valid", "AUS3", ""},
+		{"valid with digits only", "7", ""},
+		{"missing", "", "warehouseSiteId is empty"},
+		{"lower case", "aus3", `warehouseSiteId "aus3" is not ^[A-Z0-9]+$`},
+		{"a node-style code", "site-1", `warehouseSiteId "site-1" is not ^[A-Z0-9]+$`},
+		{"padded", " AUS3", `is not ^[A-Z0-9]+$`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strings.Join(base(tc.building).Validate(), "\n")
+			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("problems %q, want %q", got, tc.want)
+			}
+		})
+	}
+	same := base("AUS3")
+	same.SiteID = "AUS3"
+	if got := strings.Join(same.Validate(), "\n"); !strings.Contains(got, "must differ") {
+		t.Fatalf("the node id equal to the building id must be refused: %q", got)
 	}
 }
 

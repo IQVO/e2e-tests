@@ -7,21 +7,25 @@
 // data of fixtures/products/fulfilment-products.json (dimensions, weight, handling tags) and the
 // retail-network data file of warehouse-infra (scripts/data/retail-network-seed.json: SKU -> the
 // catalogue item's title, its natural key in offer-availability). The WMS side of the promise comes
-// from fixtures/storefront/fulfilment-site.json: the CPT schedule of the fulfilment site (site-1)
-// in process-path-management, which must agree with the network data file's node profile.
+// from fixtures/storefront/fulfilment-site.json: the CPT schedule of the fulfilment site in
+// process-path-management, defined under both of the building's ids (ADR 0001 D1): site-1, the
+// network's node, which must agree with the network data file's node profile, and AUS3, the
+// facility-layout site of the warehouse building serving it (checked to exist, never created).
 //
 //  1. CHECK   validates the fixtures against the real data (the CPT schedule against the network
 //     node profile, its paths against process-path-management's Active paths), resolves every
-//     SKU -> title -> catalogItemId (offer-availability GET /catalog, paged), and reads the site's
-//     CPT schedule, the current tax table, charge schedule, category tree, item prices and
-//     contents. A missing or DISCONTINUED catalogue item fails here, before any write: the
+//     SKU -> title -> catalogItemId (offer-availability GET /catalog, paged), checks that
+//     facility-layout knows the warehouse building (GET /sites/{code}; never created here), and
+//     reads the CPT schedule of both ids, the current tax table, charge schedule, category tree,
+//     item prices and contents. A missing or DISCONTINUED catalogue item fails here, before any write: the
 //     network seed must run first.
 //  2. PLAN    a pure, deterministic diff of the desired against the observed state, printed per
 //     kind with counts (BuildPlan).
-//  3. APPLY   only the diffs, in dependency order: first the WMS step (PUT the site's CPT
+//  3. APPLY   only the diffs, in dependency order: first the WMS step (PUT each id's CPT
 //     schedule when its timezone or cutoffs differ), then the storefront tier, every POST under a
 //     deterministic Idempotency-Key (seed-sf:<40 hex of sha256(op, path, canonical body)>).
-//  4. VERIFY  network-fulfillment's capability offers of the storefront SKUs (warn only), every
+//  4. VERIFY  the warehouse building's CPT schedule read back (equal to the fixture, else fail),
+//     network-fulfillment's capability offers of the storefront SKUs (warn only), every
 //     product purchasable in product-discovery within -verify-timeout, one delivery quote through
 //     the BFF (postal prefix 787 by default), one BFF search hit per department.
 //
@@ -54,13 +58,13 @@ func main() {
 		baseURL   = flag.String("base-url", envOr("STOREFRONT_SEED_BASE_URL", defaultBaseURL), "Kong base URL; each context at <base-url>/<context> ($STOREFRONT_SEED_BASE_URL)")
 		bffURL    = flag.String("storefront-url", envOr("STOREFRONT_BFF_URL", defaultBFFURL), "storefront BFF base URL, used by VERIFY ($STOREFRONT_BFF_URL)")
 		fixture   = flag.String("fixture", "fixtures/storefront/catalogue.json", "storefront fixture (curated merchandising)")
-		site      = flag.String("site", "fixtures/storefront/fulfilment-site.json", "fulfilment-site fixture: the CPT schedule of the site in process-path-management (WMS step)")
+		site      = flag.String("site", "fixtures/storefront/fulfilment-site.json", "fulfilment-site fixture: the CPT schedule of the site (siteId) and of its warehouse building (warehouseSiteId) in process-path-management (WMS step)")
 		products  = flag.String("products", "fixtures/products/fulfilment-products.json", "real product data (dimensions, weight, handling tags)")
 		network   = flag.String("network-data", envOr("STOREFRONT_NETWORK_DATA", defaultNetworkData), "warehouse-infra retail-network data file: SKU -> catalogue title ($STOREFRONT_NETWORK_DATA; default relative to the repo root)")
 		mediaBase = flag.String("media-base", envOr("STOREFRONT_MEDIA_BASE", defaultMediaBase), "absolute URL of the department images (<media-base>/<department-slug>.svg)")
 		dryRun    = flag.Bool("dry-run", false, "CHECK and PLAN only: write nothing")
 		verifyOn  = flag.Bool("verify-only", false, "CHECK, PLAN (printed) and VERIFY: write nothing")
-		wmsOnly   = flag.Bool("wms-only", false, "the WMS step alone: CHECK, PLAN, APPLY and VERIFY of the fulfilment site's CPT schedule (combine with -dry-run / -verify-only)")
+		wmsOnly   = flag.Bool("wms-only", false, "the WMS step alone: CHECK, PLAN, APPLY and VERIFY of the CPT schedule of the fulfilment site and its warehouse building (combine with -dry-run / -verify-only)")
 		timeout   = flag.Duration("verify-timeout", 3*time.Minute, "how long VERIFY waits for every product to become purchasable")
 		interval  = flag.Duration("verify-interval", 2*time.Second, "VERIFY polling interval")
 		prefix    = flag.String("quote-prefix", "787", "postal prefix of the VERIFY delivery quote (the first 3 characters of a ZIP code)")
