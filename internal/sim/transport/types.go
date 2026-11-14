@@ -11,7 +11,7 @@ import (
 )
 
 // Service names: the keys of sim.Client.Base, which are also the gateway path
-// segments (the Kong route is /api/<service>).
+// segments (the gateway route is /api/<service>).
 const (
 	SvcLinehaul = "linehaul-transportation"
 	SvcLastMile = "last-mile-delivery"
