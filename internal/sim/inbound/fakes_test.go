@@ -137,7 +137,9 @@ func (f *fake) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		write(http.StatusNotFound, f.problemBody(http.StatusNotFound, "not-found"), "application/problem+json")
 		return
 	}
-	f.w.log = append(f.w.log, f.name+" "+r.Method+" "+rt.template)
+	entry := f.name + " " + r.Method + " " + rt.template
+	f.w.log = append(f.w.log, entry)
+	f.w.sent[entry] = append(f.w.sent[entry], body)
 	c := &fctx{r: r, body: body, params: params}
 	var rep reply
 	if r.Method == http.MethodPost {
@@ -223,6 +225,7 @@ type world struct {
 
 	log   []string // "svc METHOD template", in the order served
 	posts []post
+	sent  map[string][][]byte // "svc METHOD template" -> request bodies, in order
 
 	// Consumer lag knobs: how many requests a consumer refuses before it has applied the event.
 	lagASNToDock         int // dock-scheduling learns an ASN (unknown-asn)
@@ -287,6 +290,13 @@ func (w *world) last(entry string) int {
 	return -1
 }
 
+// bodies are the request bodies the fakes received for entry, in order.
+func (w *world) bodies(entry string) [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([][]byte(nil), w.sent[entry]...)
+}
+
 // writes is how many POST/PUT requests the fakes served.
 func (w *world) writes() int {
 	w.mu.Lock()
@@ -303,7 +313,7 @@ func (w *world) writes() int {
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	w := &world{t: t, clock: transport.NewManualClock(time.Date(2026, 11, 14, 15, 41, 7, 0, time.UTC)), toleranceMinutes: 30}
+	w := &world{t: t, sent: map[string][][]byte{}, clock: transport.NewManualClock(time.Date(2026, 11, 14, 15, 41, 7, 0, time.UTC)), toleranceMinutes: 30}
 	w.recv = newFakeReceiving(w)
 	w.dock = newFakeDock(w)
 	w.yard = newFakeYard(w)
