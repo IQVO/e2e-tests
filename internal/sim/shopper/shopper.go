@@ -8,9 +8,12 @@
 // The BFF serves its routes under /api/storefront AND, behind a path-stripping proxy, without the
 // prefix (its own stripBase), so every edge below reaches the same routes:
 //
-//   - http://storefront.localhost/api/storefront: the storefront host of the web gateway. The
-//     storefront-web SSR server proxies /api/storefront to its BFF_URL (server/proxy.ts), so the
-//     browser and the cookie share one origin. This is what cmd/seed-storefront defaults to.
+//   - http://storefront.localhost/api/storefront: the storefront host of the web gateway (nginx,
+//     warehouse-infra terraform web-gateway.conf.tftpl: host-based, "/" to the storefront-web SSR
+//     server). The SSR server proxies /api/storefront to its BFF_URL (storefront-web server/index.ts
+//     and proxy.ts), so the browser and the cookie share one origin. This is what
+//     cmd/seed-storefront defaults to. Never aim at a storefront-web started with
+//     STOREFRONT_STUB=1: a stub answers there, not the BFF.
 //   - http://localhost:8000/api/storefront: Kong (warehouse-infra helm-values/storefront-bff.yaml:
 //     gatewayApi path /api/storefront, stripPath: true, so the BFF sees /products and answers).
 //   - http://<bff>:8080/api/storefront or http://<bff>:8080: the BFF pod itself.
@@ -162,9 +165,10 @@ type Shopper struct {
 	base *url.URL
 	opt  Options
 
-	addrs    []SavedAddress
-	findings []string
-	timeline []Step
+	addrs      []SavedAddress
+	findings   []string
+	suppressed int // findings beyond maxFindings, counted not kept
+	timeline   []Step
 }
 
 // New builds a shopper on parent's base URL and statistics, with its own cookie jar. An error is a
@@ -220,7 +224,13 @@ func New(parent *sim.Client, opt Options) (*Shopper, error) {
 func (s *Shopper) Timeline() []Step { return append([]Step(nil), s.timeline...) }
 
 // Findings returns every rejected request, oldest first (what Outcome.Problems carries for a Buy).
-func (s *Shopper) Findings() []string { return append([]string(nil), s.findings...) }
+func (s *Shopper) Findings() []string {
+	out := append([]string(nil), s.findings...)
+	if s.suppressed > 0 {
+		out = append(out, fmt.Sprintf("(+%d more findings not listed)", s.suppressed))
+	}
+	return out
+}
 
 // State decodes the sf_state cookie the jar holds: the ids the BFF thinks this browser has.
 func (s *Shopper) State() State {

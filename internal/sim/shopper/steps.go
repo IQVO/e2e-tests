@@ -267,7 +267,7 @@ func (s *Shopper) Orders(ctx context.Context) ([]Order, error) {
 		items, next, err := paging.Decode[Order](rp.Body)
 		if err != nil {
 			rej := &Rejection{Route: "GET /orders", Status: rp.Status, Detail: "contract violation: " + err.Error()}
-			s.findings = append(s.findings, rej.Error())
+			s.addFinding(rej.Error())
 			return all, rej
 		}
 		all = append(all, items...)

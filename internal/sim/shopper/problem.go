@@ -72,6 +72,15 @@ func (s *Shopper) finding(route string, r sim.Resp) {
 	if rej.Type == "" && rej.Body != "" {
 		line += " " + strings.TrimSpace(rej.Body)
 	}
+	s.addFinding(line)
+}
+
+// addFinding appends one finding, up to maxFindings; the rest are only counted.
+func (s *Shopper) addFinding(line string) {
+	if len(s.findings) >= maxFindings {
+		s.suppressed++
+		return
+	}
 	s.findings = append(s.findings, line)
 }
 
@@ -83,7 +92,7 @@ func (s *Shopper) decode(route string, rp reply, out any) error {
 	}
 	if err := rp.Decode(out); err != nil {
 		rej := &Rejection{Route: route, Status: rp.Status, Detail: "contract violation: " + err.Error()}
-		s.findings = append(s.findings, rej.Error())
+		s.addFinding(rej.Error())
 		return rej
 	}
 	return nil

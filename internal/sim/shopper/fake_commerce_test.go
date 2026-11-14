@@ -377,6 +377,10 @@ func (f *fakeBFF) hCartQuote(c *fakeCall) fakeReply {
 	}
 	cart.Quotes++
 	q := &fakeQuote{No: cart.Quotes, QuotedAt: f.clock, NotServed: !f.isServed(cart.Dest)}
+	ttl := f.quoteTTL
+	if f.firstQuoteTTL > 0 && cart.Quotes == 1 {
+		ttl = f.firstQuoteTTL
+	}
 	byNode := map[string][]int{}
 	for i, l := range cart.Lines {
 		p, _ := f.product(l.Item)
@@ -398,7 +402,7 @@ func (f *fakeBFF) hCartQuote(c *fakeCall) fakeReply {
 						ID:      fmt.Sprintf("of-%s-q%d-g%d-%s", cart.ID, q.No, g.No, strings.ToLower(t)),
 						GroupNo: g.No, Tier: t, Charge: f.charge(t),
 						Earliest: f.clock.Add(tierDays(t) * 24 * time.Hour), Latest: f.clock.Add((tierDays(t) + 1) * 24 * time.Hour),
-						Expiry: f.clock.Add(f.quoteTTL),
+						Expiry: f.clock.Add(ttl),
 					})
 				}
 			}
@@ -524,6 +528,9 @@ func (f *fakeBFF) hOpenCheckout(c *fakeCall) fakeReply {
 		ID: f.next("cs"), State: "OPEN", CartID: cart.ID, ShopperID: shopper.ID, AddressID: in.ShipToAddressID,
 		Lines: slices.Clone(cart.Lines), QuoteExpires: f.clock.Add(f.quoteTTL), Version: 2,
 	}
+	if f.expireFirstSession && f.seq["cs"] == 1 {
+		s.QuoteExpires = f.clock
+	}
 	s.Total = f.itemsTotal(cart.Lines)
 	for _, g := range cart.Quote.Groups {
 		o, picked := f.selectedOffer(cart, g.No)
@@ -611,6 +618,9 @@ func (f *fakeBFF) hConfirm(c *fakeCall) fakeReply {
 			}
 			return okJSON(sessionJSON(s))
 		}
+	case "tok_fail":
+		s.State, s.FailureCode = "FAILED", "contract-violation"
+		return okJSON(sessionJSON(s))
 	case "tok_approve":
 	default:
 		return fakeProblem(422, "validation-failed", "unknown token "+token)
@@ -636,6 +646,12 @@ func (f *fakeBFF) place(s *fakeSession) {
 				No: g.No, PromiseID: f.next("pr"), Tier: g.Offer.Tier, ShipBy: g.Offer.Earliest.Add(-24 * time.Hour),
 				Earliest: g.Offer.Earliest, Latest: g.Offer.Latest, LineNos: g.LineNos, Status: "PROMISED",
 			})
+		}
+		if f.lockOnPlace {
+			for _, g := range o.Groups {
+				g.Status = "LOCKED"
+			}
+			f.refreshStatus(o)
 		}
 		f.orders[o.ID] = o
 		s.OrderID = o.ID

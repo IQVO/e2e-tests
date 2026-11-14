@@ -53,17 +53,20 @@ type fakeBFF struct {
 	clock time.Time
 
 	// knobs
-	pageCap     int             // the most items a list returns, whatever the limit
-	served      map[string]bool // postal prefixes the network serves
-	nextDay     bool            // quote NEXT_DAY too (the real tier exists only before 11:00 CT)
-	quoteTTL    time.Duration   // how long an offer and a price quote live
-	requotes    int             // tok_requote answers REQUOTE_REQUIRED this many times
-	slowPolls   int             // GET /checkout/{id} reads before a tok_slow session completes
-	settleReads int             // GET /orders/{id} reads before a cancellation request settles
-	reverseList bool            // list products in reverse id order (the order is not part of the contract)
-	emptyGroups bool            // a not-served quote has no group at all (otherwise one group with no offer)
-	faults      []*fault
-	priceEpoch  int64 // grows on every requote: delivery charges change with it
+	pageCap            int             // the most items a list returns, whatever the limit
+	served             map[string]bool // postal prefixes the network serves
+	nextDay            bool            // quote NEXT_DAY too (the real tier exists only before 11:00 CT)
+	quoteTTL           time.Duration   // how long an offer and a price quote live
+	requotes           int             // tok_requote answers REQUOTE_REQUIRED this many times
+	slowPolls          int             // GET /checkout/{id} reads before a tok_slow session completes
+	settleReads        int             // GET /orders/{id} reads before a cancellation request settles
+	reverseList        bool            // list products in reverse id order (the order is not part of the contract)
+	emptyGroups        bool            // a not-served quote has no group at all (otherwise one group with no offer)
+	lockOnPlace        bool            // the purchase order is accepted at once: an order is placed already locked
+	firstQuoteTTL      time.Duration   // when > 0 the first quote of a cart expires this soon
+	expireFirstSession bool            // the first checkout session's price quote is already expired when it opens
+	faults             []*fault
+	priceEpoch         int64 // grows on every requote: delivery charges change with it
 
 	// state
 	seq        map[string]int
@@ -117,7 +120,8 @@ type fault struct {
 	route  string
 	kind   faultKind
 	status int
-	n      int // times left; -1 is for ever
+	slug   string // problem slug of a faultBefore answer (default upstream-unavailable)
+	n      int    // times left; -1 is for ever
 }
 
 type fakeCall struct {
@@ -177,8 +181,12 @@ func (f *fakeBFF) advance(d time.Duration) {
 }
 
 func (f *fakeBFF) addFault(route string, kind faultKind, status, n int) {
+	f.addFaultSlug(route, kind, status, "upstream-unavailable", n)
+}
+
+func (f *fakeBFF) addFaultSlug(route string, kind faultKind, status int, slug string, n int) {
 	f.mu.Lock()
-	f.faults = append(f.faults, &fault{route: route, kind: kind, status: status, n: n})
+	f.faults = append(f.faults, &fault{route: route, kind: kind, status: status, slug: slug, n: n})
 	f.mu.Unlock()
 }
 
@@ -357,7 +365,7 @@ func (f *fakeBFF) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	routeName := rt.method + " " + rt.tmpl
 	if ft := f.takeFault(routeName, faultBefore); ft != nil {
-		f.write(w, fakeProblem(ft.status, "upstream-unavailable", "injected"), st, false)
+		f.write(w, fakeProblem(ft.status, ft.slug, "injected"), st, false)
 		return
 	}
 	rep := rt.h(f, c)
