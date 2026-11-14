@@ -12,12 +12,13 @@ make provision-storefront-verify    # read-only: is the storefront still sellabl
 
 `scripts/10-provision-storefront.sh` runs, in this order: **preflight** (Kong answers, the sibling
 `../warehouse-infra` checkout exists, one real read per layer, WMS usable stock of every storefront
-SKU) -> **WMS** (`go run ./cmd/seed-storefront -wms-only`: site-1's CPT schedule in
-process-path-management, first because everything that reads stock through network-fulfillment
+SKU) -> **WMS** (`go run ./cmd/seed-storefront -wms-only`: the CPT schedule in
+process-path-management under both ids of the storefront's building, the network's `site-1` and the
+warehouse site `AUS3`; first because everything that reads stock through network-fulfillment
 depends on it) -> **network tier** (`warehouse-infra/scripts/seed-retail-network.py`, then its
 12-check verify) -> **product dictionary check** (`seed-retail-network.py --check-translation
 helm-values/network-fulfillment.yaml`) -> **storefront tier** (`go run ./cmd/seed-storefront`:
-CHECK, PLAN, APPLY, VERIFY; it re-checks the CPT schedule, equal by then) -> **summary** (storefront
+CHECK, PLAN, APPLY, VERIFY; it re-checks both CPT schedules, equal by then) -> **summary** (storefront
 URL, deliverable postal codes).
 Environment: `WAREHOUSE_INFRA_DIR` (default `<repos root>/warehouse-infra`), `KONG_URL`
 (`http://localhost:8000`), `STOREFRONT_URL` (`http://storefront.localhost`),
@@ -40,19 +41,39 @@ running fleet; "curated" means chosen by hand for this study (and committed).
 
 | Layer | Owning context | What | API | Provisioned by | Natural key / idempotency | Real or curated |
 |---|---|---|---|---|---|---|
-| WMS | facility-layout | the pilot sites, zones, aisles and storage locations (bins) | `POST /sites`, `/zones`, `/aisles`, `/locations/import` | `~/warehouse-systems/provisioning` (`run_all.sh`, see its README) | site code / location id | curated layouts |
+| WMS | facility-layout | the pilot sites, zones, aisles and storage locations (bins); the storefront's warehouse building **AUS3** is one of them (archetype `SSD-FC`, Austin, TX) | `POST /sites`, `/zones`, `/aisles`, `/locations/import` | `~/warehouse-systems/provisioning` (`run_all.sh`, see its README; `./run_all.sh --only AUS3` for the building alone) | site code / location id | curated layouts |
 | WMS | product-master | the products (dimensions, weight, handling tags, classification) | `PUT /products/{sku}`, `PUT /products/{sku}/classification` | `scripts/08-seed-products.sh` (`make seed-products`) | SKU; idempotent PUTs | real (open product datasets, `fixtures/products/README.md`) |
 | WMS | inventory-storage | usable stock of the 81 storefront SKUs | `PUT /bins/{binId}`, `POST /stowages` | `scripts/09-seed-inventory.sh` (`make seed-inventory`) | bin; deterministic stow `Idempotency-Key` (bin, SKU, qty) | real products, planned quantities |
 
 The preflight reads `GET /api/inventory-storage/inventory/<sku>/usable` for every storefront SKU and
 fails with the commands above when one has no usable stock. It never stocks anything: stocking is
-heavy and one-way.
+heavy and one-way. The WMS step likewise only **checks** that facility-layout knows `AUS3`
+(`GET /sites/AUS3`) and fails, before any write, with the provisioning command when it does not:
+it never creates a site.
 
 ### WMS side of the promise - `cmd/seed-storefront -wms-only`, step 2 (re-checked in step 5)
 
+The storefront's building has two ids and carries the same schedule under both (one list of
+cutoffs in `fixtures/storefront/fulfilment-site.json`; `siteId` is the network's, `warehouseSiteId`
+the warehouse's).
+
 | Layer | Owning context | What | API | Provisioned by | Natural key / idempotency | Real or curated |
 |---|---|---|---|---|---|---|
-| WMS | process-path-management | CPT schedule of the fulfilment site `site-1` (network-fulfillment's `SITE_ID`): timezone **America/Chicago**, cutoffs `aus-1100` **11:00** and `aus-1700` **17:00**, every day, ship method `ground`, eligible path `PICK` (the customer-order path, intake `CUSTOMER_ORDER`) | `GET /sites/{siteId}/cpt-schedule`, `PUT /sites/{siteId}/cpt-schedule` (wholesale replacement; no `Idempotency-Key`, no version) | seed-storefront, from `fixtures/storefront/fulfilment-site.json` | siteId; PUT only when the timezone or the cutoffs differ (compared order-insensitively), so a rerun sends nothing | curated ids; times and timezone = the network node profile (`warehouse-infra/scripts/data/retail-network-seed.json`, `fulfillmentNodes[site-1].profile`) |
+| WMS | process-path-management | CPT schedule of the fulfilment site `site-1` (network-fulfillment's `SITE_ID`, the network node's id): timezone **America/Chicago**, cutoffs `aus-1100` **11:00** and `aus-1700` **17:00**, every day, ship method `ground`, eligible path `PICK` (the customer-order path, intake `CUSTOMER_ORDER`) | `GET /sites/{siteId}/cpt-schedule`, `PUT /sites/{siteId}/cpt-schedule` (wholesale replacement; no `Idempotency-Key`, no version) | seed-storefront, from `fixtures/storefront/fulfilment-site.json` (`siteId`) | siteId; PUT only when the timezone or the cutoffs differ (compared order-insensitively), so a rerun sends nothing | curated ids; times and timezone = the network node profile (`warehouse-infra/scripts/data/retail-network-seed.json`, `fulfillmentNodes[site-1].profile`) |
+| WMS | process-path-management | the **same** CPT schedule under the warehouse building **`AUS3`** (`warehouseSiteId`: the facility-layout site that serves node `site-1`; see below why): same timezone, cutoffs, days, ship method and path as `site-1`, from the same list in the fixture | `GET /sites/AUS3/cpt-schedule`, `PUT /sites/AUS3/cpt-schedule` (same contract); CHECK reads `GET /sites/AUS3` in facility-layout | seed-storefront, from `fixtures/storefront/fulfilment-site.json` (`warehouseSiteId`) | warehouseSiteId, which must match `^[A-Z0-9]+$`, differ from `siteId` and already exist in facility-layout (missing: CHECK fails with the provisioning command, nothing written); PUT only when the live schedule differs, so a rerun sends nothing | the one list of cutoffs of the row above, so the two ids cannot drift (`fixture_test.go` pins it) |
+
+**Why AUS3 (ADR 0001 D1, retail-day journey).** The network knows the building as `site-1`, but
+order-management, facility-layout and outbound-shipping accept only site codes matching
+`^[A-Z0-9]+$`, so a storefront order cannot carry `site-1` and used to reach the warehouse without a
+site. The decision is that the warehouse building serving node `site-1` is the facility-layout site
+`AUS3` (provisioning archetype `SSD-FC`, Austin, TX, America/Chicago; its zones include outbound
+dock `OB`, staging `STG` and slam `SLM`), and that network-fulfillment (separate change,
+`NETWORK_SITE_MAP` `site-1=AUS3`) sends `fulfillmentSiteId=AUS3` to order-management. order-management
+then promises against the schedule of `AUS3`, and outbound-shipping needs a `CPTScheduleChanged` for
+`AUS3`: process-path-management must therefore hold a schedule for `AUS3` equal to `site-1`'s. One
+PUT per id feeds order-management, network-fulfillment and outbound-shipping. **This only matters
+once network-fulfillment's site map and fulfillment-execution's site propagation are deployed**;
+until then the `AUS3` schedule is defined but nothing reads it.
 
 Why it matters: network-fulfillment advertises each listing's quantity as `min(usable stock,
 process-path capacity before site-1's NEXT CPT cutoff)` (`GET
@@ -61,19 +82,27 @@ same node with the cutoffs of its profile. The two must agree: CHECK fails, befo
 the fixture and the network data file disagree (and `fixture_test.go` pins it in the unit tests), or
 when an eligible path is not Active in process-path-management. VERIFY then reads the capability
 offers of the 81 SKUs: after a PUT it waits (within `-verify-timeout`) for a recompute and prints a
-WARNING, not a failure, for SKUs that stay `THROUGHPUT_CONSTRAINED 0`.
+WARNING, not a failure, for SKUs that stay `THROUGHPUT_CONSTRAINED 0`. It also reads the `AUS3`
+schedule back and **fails** when it is missing or differs from the fixture (the capability offers
+exist for `site-1` only, so the read-back is how `AUS3` is verified; `make
+provision-storefront-verify` therefore fails on a cluster where the first provisioning run has not
+yet defined it).
 
-> **`make warehouse-day` is isolated from site-1.** The simulator is a building of its own
-> (`-site`, default `SIM1`): its orders carry `fulfillmentSiteId: SIM1` (order-management ADR 0044)
-> and its compressed UTC truck schedule (`sim-1200/1600/2000`) is written to
-> `PUT /sites/SIM1/cpt-schedule` (`-cpt-site` defaults to `-site`). Before its first write it reads
-> this fixture's `siteId` and refuses to run (exit 2) when `-site` or `-cpt-site` is the
-> storefront's fulfilment site, unless `-allow-live-site` is given on purpose. The promise of a
-> SIM1 order is computed on SIM1 once order-management promises at the order's own site (the
-> order-management change that makes `fulfillmentSiteId` drive the promise); before that the sim's
-> orders are promised against site-1's schedule (read only, nothing written to it). A run with
-> `-allow-live-site` against site-1 still replaces its schedule: re-run `make provision-storefront`
-> after it (one PUT).
+> **`make warehouse-day` is isolated from both ids of the storefront's building.** The simulator is
+> a building of its own (`-site`, default `SIM1`): its orders carry `fulfillmentSiteId: SIM1`
+> (order-management ADR 0044) and its compressed UTC truck schedule (`sim-1200/1600/2000`) is
+> written to `PUT /sites/SIM1/cpt-schedule` (`-cpt-site` defaults to `-site`). Before its first
+> write it reads this fixture's `siteId` (**`site-1`**, the network's node) and `warehouseSiteId`
+> (**`AUS3`**, the warehouse building serving it) and refuses to run (exit 2) when `-site` or
+> `-cpt-site` is either one, unless `-allow-live-site` is given on purpose; the message names the
+> role the id plays (the network node, or the warehouse building whose schedule order-management
+> and outbound-shipping read for the storefront's orders). A fixture without `warehouseSiteId`
+> still loads and guards `siteId` alone. The promise of a SIM1 order is computed on SIM1 once
+> order-management promises at the order's own site (the order-management change that makes
+> `fulfillmentSiteId` drive the promise); before that the sim's orders are promised against
+> site-1's schedule (read only, nothing written to it). A run with `-allow-live-site` against
+> either id still replaces its schedule: re-run `make provision-storefront` after it (one PUT per
+> overwritten id).
 
 ### Network tier (the retail network) - `warehouse-infra/scripts/seed-retail-network.py`, step 3
 
@@ -134,7 +163,17 @@ running it again: it plans what is left. A changed fixture price becomes one `:s
 changed derivation rule becomes `:revise` + `:publish` of the affected contents; a changed tax table
 or charge schedule is published as the next version; a site-1 CPT schedule that differs from the
 fixture (edited by hand, or a warehouse-day run with `-allow-live-site` against it) becomes one
-`PUT /sites/site-1/cpt-schedule`.
+`PUT /sites/site-1/cpt-schedule`, and an `AUS3` schedule that differs (or is missing) becomes one
+`PUT /sites/AUS3/cpt-schedule`: each id is compared and written on its own, so a single drift is a
+single PUT.
+
+**What the first run after this change does.** One new write: `PUT /sites/AUS3/cpt-schedule`
+(besides whatever else the plan finds; `site-1`'s own schedule is unchanged and is skipped when it
+already matches). The facility-layout site `AUS3` must already exist: otherwise CHECK fails before
+any write with `cd ~/warehouse-systems/provisioning && ./run_all.sh --only AUS3`. The `AUS3`
+schedule is read by order-management and outbound-shipping only once network-fulfillment sends
+`fulfillmentSiteId=AUS3` (its `NETWORK_SITE_MAP`) and fulfillment-execution carries the order's site
+to `PackageManifested` (ADR 0001 D1 and D2); until both are deployed it is defined and unused.
 
 **Live evidence** (2026-10-29): first run `apply: 306 writes` (63 categories, 81 prices, 81 contents
 created and 81 published; tax table and charge schedule v1 already equal, skipped), 81/81
@@ -149,6 +188,13 @@ stopped at step 3 (`listings of site-1 LIVE with stock` FAIL): after two recompu
 schedule all 81 capability offers stayed `THROUGHPUT_CONSTRAINED 0`, the pre-cutoff gap of
 network-fulfillment's next-feasible-cutoff defect (fixed in network-fulfillment, separate PR), so the
 storefront showed 0/81 purchasable.
+
+**Not run live: the `AUS3` schedule.** The `AUS3` row (CHECK of the facility-layout site, the PUT,
+the read-back) was written and tested against the contract fake of `cmd/seed-storefront` only
+(`go test ./cmd/seed-storefront/...`: first run writes both schedules, second run writes none, a
+hand-edited `AUS3` schedule is restored with one PUT, a missing facility-layout site fails CHECK
+before any write); the cluster was down. No live run of it is claimed here: record the first one
+here when it happens.
 
 ## Deliverable postal codes
 
@@ -174,7 +220,8 @@ through inbound-receiving; the ACL feeds the new figure within its interval (5 m
 A new kind cluster has new ids everywhere. In order:
 
 1. warehouse-infra up; facility layouts (`provisioning`), `make seed-products`, `make seed-inventory`.
-2. `make provision-storefront`: the WMS step defines site-1's CPT schedule, the network seed creates
+2. `make provision-storefront`: the WMS step defines the CPT schedule of site-1 and of `AUS3`
+   (the provisioning catalogue of step 1 created the site), the network seed creates
    the network again (new listing ids), and step 4 then FAILS on purpose: the product dictionary in
    `helm-values/network-fulfillment.yaml` still names the old listing ids.
 3. In warehouse-infra: `make seed-network-translation > block.yaml`, replace the `productTranslation`
@@ -192,6 +239,8 @@ A new kind cluster has new ids everywhere. In order:
 | `purchasable: false` after a run | VERIFY names the missing part: out of stock (WMS stock -> ACL feed), no ACTIVE price, no PUBLISHED content; or the projection is still catching up | stock: see Stock depletion; a WITHDRAWN price or RETIRED content is reported as BLOCKED and needs a deliberate decision (neither can be undone); otherwise rerun `make provision-storefront-verify` |
 | every product shows unavailable (out of stock) although the WMS has usable stock | `GET /api/network-fulfillment/capability-offers` shows `THROUGHPUT_CONSTRAINED` with `advertisedQuantity: 0`: the ACL caps the offer at the process-path capacity before site-1's next CPT cutoff. Either site-1's CPT schedule is wrong (`GET /api/process-path-management/sites/site-1/cpt-schedule` shows UTC `sim-*` cutoffs: a warehouse-day run predating its own-site isolation, or one with `-allow-live-site`) or the PICK path's cycle time (`cycleTimeP95`, `GET /api/process-path-management/process-paths/PICK`) does not fit before the next cutoff | `make provision-storefront` (restores the schedule; VERIFY prints the offers). If they stay `THROUGHPUT_CONSTRAINED 0` with the correct schedule, the remaining pre-cutoff gap is network-fulfillment's next-feasible-cutoff defect (separate PR, `fix/next-feasible-cutoff`); the listing feed refreshes within 5 min of a good offer |
 | step 3 fails on `listings of site-1 LIVE with stock` (`availableQty ...=0`) | the same cause seen from the network: the ACL feeds the advertised quantity, 0 while the offers are `THROUGHPUT_CONSTRAINED 0` | if step 2 just redefined the schedule (`apply: wms: CPT schedule of site-1 defined`), the ACL feeds the new figure within its interval (5 min): rerun. If step 2 reported the schedule as matching and the offers stay constrained, see the row above |
+| CHECK fails: `the warehouse building AUS3 ... is not a facility-layout site` (or `is Decommissioned`) | facility-layout does not know the site named by `warehouseSiteId` in `fixtures/storefront/fulfilment-site.json`: the provisioning catalogue did not run on this cluster. The seeder never creates a site | `cd ~/warehouse-systems/provisioning && ./run_all.sh --only AUS3`, then rerun; a Decommissioned site is one-way, so point `warehouseSiteId` at a live site of the catalogue |
+| `provision-storefront-verify` fails: `AUS3 (warehouse building of site-1) has no CPT schedule` / `differs from the fixture` | process-path-management holds no schedule for the building, or one that differs (never provisioned, edited by hand, or a warehouse-day run with `-allow-live-site` against it) | `make provision-storefront`: one `PUT /sites/AUS3/cpt-schedule` |
 | step 4 fails: `wrong` / `missing` mappings | stale product dictionary after a reseed: orders never reach the warehouse | Cluster rebuild, step 3 |
 | CHECK fails: `no catalogue item titled ...` | the network seed did not run, or warehouse-infra's data file is older than the fixture | update warehouse-infra (`git pull`), run `make provision-storefront` (it runs the network seed first) |
 | product page without a picture | `storefront-web` does not serve `/media/departments/<slug>.svg` yet (VERIFY prints a WARNING) | ship the department images in storefront-web; the content needs no change |

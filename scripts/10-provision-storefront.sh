@@ -12,10 +12,12 @@
 #                 WMS usable stock of every fixture SKU (inventory-storage). WMS prerequisites
 #                 (sites, seed-products, seed-inventory) are NOT re-run: heavy, and stocking is
 #                 one-way. A missing one fails here with the commands to run.
-#   2. WMS        go run ./cmd/seed-storefront -wms-only: site-1's CPT schedule in
-#                 process-path-management (fixtures/storefront/fulfilment-site.json), PUT only when
-#                 it differs (a warehouse-day run with -allow-live-site would overwrite it; by
-#                 default it runs on its own site SIM1). FIRST, because network-fulfillment
+#   2. WMS        go run ./cmd/seed-storefront -wms-only: the CPT schedule of site-1 (the network's
+#                 id) and of AUS3 (the warehouse building serving it, ADR 0001 D1; it must already be
+#                 a facility-layout site) in process-path-management
+#                 (fixtures/storefront/fulfilment-site.json), each PUT only when it differs (a
+#                 warehouse-day run with -allow-live-site would overwrite it; by default it runs on
+#                 its own site SIM1). FIRST, because network-fulfillment
 #                 caps every listing's stock at the capacity before the next cutoff: the network
 #                 verify (listings with stock) and the storefront both depend on it.
 #   3. NETWORK    python3 ../warehouse-infra/scripts/seed-retail-network.py: vendor, region,
@@ -23,7 +25,7 @@
 #                 the 14-day horizon), catalogue items, listings, inventory feed; then verifies.
 #   4. DICTIONARY seed-retail-network.py --check-translation helm-values/network-fulfillment.yaml:
 #                 a stale product dictionary means orders never reach the warehouse.
-#   5. STOREFRONT go run ./cmd/seed-storefront: the CPT schedule again (equal by now: skipped),
+#   5. STOREFRONT go run ./cmd/seed-storefront: both CPT schedules again (equal by now: skipped),
 #                 then tax table, delivery charges, categories, prices, product content; then
 #                 VERIFY (capability offers, purchasable, delivery quote, search).
 #   6. SUMMARY    the storefront URL and the deliverable postal codes.
@@ -140,7 +142,7 @@ ok "WMS: all ${total} storefront SKUs have usable stock"
 
 # ---- 2. WMS -----------------------------------------------------------------------------------
 # site-1's CPT schedule before anything that reads stock through network-fulfillment's ACL
-log "2/6 WMS: site-1's CPT schedule in process-path-management (go run ./cmd/seed-storefront -wms-only ${WMS_ARGS[*]+"${WMS_ARGS[*]}"})"
+log "2/6 WMS: the CPT schedule of site-1 and of the warehouse building AUS3 in process-path-management (go run ./cmd/seed-storefront -wms-only ${WMS_ARGS[*]+"${WMS_ARGS[*]}"})"
 ( cd "${WORKSPACE_ROOT}" && go run ./cmd/seed-storefront -wms-only \
     -base-url "${API}" \
     -network-data "${NETWORK_DATA}" \
