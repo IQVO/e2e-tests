@@ -36,8 +36,10 @@ import (
 //   - product-discovery: purchasable = item ACTIVE + content PUBLISHED + price ACTIVE + in stock,
 //     visible only after `lag` reads (the projection is event-driven);
 //   - BFF: search over purchasable products, delivery dates only for a 3-character served prefix;
-//   - process-path-management (fake_wms_test.go): GET /process-paths lists Active paths only; PUT
-//     /sites/{siteId}/cpt-schedule is a wholesale replacement (no Idempotency-Key, no version),
+//   - facility-layout (fake_wms_test.go): GET /sites/{siteCode} answers the registered site or 404;
+//   - process-path-management (fake_wms_test.go): one CPT schedule PER SITE; GET /process-paths
+//     lists Active paths only; PUT /sites/{siteId}/cpt-schedule is a wholesale replacement (no
+//     Idempotency-Key, no version),
 //     400 on a missing/invalid body, 422 on an invalid timezone, no cutoff, an empty/duplicate
 //     cptId, a malformed localTime, empty/invalid days, an empty shipMethod or an eligible path
 //     that is not Active; an identical revision is a 200 that changes (and publishes) nothing;
@@ -63,8 +65,10 @@ type fakeCluster struct {
 
 	// WMS (process-path-management) and network-fulfillment: see fake_wms_test.go
 	paths       map[string]string       // pathId -> status (ACTIVE, DEACTIVATED)
-	cpt         map[string]*CPTSchedule // siteId -> CPT schedule
+	cpt         map[string]*CPTSchedule // siteId -> CPT schedule (one per site)
+	sites       map[string]string       // facility-layout: siteCode -> status (Active, UnderMaintenance, Decommissioned)
 	puts        int                     // every PUT received
+	putsBySite  map[string]int          // PUT /sites/{siteId}/cpt-schedule received, by site (no-ops included)
 	cptChanges  int                     // PUTs that changed a schedule (CPTScheduleChanged published)
 	node        NodeProfile             // the network's node profile the ACL's offers depend on
 	offerSKUs   []string                // SKUs network-fulfillment offers at node.VendorNodeCode
@@ -97,8 +101,8 @@ func newFakeCluster() *fakeCluster {
 		contents: map[string]*ProductContent{}, idem: map[string]fakeStored{}, seen: map[string]int{},
 		byKind: map[string]int{}, targets: map[string]int{}, pageCap: 7, lag: 1,
 		paths: map[string]string{"PICK": "ACTIVE", "PACK": "ACTIVE", "FULL_CASE": "ACTIVE", "OLD_PATH": "DEACTIVATED"},
-		cpt:   map[string]*CPTSchedule{},
-		node:  NodeProfile{VendorNodeCode: "site-1", Timezone: "America/Chicago", CutoffTimes: []string{"11:00", "17:00"}},
+		cpt:   map[string]*CPTSchedule{}, sites: map[string]string{}, putsBySite: map[string]int{},
+		node: NodeProfile{VendorNodeCode: "site-1", Timezone: "America/Chicago", CutoffTimes: []string{"11:00", "17:00"}},
 	}
 }
 

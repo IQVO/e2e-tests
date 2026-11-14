@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-// The WMS (process-path-management) and network-fulfillment slice of the contract fake. It is
-// written from the published contract, independently of the seeder's own validation.
+// The WMS (process-path-management, facility-layout's site read) and network-fulfillment slice of
+// the contract fake. It is written from the published contract, independently of the seeder's own
+// validation.
 
 var fakeHHMM = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
 
@@ -39,6 +40,17 @@ func (f *fakeCluster) readWMS(w http.ResponseWriter, p string) bool {
 			return true
 		}
 		writeJSON(w, http.StatusOK, s)
+	case strings.HasPrefix(p, "/facility-layout/sites/") && !strings.Contains(strings.TrimPrefix(p, "/facility-layout/sites/"), "/"):
+		// GET /sites/{siteCode}: the published Site (siteCode, name, status, siteRole), 404 when
+		// the code was never registered. facility-layout's site codes are ^[A-Z0-9]+$, so a
+		// network node id such as site-1 is never one.
+		code := strings.TrimPrefix(p, "/facility-layout/sites/")
+		status, ok := f.sites[code]
+		if !ok {
+			problem(w, http.StatusNotFound, "not-found")
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"siteCode": code, "name": "Site " + code, "status": status, "siteRole": "UNSPECIFIED"})
 	case p == "/network-fulfillment/capability-offers":
 		writeJSON(w, http.StatusOK, map[string]any{"items": f.offers()})
 	default:
@@ -84,6 +96,7 @@ func (f *fakeCluster) putCPT(w http.ResponseWriter, r *http.Request, p string) {
 		problem(w, http.StatusNotFound, "not-found")
 		return
 	}
+	f.putsBySite[site]++
 	var in DefineCPTScheduleRequest
 	if r.Body == nil || json.NewDecoder(r.Body).Decode(&in) != nil {
 		problem(w, http.StatusBadRequest, "malformed-request")

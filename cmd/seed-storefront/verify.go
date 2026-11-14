@@ -33,6 +33,7 @@ type VerifyReport struct {
 	QuoteTiers            []string
 	DepartmentHits        []string     // "<department> <n>"
 	Offers                *OfferReport // network-fulfillment capability offers (nil: not read)
+	Building              string       // the warehouse building's CPT schedule read back and equal to the fixture ("": it was not)
 	Warnings              []string
 	Failures              []string
 }
@@ -44,6 +45,9 @@ func (r *VerifyReport) OK() bool { return len(r.Failures) == 0 }
 func (r *VerifyReport) Lines() []string {
 	out := []string{
 		fmt.Sprintf("verify: %d/%d products purchasable in product-discovery (%s)", r.Purchasable, r.Products, r.Elapsed.Round(100*time.Millisecond)),
+	}
+	if r.Building != "" {
+		out = append([]string{r.Building}, out...)
 	}
 	if r.Offers != nil {
 		out = append([]string{r.Offers.Line()}, out...)
