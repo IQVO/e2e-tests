@@ -29,6 +29,14 @@ import (
 	"github.com/claudioed/warehouse-e2e/internal/sim"
 )
 
+var chicago = func() *time.Location {
+	l, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		panic(err)
+	}
+	return l
+}()
+
 type reply struct {
 	status int
 	body   any
