@@ -290,6 +290,13 @@ func (w *world) last(entry string) int {
 	return -1
 }
 
+// with runs f under the world lock: the way a test changes a fake between requests.
+func (w *world) with(f func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	f()
+}
+
 // bodies are the request bodies the fakes received for entry, in order.
 func (w *world) bodies(entry string) [][]byte {
 	w.mu.Lock()
