@@ -143,6 +143,28 @@ func TestDeliverRedeliveryAfterAFailedFirstAttempt(t *testing.T) {
 	w.assertEveryPostKeyed()
 }
 
+// The induct cutoff is compared with the ARRIVAL time, not with when the consumer ran: a wave created ten
+// minutes after the arrival still takes the package when the induction runs eleven minutes late. The redelivery
+// round then needs a wave ahead of the FAILED attempt (eleven minutes after the arrival), not ahead of the arrival.
+func TestDeliverRedeliveryAfterASlowInductionUsesAWaveAheadOfTheFailedAttempt(t *testing.T) {
+	w, tp, p, _ := deliverWorld(t)
+	w.lastmile.lag = 11 * time.Minute
+	tp.Station.Settings.InductionTimeout = 30 * time.Minute
+	tp.Station.Settings.PollInterval = 20 * time.Second // keep the number of polls small
+
+	d := tp.Deliver(context.Background(), p, Options{FailFirstAttempt: true})
+	if !d.OK() {
+		t.Fatalf("delivery = %+v", d)
+	}
+	first, second := w.lastmile.wave(d.Waves[0]), w.lastmile.wave(d.Waves[1])
+	if !d.Attempts[0].At.After(first.Cutoff) {
+		t.Fatalf("setup: the failed attempt %s must come after the first wave's cutoff %s", d.Attempts[0].At, first.Cutoff)
+	}
+	if !second.Cutoff.After(d.Attempts[0].At) {
+		t.Fatalf("second wave cutoff %s is not after the failed attempt %s", second.Cutoff, d.Attempts[0].At)
+	}
+}
+
 func TestDeliverReusesAnOpenWaveAndIgnoresAStaleOne(t *testing.T) {
 	w, tp, p, _ := deliverWorld(t)
 	w.addWave(station, t0.Add(-10*time.Hour), 50) // this morning's induct cutoff, still OPEN

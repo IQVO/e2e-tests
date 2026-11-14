@@ -16,13 +16,17 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -124,7 +128,34 @@ func (w *world) client() *sim.Client {
 	for _, s := range []string{SvcLinehaul, SvcLastMile, SvcTracking, SvcNodes, SvcOrdering} {
 		base[s] = w.srv.URL + "/" + s
 	}
-	return sim.NewClient(base, sim.NewCallStats())
+	c := sim.NewClient(base, sim.NewCallStats())
+	// Own transport: connections are closed with the test, and a dial that fails for lack of an
+	// ephemeral port (EADDRNOTAVAIL: seen on a busy dev machine running several test binaries) is
+	// retried briefly instead of failing a test that has nothing to do with the network.
+	tr := &http.Transport{DialContext: retryDial}
+	w.t.Cleanup(tr.CloseIdleConnections)
+	c.HTTP = &http.Client{Transport: tr, Timeout: c.HTTP.Timeout}
+	return c
+}
+
+func retryDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	var d net.Dialer
+	var err error
+	for i := 0; i < 20; i++ {
+		var conn net.Conn
+		if conn, err = d.DialContext(ctx, network, addr); err == nil {
+			return conn, nil
+		}
+		if !errors.Is(err, syscall.EADDRNOTAVAIL) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return nil, err
 }
 
 // route registers one handler: pattern is "<METHOD> /<svc><path>".
