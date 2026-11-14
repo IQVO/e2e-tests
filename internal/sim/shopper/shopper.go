@@ -189,7 +189,7 @@ func New(parent *sim.Client, opt Options) (*Shopper, error) {
 	if stats == nil {
 		stats = sim.NewCallStats()
 	}
-	var next http.RoundTripper = http.DefaultTransport
+	next := http.DefaultTransport
 	timeout := 15 * time.Second
 	if parent.HTTP != nil {
 		if parent.HTTP.Transport != nil {

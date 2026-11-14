@@ -168,15 +168,26 @@ func TestCheckoutNeedsReadyCartAndValidOffers(t *testing.T) {
 	if _, err := s.Register(c); err != nil {
 		t.Fatal(err)
 	}
-	s.AddAddress(c, AddressFor("787", ""))
-	s.NewCart(c)
-	s.AddLine(c, Line{"sku-001", 1})
-	s.SetDestination(c, "787")
+	for _, step := range []func() error{
+		func() error { _, err := s.AddAddress(c, AddressFor("787", "")); return err },
+		func() error { _, err := s.NewCart(c); return err },
+		func() error { _, err := s.AddLine(c, Line{"sku-001", 1}); return err },
+		func() error { _, err := s.SetDestination(c, "787"); return err },
+	} {
+		if err := step(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := s.Checkout(c); !Is(err, "cart-not-checkout-ready") {
 		t.Fatalf("no quote: got %v, want cart-not-checkout-ready", err)
 	}
-	cart, _ := s.QuoteCart(c)
-	s.SelectOffers(c, *cart.DeliveryQuote, "")
+	cart, err := s.QuoteCart(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.SelectOffers(c, *cart.DeliveryQuote, ""); err != nil {
+		t.Fatal(err)
+	}
 	f.advance(29 * time.Minute) // the offer lives 30 minutes: 1 minute left, checkout wants 2
 	if _, err := s.Checkout(c); !Is(err, "offer-not-quotable") {
 		t.Fatalf("an offer about to expire: got %v, want offer-not-quotable", err)
@@ -424,7 +435,9 @@ func TestOrderOrdersAndCancelBeforeAndAfterTheLock(t *testing.T) {
 	}
 	// a second browser never saw that checkout: no totals (journey gap G11)
 	other, _ := newShopper(t, f, Options{Email: o.ShopperID + "@example.com"})
-	other.Register(ctx(t))
+	if _, err := other.Register(ctx(t)); err != nil {
+		t.Fatal(err)
+	}
 	if o2, err := other.Order(ctx(t), sess.OrderID); err != nil || o2.Totals != nil {
 		t.Errorf("another cookie must not get the totals: %v %+v", err, o2.Totals)
 	}
@@ -477,10 +490,19 @@ func TestOrdersWalkEveryPage(t *testing.T) {
 		if _, err := s.NewCart(c); err != nil {
 			t.Fatal(err)
 		}
-		s.AddLine(c, Line{"sku-002", 1})
-		s.SetDestination(c, "787")
-		cart, _ := s.QuoteCart(c)
-		s.SelectOffers(c, *cart.DeliveryQuote, "")
+		if _, err := s.AddLine(c, Line{"sku-002", 1}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetDestination(c, "787"); err != nil {
+			t.Fatal(err)
+		}
+		cart, err := s.QuoteCart(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.SelectOffers(c, *cart.DeliveryQuote, ""); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := s.Checkout(c); err != nil {
 			t.Fatal(err)
 		}

@@ -710,7 +710,9 @@ func TestFindingsAreBounded(t *testing.T) {
 	defer f.close()
 	s, _ := newShopper(t, f, Options{Retries: -1})
 	for i := 0; i < maxFindings+25; i++ {
-		s.Product(ctx(t), "sku-999")
+		if _, err := s.Product(ctx(t), "sku-999"); !Is(err, "not-found") {
+			t.Fatalf("got %v", err)
+		}
 	}
 	got := s.Findings()
 	if len(got) != maxFindings+1 || !strings.Contains(got[len(got)-1], "+25 more") {
