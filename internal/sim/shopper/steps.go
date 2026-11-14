@@ -178,7 +178,8 @@ func inDoubt(state string) bool { return state == StateAuthorizing || state == S
 //
 // An answer that leaves the outcome unknown (a 504, a 5xx after the retries, a transport error)
 // is polled the same way: the confirm may have taken effect. Only when the session is still OPEN
-// afterwards is the original error returned.
+// afterwards is the original error returned. A 409 placement-in-doubt or illegal-transition (the
+// session is already PLACING or AUTHORIZING) is polled too: it is never paid a second time.
 func (s *Shopper) Confirm(ctx context.Context, token string) (Session, error) {
 	id := s.SessionID
 	if id == "" {
@@ -205,7 +206,13 @@ func (s *Shopper) Confirm(ctx context.Context, token string) (Session, error) {
 		}
 		return sess, err
 	}
-	return Session{}, rejection(route, rp.Resp)
+	rej := rejection(route, rp.Resp)
+	if rej.Slug() == "placement-in-doubt" || rej.Slug() == "illegal-transition" {
+		// the session is PLACING or AUTHORIZING already (an earlier confirm took effect): the outcome
+		// is still unknown, so wait for it instead of paying twice
+		return s.await(ctx, Session{SessionID: id})
+	}
+	return Session{}, rej
 }
 
 // await polls the session while its outcome is in doubt, bounded by PollTimeout. A session whose

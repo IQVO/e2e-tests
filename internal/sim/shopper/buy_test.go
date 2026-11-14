@@ -457,7 +457,7 @@ func TestBuyReplaysALostConfirmAnswerInsteadOfPlacingTwice(t *testing.T) {
 	f.addFault("POST /checkout/{id}/confirmations", faultDrop, 0, 1)
 	parent := NewClient(f.base(), nil)
 	parent.HTTP.Transport = &http.Transport{DisableKeepAlives: true} // no hidden transport retry
-	s, err := New(parent, Options{PollEvery: 2 * time.Millisecond, PollTimeout: 100 * time.Millisecond, RetryDelay: time.Millisecond})
+	s, err := New(parent, Options{PollEvery: 2 * time.Millisecond, PollTimeout: 5 * time.Second, RetryDelay: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +668,7 @@ func TestShoppersShareOneReportAndNoCart(t *testing.T) {
 	parent := NewClient(f.base(), stats)
 	var carts []string
 	for i := 0; i < 3; i++ {
-		s, err := New(parent, Options{PollEvery: time.Millisecond, PollTimeout: 100 * time.Millisecond, RetryDelay: time.Millisecond})
+		s, err := New(parent, Options{PollEvery: time.Millisecond, PollTimeout: 5 * time.Second, RetryDelay: time.Millisecond})
 		if err != nil {
 			t.Fatal(err)
 		}

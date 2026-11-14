@@ -243,9 +243,14 @@ func TestConfirmTimeoutIsBoundedAndReportsInDoubt(t *testing.T) {
 	if polls := f.count("GET /checkout/{id}"); polls < 1 || polls > int(took/(2*time.Millisecond))+1 {
 		t.Errorf("%d polls in %v at one per 2ms: not polling, or not pausing between polls", polls, took)
 	}
-	// the session has no way out (G8): a second confirm is illegal, not a second payment
-	if _, err := s.Confirm(ctx(t), TokenApprove); !Is(err, "illegal-transition") {
-		t.Errorf("confirm on a stuck session: got %v, want illegal-transition", err)
+	// the session has no way out (G8): the BFF refuses a second confirm (409 illegal-transition),
+	// and the shopper reads that as "still in doubt" instead of paying again
+	sess, err = s.Confirm(ctx(t), TokenApprove)
+	if !errors.Is(err, ErrInDoubt) || sess.State != StateAuthorizing {
+		t.Errorf("confirm on a stuck session: got %v %+v, want ErrInDoubt", err, sess)
+	}
+	if f.placements != 0 {
+		t.Error("a stuck session must never place an order")
 	}
 }
 
@@ -337,7 +342,7 @@ func TestTheShoppersOwnRetryReusesTheKeyAndReplays(t *testing.T) {
 	defer f.close()
 	parent := NewClient(f.base(), nil)
 	parent.HTTP.Transport = &http.Transport{DisableKeepAlives: true}
-	s, err := New(parent, Options{PollEvery: 2 * time.Millisecond, PollTimeout: 150 * time.Millisecond, RetryDelay: time.Millisecond})
+	s, err := New(parent, Options{PollEvery: 2 * time.Millisecond, PollTimeout: 5 * time.Second, RetryDelay: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

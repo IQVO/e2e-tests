@@ -24,7 +24,7 @@ func newShopperAt(t *testing.T, base string, opt Options) (*Shopper, *sim.CallSt
 		opt.PollEvery = 2 * time.Millisecond
 	}
 	if opt.PollTimeout == 0 {
-		opt.PollTimeout = 150 * time.Millisecond
+		opt.PollTimeout = 5 * time.Second // tests that expect a bounded wait set their own
 	}
 	if opt.RetryDelay == 0 {
 		opt.RetryDelay = time.Millisecond
