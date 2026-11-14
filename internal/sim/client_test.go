@@ -168,3 +168,65 @@ func TestShortTypeKeepsTheLastDottedSegment(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteKeyIsTheSameWithOrWithoutTheMethodPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer srv.Close()
+	stats := NewCallStats()
+	a := NewClient(map[string]string{"svc": srv.URL}, stats)
+	ctx := context.Background()
+	a.Call(ctx, "svc", http.MethodGet, "/waves", "/waves", nil)
+	a.Call(ctx, "svc", http.MethodGet, "GET /waves", "/waves", nil)
+	a.Call(ctx, "svc", http.MethodPost, "GET /waves", "/waves", nil) // a different method is a different route: only its own prefix is stripped
+	lines := stats.Lines()
+	if len(lines) != 2 || lines[0].Route != "svc GET /waves" || lines[0].Calls != 2 || lines[1].Route != "svc POST GET /waves" {
+		t.Fatalf("routes %+v", lines)
+	}
+}
+
+func TestResponseHeadersAreExposedAndANilStatsClientDoesNotPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Idempotency-Replayed", "true")
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	literal := &Client{HTTP: srv.Client(), Base: map[string]string{"svc": srv.URL}} // no Stats at all
+	r := literal.Call(context.Background(), "svc", http.MethodPost, "/x", "/x", nil)
+	if !r.OK() || r.Header.Get("Idempotency-Replayed") != "true" || r.Header.Get("Retry-After") != "2" {
+		t.Fatalf("status %d headers %v", r.Status, r.Header)
+	}
+	if built := NewClient(nil, nil); built.Stats == nil {
+		t.Fatal("NewClient must supply statistics when given none")
+	}
+	if dead := literal.Call(context.Background(), "nope", http.MethodGet, "/x", "/x", nil); dead.Status != 0 || dead.Header != nil {
+		t.Fatalf("a transport error has status 0 and no headers, got %d %v", dead.Status, dead.Header)
+	}
+}
+
+func TestListAllKeepsAnExplicitLimitInThePath(t *testing.T) {
+	var limits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limits = append(limits, r.URL.Query().Get("limit"))
+		if r.URL.Query().Get("cursor") == "" {
+			_, _ = w.Write([]byte(`{"items":[{"id":"a"}],"nextCursor":"2"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[{"id":"b"}]}`))
+	}))
+	defer srv.Close()
+	a := NewClient(map[string]string{"svc": srv.URL}, NewCallStats())
+	type row struct{ ID string }
+	got, r := ListAll[row](context.Background(), a, "svc", "/x", "/x?limit=200")
+	if !r.OK() || len(got) != 2 {
+		t.Fatalf("got %d rows, last %d", len(got), r.Status)
+	}
+	if len(limits) != 2 || limits[0] != "200" || limits[1] != "200" {
+		t.Fatalf("limits sent %v, want 200 on every page (a provider capped at 200 answers 400 above it)", limits)
+	}
+	limits = nil
+	ListAll[row](context.Background(), a, "svc", "/x", "/x")
+	if limits[0] != "500" {
+		t.Fatalf("default limit %v, want 500", limits)
+	}
+}
