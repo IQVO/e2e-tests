@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +44,9 @@ type Crew struct {
 	Staged StagedTap
 
 	n atomic.Int64
+
+	trackMu sync.Mutex
+	tracked map[string]bool // refs already registered on Staged: sim.EventTap.Track appends, a second Track would count every event twice
 }
 
 // StagedTap is what the crew needs from the Kafka tap to see the handover from inbound-receiving to
