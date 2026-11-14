@@ -89,11 +89,11 @@ func (s *sim) registerStations(ctx context.Context) error {
 	reg := func(a *associate, path, capability string) error {
 		slot++
 		id := fmt.Sprintf("%s-ST-%s-%02d", s.cfg.runID, path, slot)
-		r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations", "/stations", map[string]any{
+		r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/stations", "/stations", map[string]any{
 			"stationId": id, "capabilities": []string{capability}, "locationCode": s.workCentreCode(slot),
 		})
-		if !r.ok() {
-			return fail("register station %s -> %d %s", id, r.status, truncate(string(r.body), 200))
+		if !r.OK() {
+			return fail("register station %s -> %d %s", id, r.Status, truncate(string(r.Body), 200))
 		}
 		a.stations[path] = id
 		return nil
@@ -119,20 +119,20 @@ func (s *sim) registerStations(ctx context.Context) error {
 }
 
 func (s *sim) checkIn(ctx context.Context, a *associate) {
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-ins", "/stations/"+a.station+"/check-ins", map[string]any{"occupantId": a.id})
-	if r.status == http.StatusConflict {
-		s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-outs", "/stations/"+a.station+"/check-outs", nil)
-		r = s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-ins", "/stations/"+a.station+"/check-ins", map[string]any{"occupantId": a.id})
+	r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-ins", "/stations/"+a.station+"/check-ins", map[string]any{"occupantId": a.id})
+	if r.Status == http.StatusConflict {
+		s.api.Call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-outs", "/stations/"+a.station+"/check-outs", nil)
+		r = s.api.Call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-ins", "/stations/"+a.station+"/check-ins", map[string]any{"occupantId": a.id})
 	}
-	if !r.ok() {
-		s.finding("check-in %s at %s -> %d %s", a.id, a.station, r.status, truncate(string(r.body), 160))
+	if !r.OK() {
+		s.finding("check-in %s at %s -> %d %s", a.id, a.station, r.Status, truncate(string(r.Body), 160))
 	}
 }
 
 func (s *sim) checkOut(ctx context.Context, a *associate) {
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-outs", "/stations/"+a.station+"/check-outs", nil)
-	if !r.ok() {
-		s.finding("check-out %s at %s -> %d %s", a.id, a.station, r.status, truncate(string(r.body), 160))
+	r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/check-outs", "/stations/"+a.station+"/check-outs", nil)
+	if !r.OK() {
+		s.finding("check-out %s at %s -> %d %s", a.id, a.station, r.Status, truncate(string(r.Body), 160))
 	}
 }
 
@@ -141,13 +141,13 @@ func (s *sim) checkOut(ctx context.Context, a *associate) {
 func (s *sim) startShift(ctx context.Context, a *associate) error {
 	// siteCode (ADR 0034) puts the associate at the simulated building, not
 	// site-less; the staffing-gap query keeps buildingId only (unscoped).
-	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/shift-starts", "/associates/"+a.id+"/shift-starts", map[string]any{"certifications": a.certs, "siteCode": s.cfg.buildingID})
-	if !r.ok() {
-		return fail("start-shift %s -> %d %s", a.id, r.status, truncate(string(r.body), 200))
+	r := s.api.Call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/shift-starts", "/associates/"+a.id+"/shift-starts", map[string]any{"certifications": a.certs, "siteCode": s.cfg.buildingID})
+	if !r.OK() {
+		return fail("start-shift %s -> %d %s", a.id, r.Status, truncate(string(r.Body), 200))
 	}
-	r = s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/assignments", "/associates/"+a.id+"/assignments", map[string]any{"pathId": a.path})
-	if !r.ok() {
-		return fail("assign %s to %s -> %d %s", a.id, a.path, r.status, truncate(string(r.body), 200))
+	r = s.api.Call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/assignments", "/associates/"+a.id+"/assignments", map[string]any{"pathId": a.path})
+	if !r.OK() {
+		return fail("assign %s to %s -> %d %s", a.id, a.path, r.Status, truncate(string(r.Body), 200))
 	}
 	s.checkIn(ctx, a)
 	return nil
@@ -157,9 +157,9 @@ func (s *sim) endShift(a *associate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	s.checkOut(ctx, a)
-	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/shift-ends", "/associates/"+a.id+"/shift-ends", nil)
-	if !r.ok() {
-		s.finding("end-shift %s -> %d %s", a.id, r.status, truncate(string(r.body), 160))
+	r := s.api.Call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/shift-ends", "/associates/"+a.id+"/shift-ends", nil)
+	if !r.OK() {
+		s.finding("end-shift %s -> %d %s", a.id, r.Status, truncate(string(r.Body), 160))
 	}
 }
 
@@ -170,18 +170,18 @@ func (s *sim) maybeBreak(ctx context.Context, a *associate) {
 	}
 	a.breakTaken = true
 	s.checkOut(ctx, a)
-	r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/break-starts", "/associates/"+a.id+"/break-starts", nil)
-	if !r.ok() {
-		s.finding("break/start %s -> %d %s", a.id, r.status, truncate(string(r.body), 160))
+	r := s.api.Call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/break-starts", "/associates/"+a.id+"/break-starts", nil)
+	if !r.OK() {
+		s.finding("break/start %s -> %d %s", a.id, r.Status, truncate(string(r.Body), 160))
 	}
 	s.m.breaks.Add(1)
 	logf(a.id, "lunch break")
 	sleepCtx(ctx, s.clock.simDur(30*time.Minute))
 	ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	r = s.api.call(ctx2, svcWorkforce, http.MethodPost, "/associates/{id}/break-ends", "/associates/"+a.id+"/break-ends", nil)
-	if !r.ok() {
-		s.finding("break/end %s -> %d %s", a.id, r.status, truncate(string(r.body), 160))
+	r = s.api.Call(ctx2, svcWorkforce, http.MethodPost, "/associates/{id}/break-ends", "/associates/"+a.id+"/break-ends", nil)
+	if !r.OK() {
+		s.finding("break/end %s -> %d %s", a.id, r.Status, truncate(string(r.Body), 160))
 	}
 	if ctx.Err() == nil {
 		s.checkIn(ctx, a)
@@ -206,29 +206,29 @@ type task struct {
 // claimable right now.
 func (s *sim) claimNext(ctx context.Context, a *associate, taskType string) (task, bool) {
 	var t task
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/task-claims", "/stations/"+a.station+"/task-claims", map[string]any{"taskType": taskType})
+	r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/stations/{id}/task-claims", "/stations/"+a.station+"/task-claims", map[string]any{"taskType": taskType})
 	switch {
-	case r.status == http.StatusOK:
-		if err := r.decode(&t); err != nil {
+	case r.Status == http.StatusOK:
+		if err := r.Decode(&t); err != nil {
 			s.finding("claim-next body: %v", err)
 			return t, false
 		}
 		return t, true
-	case r.status == http.StatusConflict, r.status == 0:
+	case r.Status == http.StatusConflict, r.Status == 0:
 		return t, false
 	default:
-		s.finding("claim-next %s at %s -> %d %s", taskType, a.station, r.status, truncate(string(r.body), 160))
+		s.finding("claim-next %s at %s -> %d %s", taskType, a.station, r.Status, truncate(string(r.Body), 160))
 		return t, false
 	}
 }
 
 func (s *sim) completeTask(ctx context.Context, a *associate, t task) bool {
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/completions", "/tasks/"+url.PathEscape(t.ID)+"/completions", map[string]any{"stationId": a.station})
-	if r.status == http.StatusConflict {
+	r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/completions", "/tasks/"+url.PathEscape(t.ID)+"/completions", map[string]any{"stationId": a.station})
+	if r.Status == http.StatusConflict {
 		s.m.completeConflicts.Add(1)
 	}
-	if !r.ok() {
-		s.finding("complete %s task %s -> %d %s", t.Type, t.ID, r.status, truncate(string(r.body), 160))
+	if !r.OK() {
+		s.finding("complete %s task %s -> %d %s", t.Type, t.ID, r.Status, truncate(string(r.Body), 160))
 		return false
 	}
 	a.tasks++
@@ -274,11 +274,11 @@ func (s *sim) travel(ctx context.Context, a *associate, to string) {
 		a.location = to
 		return
 	}
-	r := s.api.call(ctx, svcFacility, http.MethodGet, "/distance", "/distance?from="+url.QueryEscape(a.location)+"&to="+url.QueryEscape(to), nil)
+	r := s.api.Call(ctx, svcFacility, http.MethodGet, "/distance", "/distance?from="+url.QueryEscape(a.location)+"&to="+url.QueryEscape(to), nil)
 	var d struct {
 		MetresM float64 `json:"metresM"`
 	}
-	if r.ok() && r.decode(&d) == nil {
+	if r.OK() && r.Decode(&d) == nil {
 		s.m.travelMetres.Add(int64(d.MetresM))
 	}
 	a.location = to
@@ -306,9 +306,9 @@ func (s *sim) pickOne(ctx context.Context, a *associate) bool {
 
 	// The RF gun shows the work unit, then the pick location(s) of the
 	// line's reservation.
-	wu := s.api.call(ctx, svcWES, http.MethodGet, "/work-units/{id}", "/work-units/"+url.PathEscape(t.OrderRef), nil)
-	if wu.status == http.StatusNotFound || wu.status == http.StatusMethodNotAllowed {
-		s.finding("wes-work-planning GET /work-units/{id} unavailable (%d) — deploy claudioed/wes-work-planning#118", wu.status)
+	wu := s.api.Call(ctx, svcWES, http.MethodGet, "/work-units/{id}", "/work-units/"+url.PathEscape(t.OrderRef), nil)
+	if wu.Status == http.StatusNotFound || wu.Status == http.StatusMethodNotAllowed {
+		s.finding("wes-work-planning GET /work-units/{id} unavailable (%d) — deploy claudioed/wes-work-planning#118", wu.Status)
 	}
 	om, _ := s.getOrder(ctx, orderID)
 	var line omLine
@@ -341,17 +341,17 @@ func (s *sim) pickOne(ctx context.Context, a *associate) bool {
 		sleepCtx(ctx, jitter(nil2(s), s.cfg.pickSeconds*a.speed*float64(max(1, al.Quantity))/1.5, 0.25))
 		units += al.Quantity
 		if i == 0 && len(res.Allocations) > 1 {
-			if r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/lease-renewals", "/tasks/"+url.PathEscape(t.ID)+"/lease-renewals", map[string]any{"stationId": a.station}); r.ok() {
+			if r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/lease-renewals", "/tasks/"+url.PathEscape(t.ID)+"/lease-renewals", map[string]any{"stationId": a.station}); r.OK() {
 				s.m.leaseRenewals.Add(1)
 			}
 		}
 	}
 	r := s.confirmPick(ctx, res.ID)
-	if r.status == http.StatusConflict {
+	if r.Status == http.StatusConflict {
 		s.m.confirmPickConflicts.Add(1)
-		s.finding("confirm-pick %s -> 409 %s", res.ID, truncate(string(r.body), 160))
-	} else if !r.ok() {
-		s.finding("confirm-pick %s -> %d %s", res.ID, r.status, truncate(string(r.body), 160))
+		s.finding("confirm-pick %s -> 409 %s", res.ID, truncate(string(r.Body), 160))
+	} else if !r.OK() {
+		s.finding("confirm-pick %s -> %d %s", res.ID, r.Status, truncate(string(r.Body), 160))
 	}
 	if !s.completeTask(ctx, a, t) {
 		return true
@@ -389,13 +389,13 @@ func (s *sim) rebinOne(ctx context.Context, a *associate, tt tote) {
 		required = append(required, fmt.Sprintf("line-%d", i+1))
 	}
 	sleepCtx(ctx, jitter(nil2(s), 0.3*a.speed, 0.3))
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/rebin/arrivals", "/rebin/arrivals", map[string]any{
+	r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/rebin/arrivals", "/rebin/arrivals", map[string]any{
 		"orderRef": tt.orderID, "lineId": fmt.Sprintf("line-%d", tt.lineNo), "requiredLineIds": required,
 		"packCpt": tt.cpt, "packRequiredCapabilities": []string{"pack"},
 		"packFragile": o.fragile(), "packGiftWrap": o.giftWrap(),
 	})
-	if r.status != http.StatusNoContent {
-		s.finding("rebin arrival %s line %d -> %d %s", tt.orderID, tt.lineNo, r.status, truncate(string(r.body), 160))
+	if r.Status != http.StatusNoContent {
+		s.finding("rebin arrival %s line %d -> %d %s", tt.orderID, tt.lineNo, r.Status, truncate(string(r.Body), 160))
 		return
 	}
 	s.m.rebinScans.Add(1)
@@ -441,16 +441,16 @@ func (s *sim) packOne(ctx context.Context, a *associate) bool {
 		contents = append(contents, s.sku("LAMP"))
 	}
 	sleepCtx(ctx, jitter(nil2(s), s.cfg.packSeconds*a.speed*(1+0.2*float64(units-1)), 0.2))
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/package-seals", "/tasks/"+url.PathEscape(t.ID)+"/package-seals", map[string]any{
+	r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/tasks/{id}/package-seals", "/tasks/"+url.PathEscape(t.ID)+"/package-seals", map[string]any{
 		"stationId": a.station, "contents": contents,
 	})
-	if r.status != http.StatusCreated {
-		s.finding("seal-package for order %s -> %d %s", o.id, r.status, truncate(string(r.body), 200))
+	if r.Status != http.StatusCreated {
+		s.finding("seal-package for order %s -> %d %s", o.id, r.Status, truncate(string(r.Body), 200))
 		s.completeTask(ctx, a, t)
 		return true
 	}
 	var p pkg
-	_ = r.decode(&p)
+	_ = r.Decode(&p)
 	if p.FragileHandling != o.fragile() {
 		s.finding("package %s fragileHandling=%v but order %s fragile=%v", p.ID, p.FragileHandling, o.id, o.fragile())
 	}
@@ -490,23 +490,23 @@ func (s *sim) slamOne(ctx context.Context, a *associate, p parcel) {
 		actual += skuByKey("LAMP").weightKg
 	}
 	sleepCtx(ctx, jitter(nil2(s), 0.4*a.speed, 0.2))
-	r := s.api.call(ctx, svcFulfillment, http.MethodPost, "/packages/{id}/slam-runs", "/packages/"+url.PathEscape(p.packageID)+"/slam-runs", map[string]any{
+	r := s.api.Call(ctx, svcFulfillment, http.MethodPost, "/packages/{id}/slam-runs", "/packages/"+url.PathEscape(p.packageID)+"/slam-runs", map[string]any{
 		"actualWeight": round3(actual), "expectedWeight": round3(expected),
 	})
-	if r.status != http.StatusNoContent {
-		s.finding("SLAM package %s -> %d %s", p.packageID, r.status, truncate(string(r.body), 160))
+	if r.Status != http.StatusNoContent {
+		s.finding("SLAM package %s -> %d %s", p.packageID, r.Status, truncate(string(r.Body), 160))
 		return
 	}
 	s.m.slams.Add(1)
 	a.tasks++
 	status := ""
-	g := s.api.call(ctx, svcFulfillment, http.MethodGet, "/packages/{id}", "/packages/"+url.PathEscape(p.packageID), nil)
-	if g.ok() {
+	g := s.api.Call(ctx, svcFulfillment, http.MethodGet, "/packages/{id}", "/packages/"+url.PathEscape(p.packageID), nil)
+	if g.OK() {
 		var got pkg
-		_ = g.decode(&got)
+		_ = g.Decode(&got)
 		status = got.Status
-	} else if g.status == http.StatusNotFound || g.status == http.StatusMethodNotAllowed {
-		s.finding("fulfillment-execution GET /packages/{id} unavailable (%d) — deploy claudioed/fulfillment-execution#130", g.status)
+	} else if g.Status == http.StatusNotFound || g.Status == http.StatusMethodNotAllowed {
+		s.finding("fulfillment-execution GET /packages/{id} unavailable (%d) — deploy claudioed/fulfillment-execution#130", g.Status)
 		status = map[bool]string{true: "DIVERTED", false: "LABELED"}[o.kind == kindMispickInjct] + "?"
 	}
 	s.mu.Lock()
@@ -566,9 +566,9 @@ func (s *sim) queueDepth(ctx context.Context, taskType string) int {
 	var d struct {
 		Depth int `json:"depth"`
 	}
-	r := s.api.call(ctx, svcFulfillment, http.MethodGet, "/queues/{taskType}/depth", "/queues/"+taskType+"/depth", nil)
-	if r.ok() {
-		_ = r.decode(&d)
+	r := s.api.Call(ctx, svcFulfillment, http.MethodGet, "/queues/{taskType}/depth", "/queues/"+taskType+"/depth", nil)
+	if r.OK() {
+		_ = r.Decode(&d)
 	}
 	return d.Depth
 }
@@ -586,9 +586,9 @@ func (s *sim) flexStep(ctx context.Context, a *associate, idle time.Duration) {
 	}
 	if want != a.path {
 		s.checkOut(ctx, a)
-		r := s.api.call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/assignments", "/associates/"+a.id+"/assignments", map[string]any{"pathId": want})
-		if !r.ok() {
-			s.finding("reassign %s to %s -> %d %s", a.id, want, r.status, truncate(string(r.body), 160))
+		r := s.api.Call(ctx, svcWorkforce, http.MethodPost, "/associates/{id}/assignments", "/associates/"+a.id+"/assignments", map[string]any{"pathId": want})
+		if !r.OK() {
+			s.finding("reassign %s to %s -> %d %s", a.id, want, r.Status, truncate(string(r.Body), 160))
 		} else {
 			s.m.reassignments.Add(1)
 			logf(a.id, "moved %s -> %s (PICK queue %d, PACK queue %d)", a.path, want, pick, pack)
@@ -617,16 +617,16 @@ func (s *sim) releaseScheduler(ctx context.Context, wg *sync.WaitGroup) {
 	for ctx.Err() == nil {
 		depth := s.queueDepth(ctx, "PICK")
 		for depth < target && ctx.Err() == nil {
-			r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/work-releases", "/paths/"+s.cfg.wesPickPath+"/work-releases", nil)
-			if r.status == http.StatusOK {
+			r := s.api.Call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/work-releases", "/paths/"+s.cfg.wesPickPath+"/work-releases", nil)
+			if r.Status == http.StatusOK {
 				s.m.released.Add(1)
 				depth++
 				continue
 			}
-			if r.status == http.StatusConflict || r.status == http.StatusNotFound {
+			if r.Status == http.StatusConflict || r.Status == http.StatusNotFound {
 				s.m.releaseRejected.Add(1)
 			} else {
-				s.finding("WES release PICK -> %d %s", r.status, truncate(string(r.body), 160))
+				s.finding("WES release PICK -> %d %s", r.Status, truncate(string(r.Body), 160))
 			}
 			break
 		}
@@ -651,8 +651,8 @@ func (s *sim) inventoryControl(ctx context.Context, wg *sync.WaitGroup) {
 		var b struct {
 			Occupied int `json:"occupied"`
 		}
-		g := s.api.call(ctx, svcInventory, http.MethodGet, "/bins/{binId}", "/bins/"+url.PathEscape(bin), nil)
-		if !g.ok() || g.decode(&b) != nil {
+		g := s.api.Call(ctx, svcInventory, http.MethodGet, "/bins/{binId}", "/bins/"+url.PathEscape(bin), nil)
+		if !g.OK() || g.Decode(&b) != nil {
 			continue
 		}
 		s.cycleCount(ctx, bin, b.Occupied, false)
@@ -678,27 +678,27 @@ func (s *sim) inventoryControl(ctx context.Context, wg *sync.WaitGroup) {
 	}
 	s.mu.Unlock()
 	for _, o := range backordered {
-		r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders/{id}/allocation-retries", "/orders/"+o.id+"/allocation-retries", nil)
+		r := s.api.Call(ctx, svcOrder, http.MethodPost, "/orders/{id}/allocation-retries", "/orders/"+o.id+"/allocation-retries", nil)
 		var got omOrder
-		_ = r.decode(&got)
+		_ = r.Decode(&got)
 		s.mu.Lock()
 		o.retried = true
 		s.mu.Unlock()
-		logf("inventory-ctl", "retry-allocation order #%03d -> %d %s", o.seq, r.status, got.Status)
-		if !r.ok() {
-			s.finding("retry-allocation %s -> %d %s", o.id, r.status, truncate(string(r.body), 200))
+		logf("inventory-ctl", "retry-allocation order #%03d -> %d %s", o.seq, r.Status, got.Status)
+		if !r.OK() {
+			s.finding("retry-allocation %s -> %d %s", o.id, r.Status, truncate(string(r.Body), 200))
 		}
 	}
 }
 
 func (s *sim) cycleCount(ctx context.Context, bin string, counted int, expectDiscrepancy bool) {
-	r := s.api.call(ctx, svcInventory, http.MethodPost, "/bins/{binId}/cycle-counts", "/bins/"+url.PathEscape(bin)+"/cycle-counts", map[string]any{"countedQuantity": counted})
+	r := s.api.Call(ctx, svcInventory, http.MethodPost, "/bins/{binId}/cycle-counts", "/bins/"+url.PathEscape(bin)+"/cycle-counts", map[string]any{"countedQuantity": counted})
 	var res struct {
 		SystemQuantity int  `json:"systemQuantity"`
 		Discrepancy    bool `json:"discrepancy"`
 	}
-	if !r.ok() || r.decode(&res) != nil {
-		s.finding("cycle count %s -> %d %s", bin, r.status, truncate(string(r.body), 160))
+	if !r.OK() || r.Decode(&res) != nil {
+		s.finding("cycle count %s -> %d %s", bin, r.Status, truncate(string(r.Body), 160))
 		return
 	}
 	s.m.cycleCounts.Add(1)
@@ -727,14 +727,14 @@ func (s *sim) supervisor(ctx context.Context, wg *sync.WaitGroup) {
 			WIP          int    `json:"wip"`
 			Mode         string `json:"mode"`
 		}
-		if r := s.api.call(ctx, svcWES, http.MethodGet, "/paths/{pathId}/telemetry", "/paths/"+s.cfg.wesPickPath+"/telemetry", nil); r.ok() {
-			_ = r.decode(&tel)
+		if r := s.api.Call(ctx, svcWES, http.MethodGet, "/paths/{pathId}/telemetry", "/paths/"+s.cfg.wesPickPath+"/telemetry", nil); r.OK() {
+			_ = r.Decode(&tel)
 		}
 		var reb struct {
 			Action string `json:"action"`
 		}
-		rb := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/rebalance-decisions", "/paths/"+s.cfg.wesPickPath+"/rebalance-decisions", nil)
-		_ = rb.decode(&reb)
+		rb := s.api.Call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/rebalance-decisions", "/paths/"+s.cfg.wesPickPath+"/rebalance-decisions", nil)
+		_ = rb.Decode(&reb)
 		gaps := []string{}
 		for _, p := range []string{"PICK", "PACK"} {
 			if !s.shiftPlanned {
@@ -744,9 +744,9 @@ func (s *sim) supervisor(ctx context.Context, wg *sync.WaitGroup) {
 				PlannedHeads, ActiveHeads int
 				Understaffed              bool
 			}
-			r := s.api.call(ctx, svcWorkforce, http.MethodGet, "/paths/{pathId}/staffing-gap",
+			r := s.api.Call(ctx, svcWorkforce, http.MethodGet, "/paths/{pathId}/staffing-gap",
 				"/paths/"+p+"/staffing-gap?buildingId="+url.QueryEscape(s.cfg.buildingID)+"&shiftId="+url.QueryEscape(s.shiftID()), nil)
-			if r.ok() && r.decode(&g) == nil {
+			if r.OK() && r.Decode(&g) == nil {
 				gaps = append(gaps, fmt.Sprintf("%s %d/%d%s", p, g.ActiveHeads, g.PlannedHeads, map[bool]string{true: " UNDERSTAFFED", false: ""}[g.Understaffed]))
 			}
 		}
@@ -763,8 +763,8 @@ func (s *sim) supervisor(ctx context.Context, wg *sync.WaitGroup) {
 func (s *sim) sweeps(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for ctx.Err() == nil {
-		s.api.call(ctx, svcFulfillment, http.MethodPost, "/task-lease-expirations", "/task-lease-expirations", nil)
-		s.api.call(ctx, svcFulfillment, http.MethodPost, "/cpt-miss-sweeps", "/cpt-miss-sweeps", nil)
+		s.api.Call(ctx, svcFulfillment, http.MethodPost, "/task-lease-expirations", "/task-lease-expirations", nil)
+		s.api.Call(ctx, svcFulfillment, http.MethodPost, "/cpt-miss-sweeps", "/cpt-miss-sweeps", nil)
 		sleepCtx(ctx, 3*time.Second)
 	}
 }
@@ -778,8 +778,8 @@ func (s *sim) sweeps(ctx context.Context, wg *sync.WaitGroup) {
 func (s *sim) confirmPick(ctx context.Context, reservationID string) resp {
 	var r resp
 	for attempt := 0; attempt < 5; attempt++ {
-		r = s.api.call(ctx, svcInventory, http.MethodPost, "/reservations/{id}/pick-confirmations", "/reservations/"+url.PathEscape(reservationID)+"/pick-confirmations", nil)
-		if r.status != http.StatusConflict || !strings.Contains(string(r.body), "/concurrent-modification") {
+		r = s.api.Call(ctx, svcInventory, http.MethodPost, "/reservations/{id}/pick-confirmations", "/reservations/"+url.PathEscape(reservationID)+"/pick-confirmations", nil)
+		if r.Status != http.StatusConflict || !strings.Contains(string(r.Body), "/concurrent-modification") {
 			return r
 		}
 		s.m.confirmPickRetries.Add(1)
