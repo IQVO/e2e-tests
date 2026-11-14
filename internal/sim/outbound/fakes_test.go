@@ -296,7 +296,11 @@ func newWorld(t *testing.T) *world {
 		base[svc] = f.srv.URL
 	}
 	w.client = sim.NewClient(base, sim.NewCallStats())
-	w.client.HTTP.Timeout = 5 * time.Second
+	// A private pool: the polls of a bounded wait are many small requests, and the default transport keeps only
+	// two idle connections per host, so a repeated run would otherwise churn through the ephemeral ports.
+	tr := &http.Transport{MaxIdleConnsPerHost: 8}
+	t.Cleanup(tr.CloseIdleConnections)
+	w.client.HTTP = &http.Client{Transport: tr, Timeout: 5 * time.Second}
 	return w
 }
 
@@ -377,6 +381,8 @@ type fakeFacility struct {
 	zones    map[string]string // zoneId -> site
 	aisles   map[string]bool   // aisleId
 	slots    map[string]*slot
+	// failSlots makes POST /locations answer a placement-rule 422.
+	failSlots bool
 }
 
 func newFakeFacility(w *world) *fakeFacility {
@@ -556,6 +562,9 @@ func newFakeFacility(w *world) *fakeFacility {
 		}
 		if _, dup := f.slots[code]; dup {
 			return refuse(409, "location-already-registered")
+		}
+		if f.failSlots {
+			return refuse(422, "placement-rule-violated")
 		}
 		flow, _ := m["dockFlow"].(string)
 		if role != "Dock" && flow != "" {
@@ -836,13 +845,6 @@ func (y *fakeYard) trailerJSON(t *ytrailer) map[string]any {
 		m["location"] = map[string]any{"kind": t.Loc.Kind, "code": t.Loc.Code}
 	}
 	return m
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 func (y *fakeYard) moveJSON(m *ymove) map[string]any {

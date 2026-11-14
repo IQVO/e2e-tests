@@ -165,11 +165,18 @@ type packageDTO struct {
 // Load is outbound-shipping's outbound load, as the floor reads it.
 type Load = loadDTO
 
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
 // Cutoff is one cutoff (CPT) of a site's schedule, in process-path-management's wire names.
 type Cutoff struct {
-	CptID           string   // e.g. "aus-1700"
-	LocalTime       string   // "HH:MM" in the schedule's timezone: what a package manifest's cpt equals
-	DaysOfWeek      []string // Mon..Sun
-	ShipMethod      string
-	EligiblePathIDs []string // process paths the cutoff serves; required by the PUT
+	CptID           string   `json:"cptId"`           // e.g. "aus-1700"
+	LocalTime       string   `json:"localTime"`       // "HH:MM" in the schedule's timezone: what a package manifest's cpt equals
+	DaysOfWeek      []string `json:"daysOfWeek"`      // Mon..Sun
+	ShipMethod      string   `json:"shipMethod"`      // carrier ship method, e.g. "ground"
+	EligiblePathIDs []string `json:"eligiblePathIds"` // process paths the cutoff serves; required by the PUT
 }
