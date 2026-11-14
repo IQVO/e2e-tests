@@ -47,7 +47,7 @@ func TestEnsureWaveCreatesOneMinutesAheadOfTheArrival(t *testing.T) {
 	if wave.ServiceDate != "2026-11-14" || wave.State != "OPEN" || wave.StopCapacity != 100 || wave.StationNodeID != station {
 		t.Fatalf("wave = %+v", wave)
 	}
-	if n := len(w.callsTo(SvcLastMile, "POST /waves")); n != 1 {
+	if n := w.countCalls(SvcLastMile, "POST /waves"); n != 1 {
 		t.Fatalf("%d POST /waves, want 1", n)
 	}
 	w.assertEveryPostKeyed()
@@ -81,7 +81,7 @@ func TestEnsureWaveReusesTheEarliestUsableOpenWave(t *testing.T) {
 	if err != nil || created || wave.WaveID != want.ID {
 		t.Fatalf("wave=%+v created=%v err=%v, want the existing %s", wave, created, err, want.ID)
 	}
-	if n := len(w.callsTo(SvcLastMile, "POST /waves")); n != 0 {
+	if n := w.countCalls(SvcLastMile, "POST /waves"); n != 0 {
 		t.Fatalf("%d waves created, want none", n)
 	}
 }
@@ -210,7 +210,7 @@ func TestEnsurePartnerIsIdempotentEvenThoughThereIsNoListRoute(t *testing.T) {
 	if len(w.lastmile.partners) != 1 {
 		t.Fatalf("%d partners exist, want exactly 1", len(w.lastmile.partners))
 	}
-	if posts := len(w.callsTo(SvcLastMile, "POST /partners")); posts != 2 {
+	if posts := w.countCalls(SvcLastMile, "POST /partners"); posts != 2 {
 		t.Fatalf("%d POST /partners, want 2 (the cold actor repeated it; the warm one did not)", posts)
 	}
 	if got := w.callsTo(SvcLastMile, "GET /partners"); len(got) != 0 {
@@ -309,11 +309,11 @@ func TestPlanRouteRefusalsOfTheContractAreSurfaced(t *testing.T) {
 		t.Fatalf("inactive partner: %v, want partner-inactive", err)
 	}
 	// a package that is not in the wave is caught before the service has to refuse it
-	before := len(w.callsTo(SvcLastMile, "POST /routes"))
+	before := w.countCalls(SvcLastMile, "POST /routes")
 	if _, err := st.PlanRoute(ctx, wave.ID, dsp.DSPID, []string{tnA, "RN0000000000NOPE"}); err == nil || !strings.Contains(err.Error(), "RN0000000000NOPE") {
 		t.Fatalf("package outside the wave: %v", err)
 	}
-	if after := len(w.callsTo(SvcLastMile, "POST /routes")); after != before {
+	if after := w.countCalls(SvcLastMile, "POST /routes"); after != before {
 		t.Fatal("a package outside the wave must not reach POST /routes")
 	}
 	// and a package already on a route of the wave is refused by the service

@@ -37,6 +37,9 @@ var chicago = func() *time.Location {
 	return l
 }()
 
+// requestLatency is the fake time one request takes.
+const requestLatency = 5 * time.Millisecond
+
 type reply struct {
 	status int
 	body   any
@@ -130,6 +133,9 @@ func (w *world) route(method, svc, path string, h func(r *http.Request, body []b
 		body, _ := io.ReadAll(r.Body)
 		w.mu.Lock()
 		defer w.mu.Unlock()
+		// Every request takes a little time, so a service-stamped time is always later than a time
+		// the actor sent in an earlier request.
+		w.clock.Advance(requestLatency)
 		c := call{Svc: svc, Method: r.Method, Path: r.URL.Path[len(svc)+1:], Key: r.Header.Get("Idempotency-Key")}
 		if r.URL.RawQuery != "" {
 			c.Path += "?" + r.URL.RawQuery
@@ -227,6 +233,21 @@ func (w *world) callsTo(svc, prefix string) []call {
 		}
 	}
 	return out
+}
+
+// countCalls counts the logged calls whose "<METHOD> <path-without-query>" is exactly route.
+func (w *world) countCalls(svc, route string) int {
+	n := 0
+	for _, c := range w.callsTo(svc, route) {
+		p := c.Path
+		if i := strings.IndexByte(p, '?'); i >= 0 {
+			p = p[:i]
+		}
+		if c.Method+" "+p == route {
+			n++
+		}
+	}
+	return n
 }
 
 // assertEveryPostKeyed fails the test when any POST arrived without a key or when two different

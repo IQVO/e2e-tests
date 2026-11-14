@@ -56,19 +56,21 @@ type linehaulFake struct {
 	byDep   map[string]string
 	seq     int // departures
 	loadSeq int
+	// omitTimes drops departedAt/arrivedAt from load answers (both are optional in the schema).
+	omitTimes bool
 }
 
-func (l *fload) view() map[string]any {
+func (l *fload) view(omitTimes bool) map[string]any {
 	tns := l.TNs
 	if tns == nil {
 		tns = []string{}
 	}
 	v := map[string]any{"loadId": l.ID, "departureId": l.DepartureID, "departureKind": l.Kind, "originNodeId": l.Origin, "destinationNodeId": l.Dest,
 		"capacityPackages": l.Capacity, "packageCount": len(tns), "trackingNumbers": tns, "state": l.State}
-	if !l.DepartedAt.IsZero() {
+	if !l.DepartedAt.IsZero() && !omitTimes {
 		v["departedAt"] = rfc(l.DepartedAt)
 	}
-	if !l.ArrivedAt.IsZero() {
+	if !l.ArrivedAt.IsZero() && !omitTimes {
 		v["arrivedAt"] = rfc(l.ArrivedAt)
 	}
 	return v
@@ -191,7 +193,7 @@ func newLinehaulFake(w *world) *linehaulFake {
 		ld := &fload{ID: sprintf("load-%04d", l.loadSeq), DepartureID: d.ID, Kind: d.Kind, Origin: d.Origin, Dest: d.Dest, Capacity: d.Capacity, State: "OPEN"}
 		l.loads[ld.ID] = ld
 		l.byDep[d.ID] = ld.ID
-		return created(ld.view())
+		return created(ld.view(l.omitTimes))
 	})
 	w.route("POST", SvcLinehaul, "/loads/{id}/packages", func(r *http.Request, body []byte) reply {
 		ld, bad := l.loadOf(r)
@@ -209,7 +211,7 @@ func newLinehaulFake(w *world) *linehaulFake {
 		}
 		for _, t := range ld.TNs {
 			if t == in.TrackingNumber {
-				return ok(ld.view())
+				return ok(ld.view(l.omitTimes))
 			}
 		}
 		if ld.State != "OPEN" {
@@ -229,7 +231,7 @@ func newLinehaulFake(w *world) *linehaulFake {
 			return problem(409, "load-over-capacity", "capacity snapshot reached")
 		}
 		ld.TNs = append(ld.TNs, in.TrackingNumber)
-		return ok(ld.view())
+		return ok(ld.view(l.omitTimes))
 	})
 	w.route("POST", SvcLinehaul, "/loads/{id}/closures", func(r *http.Request, _ []byte) reply {
 		ld, bad := l.loadOf(r)
@@ -238,11 +240,11 @@ func newLinehaulFake(w *world) *linehaulFake {
 		}
 		switch ld.State {
 		case "CLOSED":
-			return ok(ld.view())
+			return ok(ld.view(l.omitTimes))
 		case "OPEN":
 			ld.State = "CLOSED"
 			l.departure(ld.DepartureID).State = "CLOSED"
-			return ok(ld.view())
+			return ok(ld.view(l.omitTimes))
 		}
 		return problem(409, "illegal-transition", "load is "+ld.State)
 	})
@@ -253,7 +255,7 @@ func newLinehaulFake(w *world) *linehaulFake {
 		}
 		switch ld.State {
 		case "DEPARTED":
-			return ok(ld.view())
+			return ok(ld.view(l.omitTimes))
 		case "CLOSED":
 			ld.State = "DEPARTED"
 			ld.DepartedAt = w.now()
@@ -265,7 +267,7 @@ func newLinehaulFake(w *world) *linehaulFake {
 			for _, tn := range ld.TNs {
 				w.scan(tn, typ, ld.Origin, ld.DepartedAt)
 			}
-			return ok(ld.view())
+			return ok(ld.view(l.omitTimes))
 		}
 		return problem(409, "illegal-transition", "load is "+ld.State)
 	})
@@ -276,7 +278,7 @@ func newLinehaulFake(w *world) *linehaulFake {
 		}
 		switch ld.State {
 		case "ARRIVED":
-			return ok(ld.view())
+			return ok(ld.view(l.omitTimes))
 		case "DEPARTED":
 			ld.State = "ARRIVED"
 			ld.ArrivedAt = w.now()
@@ -285,7 +287,7 @@ func newLinehaulFake(w *world) *linehaulFake {
 				w.scan(tn, "STATION_ARRIVAL", ld.Dest, ld.ArrivedAt)
 			}
 			w.lastmile.onLoadArrived(ld.Dest, ld.TNs, ld.ArrivedAt)
-			return ok(ld.view())
+			return ok(ld.view(l.omitTimes))
 		}
 		return problem(409, "illegal-transition", "load is "+ld.State)
 	})

@@ -5,11 +5,13 @@ import (
 	"time"
 )
 
-// scanStep is the smallest gap the actors leave between two times of one
-// package: shipping-and-tracking applies scans in TIME order and stores an
-// older one without applying it, so two events of one package must never share
-// or reverse an instant, whatever the resolution the service stores.
-const scanStep = time.Second
+// scanStep is the gap the actors leave between two times of one package:
+// shipping-and-tracking applies scans in TIME order and stores an older one
+// without applying it, so two times the actor sends for one package must never
+// share or reverse an instant. A millisecond is far above the services' stored
+// resolution and far below the round trip to the next service-stamped event, so
+// a lifted time is never ahead of what the service stamps next.
+const scanStep = time.Millisecond
 
 // Timeline is the monotonic time line of every package the actors touch. A
 // time the actor sends (a delivery attempt, a carrier scan) goes through Stamp;

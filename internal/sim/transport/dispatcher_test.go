@@ -147,7 +147,7 @@ func TestRunGivesUpAfterTheBoundedNumberOfDepartures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "load-already-exists") {
 		t.Fatalf("err = %v, want the load-already-exists refusal after 2 tries", err)
 	}
-	if n := len(w.callsTo(SvcLinehaul, "POST /loads")); n != 5 { // 3 setup + 2 tries
+	if n := w.countCalls(SvcLinehaul, "POST /loads"); n != 5 { // 3 setup + 2 tries
 		t.Fatalf("%d POST /loads, want 5", n)
 	}
 }

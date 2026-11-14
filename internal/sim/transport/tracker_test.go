@@ -30,7 +30,7 @@ func TestOrderTrackingNumbersPollsUntilTheViewHasThem(t *testing.T) {
 	if reads := len(w.callsTo(SvcOrdering, "GET /orders/ord-1/tracking")); reads != 4 {
 		t.Fatalf("%d reads, want 4 (3 empty + 1 with the packages)", reads)
 	}
-	if elapsed := w.clock.Now().Sub(t0); elapsed != 3*DefaultSettings().PollInterval {
+	if elapsed := w.clock.Now().Sub(t0); elapsed < 3*DefaultSettings().PollInterval || elapsed > 3*DefaultSettings().PollInterval+time.Second {
 		t.Fatalf("waited %s of fake time, want 3 polls", elapsed)
 	}
 }
