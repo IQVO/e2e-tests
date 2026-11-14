@@ -154,3 +154,25 @@ func TestBookDoorWithNoInboundDoorSendsNothing(t *testing.T) {
 		t.Error("BookDoor wrote something with no door to book")
 	}
 }
+
+// The window is computed once and re-sent on every retry of a lag refusal, so its start must stay ahead of the
+// clock for as long as the bounded waits can last: a window that has begun by the time dock-scheduling answers is
+// 422 window-in-past, which is not lag and is not retried.
+func TestBookDoorKeepsItsWindowAheadOfNowWhileWaitingOutLongLag(t *testing.T) {
+	w := newWorld(t)
+	c := w.crew(w.seedSite())
+	w.clock.Advance(3*time.Minute + 42*time.Second) // 15:44:49, just over ten seconds before a slot boundary
+	asn := registered(t, c, Line{skuA, 10})
+	w.with(func() { w.dock.asnLag[asn.Number] = &lag{n: 50} }) // 50 refusals at 500 ms: 25 s of waiting
+	before := w.clock.Now()
+	a, err := c.BookDoor(context.Background(), asn.Number, c.NextWindow())
+	if err != nil {
+		t.Fatalf("BookDoor after a long lag: %v", err)
+	}
+	if waited := w.clock.Now().Sub(before); waited < 24*time.Second {
+		t.Fatalf("the clock only advanced %s: the lag was not waited out", waited)
+	}
+	if !a.Window.Start.After(w.clock.Now()) {
+		t.Errorf("window starts %s, not after now %s", a.Window.Start, w.clock.Now())
+	}
+}
