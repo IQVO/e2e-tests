@@ -204,8 +204,13 @@ func TestShipTwoLoadsConcurrently(t *testing.T) {
 			t.Fatalf("shipment %+v", s)
 		}
 	}
-	if res[0].LoadID == res[1].LoadID || res[0].Seal == res[1].Seal || res[0].VisitID == res[1].VisitID || res[0].Door == res[1].Door {
-		t.Fatalf("two loads must have their own load, seal, visit and door: %+v / %+v", res[0], res[1])
+	// Concurrency must not cross-wire the two shipments: each has its own load, trailer, visit and
+	// seal. The DOOR is deliberately not compared: the two appointments are for different CPT windows
+	// (17:00 and 11:00), and dock-scheduling frees a door when its appointment completes, so the
+	// second shipment may legitimately reuse the first one's door. Whether it does depends only on
+	// whether the first has already departed, which is scheduling luck (it failed ~1 run in 75).
+	if res[0].LoadID == res[1].LoadID || res[0].Seal == res[1].Seal || res[0].VisitID == res[1].VisitID || res[0].TrailerID == res[1].TrailerID {
+		t.Fatalf("two shipments must have their own load, trailer, visit and seal: %+v / %+v", res[0], res[1])
 	}
 }
 
