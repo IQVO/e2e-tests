@@ -16,7 +16,7 @@
 
 GO ?= go
 
-.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products seed-inventory seed-tests provision-storefront provision-storefront-dry-run provision-storefront-verify down
+.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products seed-inventory seed-tests provision-storefront provision-storefront-dry-run provision-storefront-verify retail-day retail-day-preflight down
 
 help:
 	@echo "e2e-tests — local quality gate (targets mirror .github/workflows/ci.yml)"
@@ -45,6 +45,8 @@ help:
 	@echo "  provision-storefront          WRITES: network seed + dictionary check + cmd/seed-storefront, verified; a rerun writes nothing"
 	@echo "  provision-storefront-dry-run  the same checks and plans, nothing written"
 	@echo "  provision-storefront-verify   read-only: network verify, dictionary check, purchasable/quote/search verify"
+	@echo "  retail-day-preflight          read-only: cluster gate + REST checks for the three-tier run (docs/adr/0001-retail-day.md)"
+	@echo "  retail-day                    the three-tier run; refuses until the actors are wired (exit 2)"
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:
@@ -112,10 +114,17 @@ provision-storefront-dry-run:
 provision-storefront-verify:
 	bash scripts/10-provision-storefront.sh --verify-only
 
+# The retail day (scripts/11-run-retail-day.sh, docs/adr/0001-retail-day.md).
+retail-day-preflight:
+	bash scripts/11-run-retail-day.sh --preflight
+
+retail-day:
+	bash scripts/11-run-retail-day.sh
+
 # Offline tests of the seeders (contract fakes; no cluster) and of warehouse-day's site guard
 # and order body (httptest fakes), as in CI's seed-products-tests job.
 seed-tests:
-	$(GO) test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/... ./cmd/warehouse-day/... ./internal/...
+	$(GO) test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/... ./cmd/warehouse-day/... ./cmd/retail-day/... ./internal/...
 
 down:
 	bash scripts/05-down-services.sh
