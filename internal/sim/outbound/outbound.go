@@ -24,7 +24,6 @@ package outbound
 
 import (
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -166,4 +165,11 @@ type packageDTO struct {
 // Load is outbound-shipping's outbound load, as the floor reads it.
 type Load = loadDTO
 
-func joinCodes(codes []string) string { return strings.Join(codes, ",") }
+// Cutoff is one cutoff (CPT) of a site's schedule, in process-path-management's wire names.
+type Cutoff struct {
+	CptID           string   // e.g. "aus-1700"
+	LocalTime       string   // "HH:MM" in the schedule's timezone: what a package manifest's cpt equals
+	DaysOfWeek      []string // Mon..Sun
+	ShipMethod      string
+	EligiblePathIDs []string // process paths the cutoff serves; required by the PUT
+}
