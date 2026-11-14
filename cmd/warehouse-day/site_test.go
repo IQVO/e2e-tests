@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,20 +17,54 @@ import (
 // committedFixture is the storefront's fulfilment-site fixture, relative to this package.
 var committedFixture = filepath.Join("..", "..", "fixtures", "storefront", "fulfilment-site.json")
 
-func liveSite(id string) func() (string, error) {
-	return func() (string, error) { return id, nil }
+// liveSite is a fixture that predates the warehouse building: only the node's id.
+func liveSite(id string) func() (storefrontSites, error) {
+	return func() (storefrontSites, error) { return storefrontSites{NodeSiteID: id}, nil }
 }
 
-func TestStorefrontSiteIDReadsTheCommittedFixture(t *testing.T) {
-	got, err := storefrontSiteID(committedFixture)
+// liveSites is the fixture of ADR 0001 D1: the node's id and its warehouse building.
+func liveSites(node, building string) func() (storefrontSites, error) {
+	return func() (storefrontSites, error) {
+		return storefrontSites{NodeSiteID: node, WarehouseSiteID: building}, nil
+	}
+}
+
+func TestReadStorefrontSitesReadsTheCommittedFixture(t *testing.T) {
+	got, err := readStorefrontSites(committedFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "site-1" {
-		t.Fatalf("storefront fulfilment site = %q, want site-1", got)
+	if got.NodeSiteID != "site-1" || got.WarehouseSiteID != "AUS3" {
+		t.Fatalf("storefront sites = %+v, want node site-1 and warehouse building AUS3 (ADR 0001 D1)", got)
 	}
-	if _, err := storefrontSiteID(filepath.Join(t.TempDir(), "absent.json")); err == nil {
+	if _, err := readStorefrontSites(filepath.Join(t.TempDir(), "absent.json")); err == nil {
 		t.Fatal("an absent fixture must be an error, not an empty site")
+	}
+}
+
+// TestReadStorefrontSitesAcceptsAFixtureWithoutTheBuilding: a fixture from before warehouseSiteId
+// still loads (the guard then protects the node id alone); one without siteId does not.
+func TestReadStorefrontSitesAcceptsAFixtureWithoutTheBuilding(t *testing.T) {
+	write := func(body string) string {
+		path := filepath.Join(t.TempDir(), "fulfilment-site.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	old, err := readStorefrontSites(write(`{"siteId": " site-1 ", "timezone": "America/Chicago", "cutoffs": []}`))
+	if err != nil || old.NodeSiteID != "site-1" || old.WarehouseSiteID != "" {
+		t.Fatalf("an old fixture: %+v %v", old, err)
+	}
+	padded, err := readStorefrontSites(write(`{"siteId": "site-1", "warehouseSiteId": " AUS3 "}`))
+	if err != nil || padded.WarehouseSiteID != "AUS3" {
+		t.Fatalf("a padded building id is trimmed: %+v %v", padded, err)
+	}
+	if _, err := readStorefrontSites(write(`{"warehouseSiteId": "AUS3"}`)); err == nil || !strings.Contains(err.Error(), "no siteId") {
+		t.Fatalf("a fixture without siteId must be an error, got %v", err)
+	}
+	if _, err := readStorefrontSites(write(`{`)); err == nil {
+		t.Fatal("a malformed fixture must be an error")
 	}
 }
 
@@ -51,7 +86,7 @@ func TestDefaultsRunOnTheSimSite(t *testing.T) {
 		t.Fatalf("fixture default %q, want %q", cfg.storefrontSiteFixture, defaultStorefrontSiteFixture)
 	}
 	cfg.storefrontSiteFixture = committedFixture
-	warnings, err := siteGuard(cfg, func() (string, error) { return storefrontSiteID(cfg.storefrontSiteFixture) })
+	warnings, err := siteGuard(cfg, func() (storefrontSites, error) { return readStorefrontSites(cfg.storefrontSiteFixture) })
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("the defaults must pass the guard silently against the committed fixture: warnings %v, err %v", warnings, err)
 	}
@@ -61,13 +96,14 @@ func TestSiteGuard(t *testing.T) {
 	cfgWith := func(site, cpt string, allow bool) config {
 		return config{siteCode: site, cptSiteID: cpt, allowLiveSite: allow, storefrontSiteFixture: defaultStorefrontSiteFixture}
 	}
-	unreadable := func() (string, error) { return "", errors.New("no such file") }
+	unreadable := func() (storefrontSites, error) { return storefrontSites{}, errors.New("no such file") }
 	cases := []struct {
 		name         string
 		cfg          config
-		live         func() (string, error)
+		live         func() (storefrontSites, error)
 		refuse       bool
 		errHas       []string
+		warnHas      []string
 		wantWarnings int
 	}{
 		{name: "own site", cfg: cfgWith("SIM1", "SIM1", false), live: liveSite("site-1")},
@@ -85,6 +121,28 @@ func TestSiteGuard(t *testing.T) {
 			errHas: []string{"invalid-fulfillment-site-id"}},
 		{name: "empty cpt-site", cfg: cfgWith("SIM1", " ", false), live: liveSite("site-1"), refuse: true, errHas: []string{"-cpt-site is empty"}},
 		{name: "cpt-site differs from the order site", cfg: cfgWith("SIM1", "SIM2", false), live: liveSite("site-1"), wantWarnings: 1},
+
+		// ADR 0001 D1: the storefront has two ids, the network's node (siteId) and the warehouse
+		// building serving it (warehouseSiteId); both are refused, each naming the role it plays.
+		{name: "own site, fixture with both ids", cfg: cfgWith("SIM1", "SIM1", false), live: liveSites("site-1", "AUS3")},
+		{name: "cpt-site is the warehouse building", cfg: cfgWith("SIM1", "AUS3", false), live: liveSites("site-1", "AUS3"), refuse: true,
+			errHas: []string{`-cpt-site "AUS3" is the storefront's warehouse building`, "warehouseSiteId", "serves node site-1", "-allow-live-site"}},
+		{name: "order site is the warehouse building", cfg: cfgWith("AUS3", "SIM1", false), live: liveSites("site-1", "AUS3"), refuse: true,
+			errHas: []string{`-site "AUS3" is the storefront's warehouse building`, "outbound-shipping", "-allow-live-site"}},
+		{name: "both flags are the warehouse building", cfg: cfgWith("AUS3", "AUS3", false), live: liveSites("site-1", "AUS3"), refuse: true,
+			errHas: []string{`-site "AUS3" is the storefront's warehouse building`}},
+		{name: "warehouse building in another case", cfg: cfgWith("SIM1", "aus3", false), live: liveSites("site-1", "AUS3"), refuse: true,
+			errHas: []string{"warehouse building"}},
+		{name: "cpt-site is still the node with a building declared", cfg: cfgWith("SIM1", "site-1", false), live: liveSites("site-1", "AUS3"), refuse: true,
+			errHas: []string{`-cpt-site "site-1" is the storefront's fulfilment site`, "siteId", "THROUGHPUT_CONSTRAINED 0"}},
+		{name: "the node is named by its role, not as the building", cfg: cfgWith("SIM1", "site-1", false), live: liveSites("site-1", "AUS3"), refuse: true,
+			errHas: []string{"network node"}},
+		{name: "allow-live-site on the building", cfg: cfgWith("AUS3", "AUS3", true), live: liveSites("site-1", "AUS3"), wantWarnings: 1,
+			warnHas: []string{"warehouseSiteId", "make provision-storefront"}},
+		{name: "old fixture without a building still guards the node", cfg: cfgWith("SIM1", "site-1", false), live: liveSites("site-1", ""), refuse: true,
+			errHas: []string{`-cpt-site "site-1" is the storefront's fulfilment site`}},
+		{name: "old fixture without a building lets any other site through", cfg: cfgWith("AUS3", "AUS3", false), live: liveSites("site-1", "")},
+		{name: "a site unrelated to either id", cfg: cfgWith("SIM2", "SIM2", false), live: liveSites("site-1", "AUS3")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,6 +157,11 @@ func TestSiteGuard(t *testing.T) {
 			}
 			if len(warnings) != tc.wantWarnings {
 				t.Errorf("warnings %v, want %d", warnings, tc.wantWarnings)
+			}
+			for _, s := range tc.warnHas {
+				if !strings.Contains(strings.Join(warnings, "\n"), s) {
+					t.Errorf("warnings %v do not say %q", warnings, s)
+				}
 			}
 		})
 	}

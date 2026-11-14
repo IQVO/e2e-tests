@@ -373,11 +373,12 @@ worked end to end.
 site of its own (`-site` / `DAY_SITE`, default `SIM1`). Every order carries it
 as `fulfillmentSiteId` (order-management ADR 0044) and the compressed UTC truck
 schedule is written to that site's CPT schedule (`-cpt-site` / `DAY_CPT_SITE`
-defaults to `-site`), so the storefront's fulfilment site `site-1`
-(`fixtures/storefront/fulfilment-site.json`) keeps its schedule and its
+defaults to `-site`), so the storefront's fulfilment site `site-1` and the
+warehouse building `AUS3` that serves it (`siteId` and `warehouseSiteId` of
+`fixtures/storefront/fulfilment-site.json`) keep their schedules and their
 promises. Before its first write the simulator reads that fixture and exits 2
-when `-site` or `-cpt-site` is the storefront's site, unless `-allow-live-site`
-is given on purpose; it also refuses a `-site` order-management would reject
+when `-site` or `-cpt-site` is either of them (the message names the role),
+unless `-allow-live-site` is given on purpose; it also refuses a `-site` order-management would reject
 (uppercase letters and digits only). The orders are promised at SIM1 once
 order-management promises at the order's own site; until then they are
 promised against its `DEFAULT_SITE_ID` (read only), and a POST answer that
@@ -641,6 +642,11 @@ make provision-storefront-verify    # read-only verification
   usable stock of the 81 storefront SKUs; the WMS seeders are NOT re-run) -> warehouse-infra's
   `seed-retail-network.py` (network tier; waves are dated, so it runs every time) -> its
   `--check-translation` of network-fulfillment's product dictionary -> `go run ./cmd/seed-storefront`.
+- **Two ids, one schedule:** the storefront's building is `site-1` for the network and the facility-layout
+  site `AUS3` for the warehouse (ADR 0001 D1); the WMS step defines the same CPT schedule under both
+  (`fixtures/storefront/fulfilment-site.json`), checks that `AUS3` exists in facility-layout and never
+  creates it, so `make provision-storefront` sends one new `PUT /sites/AUS3/cpt-schedule` on its first
+  run (not run live; it matters once network-fulfillment's site map is deployed).
 - **`cmd/seed-storefront`:** CHECK (fixture vs real data, SKU -> network title -> catalogue item,
   fails before any write when one is missing) -> PLAN (pure diff, printed per kind) -> APPLY (only
   the diffs: tax table, delivery charges, categories, prices, content create/revise/publish; every
@@ -649,9 +655,12 @@ make provision-storefront-verify    # read-only verification
   only (title, real size and weight, handling tags, department); department, subcategory and price
   are curated in `fixtures/storefront/catalogue.json`.
 - **Tests:** `go test ./cmd/seed-storefront/...` (also `make seed-tests`) seeds the whole fixture
-  twice against a contract fake of offer-availability, pricing, product-content, product-discovery
-  and the BFF that enforces their invariants (second run: zero writes), plus an interrupted run, a
-  lost response, a missing catalogue title, WITHDRAWN/RETIRED handling and the content rules.
+  twice against a contract fake of offer-availability, pricing, product-content, product-discovery,
+  the BFF, process-path-management (one CPT schedule per site) and facility-layout's site read, that
+  enforces their invariants (second run: zero writes), plus an interrupted run, a lost response, a
+  missing catalogue title, WITHDRAWN/RETIRED handling, the content rules, the `AUS3` schedule
+  (first run writes both ids, a hand edit is restored with one PUT, a missing facility-layout site
+  fails CHECK before any write).
 
 ## Service lifecycle notes
 

@@ -107,12 +107,23 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return res, fmt.Errorf("check: process-path-management CPT schedule of %s: %w", site.SiteID, err)
 	}
 	logf("check: fulfilment site %s: CPT schedule %s agrees with the network node profile; eligible paths Active", site.SiteID, describeSchedule(site.Timezone, site.Cutoffs))
+	// the warehouse building serving the node (ADR 0001 D1): the same schedule under its own id,
+	// and only for a site facility-layout knows (never created here)
+	fsite, err := checkWarehouseSite(ctx, c, site, cfg.SitePath)
+	if err != nil {
+		return res, fmt.Errorf("check: %w", err)
+	}
+	building, err := observeCPT(ctx, c, site.WarehouseSiteID)
+	if err != nil {
+		return res, fmt.Errorf("check: process-path-management CPT schedule of %s: %w", site.WarehouseSiteID, err)
+	}
+	logf("check: warehouse building %s (serves node %s): facility-layout knows the site (%s); it carries the same CPT schedule as the node, one list of cutoffs for both ids", site.WarehouseSiteID, site.SiteID, fsite.Status)
 	if cfg.WMSOnly {
 		skus := make([]string, 0, len(fx.Products))
 		for _, p := range fx.Products {
 			skus = append(skus, p.SKU)
 		}
-		return runWMSOnly(ctx, c, cfg, skus, site, cpt, res, logf)
+		return runWMSOnly(ctx, c, cfg, skus, site, cpt, building, res, logf)
 	}
 
 	// ---- CHECK: catalogue items by exact title ----
@@ -136,7 +147,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("check: %w", err)
 	}
-	desired.Site, obs.CPT = site, cpt
+	desired.Site, obs.CPT, obs.Building = site, cpt, building
 
 	// ---- PLAN ----
 	plan := BuildPlan(*desired, *obs)
@@ -162,14 +173,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		start := time.Now()
 		var err error
 		// the WMS step first: the promise of every storefront product depends on it
-		if plan.CPTSchedule != nil {
-			if err = applyCPT(ctx, c, site.SiteID, *plan.CPTSchedule); err == nil {
-				cptWritten = time.Now()
-				logf("apply: wms: CPT schedule of %s defined: %s", site.SiteID, describeSchedule(plan.CPTSchedule.Timezone, plan.CPTSchedule.Cutoffs))
-			} else {
-				err = fmt.Errorf("define the CPT schedule of %s: %w", site.SiteID, err)
-			}
-		}
+		cptWritten, err = applyCPTSchedules(ctx, c, plan, site, logf)
 		if err == nil {
 			err = apply(ctx, c, plan, obs.Tree, fx.Currency)
 		}
@@ -192,6 +196,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 	rep := verify(ctx, c, desired, fx, tree, cfg)
 	rep.Offers = offers
+	if line, problem := verifyBuildingCPT(ctx, c, site); problem != "" {
+		rep.Failures = append(rep.Failures, problem)
+	} else {
+		rep.Building = line
+	}
 	rep.Warnings = append(offers.Warnings(), rep.Warnings...)
 	res.Verify = rep
 	for _, l := range rep.Lines() {

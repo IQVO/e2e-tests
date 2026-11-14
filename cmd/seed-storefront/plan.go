@@ -83,7 +83,8 @@ type Observed struct {
 	Tree     CategoryTree
 	Prices   map[string]*ItemPrice      // by catalogItemId; nil: none (404)
 	Contents map[string]*ProductContent // by catalogItemId; nil: none (404)
-	CPT      *CPTSchedule               // the fulfilment site's CPT schedule; nil: none (404)
+	CPT      *CPTSchedule               // the fulfilment site's CPT schedule (siteId); nil: none (404)
+	Building *CPTSchedule               // the warehouse building's CPT schedule (warehouseSiteId); nil: none (404)
 }
 
 // ---- desired state ----
@@ -131,6 +132,11 @@ type Plan struct {
 	Contents       []ContentAction
 	Blocked        []string // products the seeder must not (cannot) converge: WITHDRAWN price, RETIRED content
 
+	// The same CPT schedule under the warehouse building's id (warehouseSiteId, ADR 0001 D1).
+	BuildingSchedule *DefineCPTScheduleRequest // PUT this schedule; nil = the building's live one already matches (or not managed)
+	BuildingSite     string                    // the warehouse building ("" = not managed)
+	BuildingCurrent  string                    // the building's observed schedule, rendered ("none" when absent)
+
 	TaxCurrent, ChargesCurrent         int // version observed (0 = none)
 	CategoriesPresent                  int
 	PricesUnchanged, ContentsUnchanged int
@@ -162,10 +168,13 @@ type ContentAction struct {
 	CategoryPath  string
 }
 
-// Writes is the number of writes (the CPT schedule PUT and the POSTs) the plan sends.
+// Writes is the number of writes (the CPT schedule PUTs and the POSTs) the plan sends.
 func (p *Plan) Writes() int {
 	n := len(p.Categories) + len(p.Prices)
 	if p.CPTSchedule != nil {
+		n++
+	}
+	if p.BuildingSchedule != nil {
 		n++
 	}
 	if p.TaxTable != nil {
@@ -203,6 +212,7 @@ func BuildPlan(d Desired, o Observed) *Plan {
 	// WMS: the fulfilment site's CPT schedule, compared by timezone and cutoffs (order-insensitive)
 	if d.Site != nil {
 		planCPT(p, d.Site, o.CPT)
+		planBuildingCPT(p, d.Site, o.Building)
 	}
 	// tax table: compared as a set of bands
 	if o.Tax != nil {
@@ -378,6 +388,13 @@ func (p *Plan) Summary() []string {
 		cpt = append(cpt, fmt.Sprintf("cpt schedule (WMS): %s current %s matches, skip", p.CPTSite, p.CPTCurrent))
 	default:
 		cpt = append(cpt, fmt.Sprintf("cpt schedule (WMS): %s define %s (current %s differs or is missing)", p.CPTSite, describeSchedule(p.CPTSchedule.Timezone, p.CPTSchedule.Cutoffs), p.CPTCurrent))
+	}
+	switch {
+	case p.BuildingSite == "":
+	case p.BuildingSchedule == nil:
+		cpt = append(cpt, fmt.Sprintf("cpt schedule (WMS building): %s current %s matches, skip", p.BuildingSite, p.BuildingCurrent))
+	default:
+		cpt = append(cpt, fmt.Sprintf("cpt schedule (WMS building): %s define %s (current %s differs or is missing)", p.BuildingSite, describeSchedule(p.BuildingSchedule.Timezone, p.BuildingSchedule.Cutoffs), p.BuildingCurrent))
 	}
 	if p.WMSOnly {
 		return append(cpt, fmt.Sprintf("writes planned    : %d", p.Writes()))

@@ -16,19 +16,30 @@ import (
 )
 
 // The WMS step: the CPT (critical pull time) schedule of the fulfilment site in
-// process-path-management. network-fulfillment (SITE_ID site-1) advertises each listing's quantity
-// as min(usable stock, process-path capacity before the site's NEXT cutoff of this schedule), and
-// the network declares the same node with the cutoffs of the network data file's node profile. A
-// schedule that disagrees (a warehouse-day run from before it moved to its own site SIM1, or one
-// with -allow-live-site, leaves compressed UTC truck times behind)
-// turns every listing THROUGHPUT_CONSTRAINED 0: nothing is in stock in the storefront.
+// process-path-management, defined under TWO ids from one list of cutoffs (ADR 0001 D1):
+//
+//   - siteId (site-1): the NETWORK's id of the storefront's building. network-fulfillment
+//     (SITE_ID site-1) advertises each listing's quantity as min(usable stock, process-path
+//     capacity before the site's NEXT cutoff of this schedule), and the network declares the same
+//     node with the cutoffs of the network data file's node profile. A schedule that disagrees (a
+//     warehouse-day run from before it moved to its own site SIM1, or one with -allow-live-site,
+//     leaves compressed UTC truck times behind) turns every listing THROUGHPUT_CONSTRAINED 0:
+//     nothing is in stock in the storefront.
+//   - warehouseSiteId (AUS3): the facility-layout site of the warehouse building that serves the
+//     node. order-management, facility-layout and outbound-shipping accept only site codes of
+//     ^[A-Z0-9]+$, so network-fulfillment (NETWORK_SITE_MAP site-1=AUS3) sends AUS3 as the
+//     order's fulfillmentSiteId; order-management then promises against the schedule of AUS3 and
+//     outbound-shipping needs a CPTScheduleChanged for AUS3. The seeder only checks that
+//     facility-layout knows the site (the provisioning catalogue creates it), never creates it.
 
 // SiteFixture is fixtures/storefront/fulfilment-site.json: the CPT schedule the fulfilment site
-// must carry, in the shape of process-path-management's DefineCPTScheduleRequest plus the site id.
+// must carry, in the shape of process-path-management's DefineCPTScheduleRequest plus the two
+// site ids it is written under.
 type SiteFixture struct {
-	SiteID   string   `json:"siteId"`
-	Timezone string   `json:"timezone"`
-	Cutoffs  []Cutoff `json:"cutoffs"`
+	SiteID          string   `json:"siteId"`          // the network's id of the building (node vendorNodeCode, SITE_ID)
+	WarehouseSiteID string   `json:"warehouseSiteId"` // the facility-layout site of the building that serves it
+	Timezone        string   `json:"timezone"`
+	Cutoffs         []Cutoff `json:"cutoffs"`
 }
 
 // Cutoff is process-path-management's Cutoff (request and response shape).
@@ -68,6 +79,10 @@ var weekdays = []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 
 var localTimeRE = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
 
+// warehouseSiteRE is the site code order-management (fulfillmentSiteId, ADR 0044), facility-layout
+// (siteCode) and outbound-shipping accept: uppercase letters and digits only.
+var warehouseSiteRE = regexp.MustCompile(`^[A-Z0-9]+$`)
+
 // LoadSiteFixture reads the fulfilment-site fixture.
 func LoadSiteFixture(path string) (*SiteFixture, error) {
 	raw, err := os.ReadFile(path)
@@ -88,6 +103,14 @@ func (s *SiteFixture) Validate() []string {
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 	if strings.TrimSpace(s.SiteID) == "" {
 		add("siteId is empty")
+	}
+	switch {
+	case s.WarehouseSiteID == "":
+		add("warehouseSiteId is empty: the warehouse building that serves node %s (a facility-layout site code, ADR 0001 D1)", s.SiteID)
+	case !warehouseSiteRE.MatchString(s.WarehouseSiteID):
+		add("warehouseSiteId %q is not ^[A-Z0-9]+$: order-management, facility-layout and outbound-shipping accept no other site code", s.WarehouseSiteID)
+	case strings.EqualFold(s.WarehouseSiteID, s.SiteID):
+		add("warehouseSiteId and siteId are both %q: the network's node and the warehouse building serving it are two ids, and they must differ", s.SiteID)
 	}
 	if _, err := time.LoadLocation(s.Timezone); s.Timezone == "" || s.Timezone == "Local" || err != nil {
 		add("timezone %q is not an IANA zone", s.Timezone)
@@ -261,12 +284,26 @@ func planCPT(p *Plan, site *SiteFixture, observed *CPTSchedule) {
 	}
 }
 
+// planBuildingCPT puts the warehouse building's CPT schedule into the plan: the SAME schedule as
+// the node's (one list of cutoffs in the fixture), under warehouseSiteId, and nothing when the
+// observed one already has the fixture's timezone and cutoffs.
+func planBuildingCPT(p *Plan, site *SiteFixture, observed *CPTSchedule) {
+	p.BuildingSite, p.BuildingCurrent = site.WarehouseSiteID, "none"
+	if observed != nil {
+		p.BuildingCurrent = describeSchedule(observed.Timezone, observed.Cutoffs)
+	}
+	if want := site.Request(); !sameSchedule(observed, want) {
+		p.BuildingSchedule = &want
+	}
+}
+
 // runWMSOnly is the -wms-only run (scripts/10 step 2, before the network tier, whose verify needs
 // listings with stock): PLAN, APPLY and VERIFY of the CPT schedule alone. The capability offers
 // are a diagnostic: they never fail it.
-func runWMSOnly(ctx context.Context, c *client, cfg Config, skus []string, site *SiteFixture, observed *CPTSchedule, res *Result, logf func(string, ...any)) (*Result, error) {
+func runWMSOnly(ctx context.Context, c *client, cfg Config, skus []string, site *SiteFixture, observed, building *CPTSchedule, res *Result, logf func(string, ...any)) (*Result, error) {
 	plan := &Plan{WMSOnly: true}
 	planCPT(plan, site, observed)
+	planBuildingCPT(plan, site, building)
 	res.Plan = plan
 	logf("plan:")
 	for _, l := range plan.Summary() {
@@ -280,16 +317,11 @@ func runWMSOnly(ctx context.Context, c *client, cfg Config, skus []string, site 
 	if !cfg.VerifyOnly {
 		start := time.Now()
 		var err error
-		if plan.CPTSchedule != nil {
-			if err = applyCPT(ctx, c, site.SiteID, *plan.CPTSchedule); err == nil {
-				written = time.Now()
-				logf("apply: wms: CPT schedule of %s defined: %s", site.SiteID, describeSchedule(plan.CPTSchedule.Timezone, plan.CPTSchedule.Cutoffs))
-			}
-		}
+		written, err = applyCPTSchedules(ctx, c, plan, site, logf)
 		res.Writes, res.WritesByKey = c.totalWrites(), c.writes
 		logf("apply: %d writes in %s (cpt-schedule %d)", res.Writes, time.Since(start).Round(time.Millisecond), c.writes["cpt-schedule"])
 		if err != nil {
-			return res, fmt.Errorf("apply: define the CPT schedule of %s: %w (re-run: the PUT is a wholesale replacement)", site.SiteID, err)
+			return res, fmt.Errorf("apply: %w (re-run: the PUT is a wholesale replacement)", err)
 		}
 	}
 	offers := verifyOffers(ctx, c, site.SiteID, skus, written, cfg)
@@ -297,8 +329,35 @@ func runWMSOnly(ctx context.Context, c *client, cfg Config, skus []string, site 
 	for _, w := range offers.Warnings() {
 		logf("  WARNING %s", w)
 	}
-	logf("verify: PASS (wms: the capability offers are reported, never a failure)")
+	line, problem := verifyBuildingCPT(ctx, c, site)
+	if problem != "" {
+		return res, fmt.Errorf("verify: %s", problem)
+	}
+	logf("%s", line)
+	logf("verify: PASS (wms: the building's schedule equals the fixture; the capability offers are reported, never a failure)")
 	return res, nil
+}
+
+// applyCPTSchedules PUTs the plan's CPT schedules, the node's (siteId) first, then the
+// warehouse building's (warehouseSiteId): each only when planned. It returns when the node's was
+// written (VERIFY's capability offers wait for a recompute after it) and stops at the first
+// failure: a rerun reads the new state and converges.
+func applyCPTSchedules(ctx context.Context, c *client, plan *Plan, site *SiteFixture, logf func(string, ...any)) (time.Time, error) {
+	var written time.Time
+	if plan.CPTSchedule != nil {
+		if err := applyCPT(ctx, c, site.SiteID, *plan.CPTSchedule); err != nil {
+			return written, fmt.Errorf("define the CPT schedule of %s: %w", site.SiteID, err)
+		}
+		written = time.Now()
+		logf("apply: wms: CPT schedule of %s defined: %s", site.SiteID, describeSchedule(plan.CPTSchedule.Timezone, plan.CPTSchedule.Cutoffs))
+	}
+	if plan.BuildingSchedule != nil {
+		if err := applyCPT(ctx, c, site.WarehouseSiteID, *plan.BuildingSchedule); err != nil {
+			return written, fmt.Errorf("define the CPT schedule of %s (the warehouse building serving %s): %w", site.WarehouseSiteID, site.SiteID, err)
+		}
+		logf("apply: wms: CPT schedule of %s defined: %s", site.WarehouseSiteID, describeSchedule(plan.BuildingSchedule.Timezone, plan.BuildingSchedule.Cutoffs))
+	}
+	return written, nil
 }
 
 // readActivePaths lists process-path-management's Active process paths (GET /process-paths
@@ -332,6 +391,67 @@ func observeCPT(ctx context.Context, c *client, siteID string) (*CPTSchedule, er
 	default:
 		return nil, err
 	}
+}
+
+// FacilitySite is the slice of facility-layout's Site (GET /sites/{siteCode}) CHECK reads.
+type FacilitySite struct {
+	SiteCode string `json:"siteCode"`
+	Name     string `json:"name"`
+	Status   string `json:"status"` // Active, UnderMaintenance, Decommissioned
+}
+
+// readFacilitySite reads facility-layout's site; nil when the code was never registered (404).
+func readFacilitySite(ctx context.Context, c *client, code string) (*FacilitySite, error) {
+	var s FacilitySite
+	switch err := c.get(ctx, c.base+"/facility-layout/sites/"+url.PathEscape(code), &s); {
+	case err == nil:
+		return &s, nil
+	case isStatus(err, http.StatusNotFound):
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
+// provisionBuildingHint is the command that registers a site of the provisioning catalogue.
+func provisionBuildingHint(code string) string {
+	return "cd ~/warehouse-systems/provisioning && ./run_all.sh --only " + code
+}
+
+// checkWarehouseSite proves facility-layout knows the warehouse building (and it is not
+// decommissioned). A missing site is a CHECK failure that names the provisioning command: the
+// seeder never creates a site (the catalogue owns the layouts), and a CPT schedule for a building
+// no order can name would be dead data.
+func checkWarehouseSite(ctx context.Context, c *client, site *SiteFixture, fixturePath string) (*FacilitySite, error) {
+	fs, err := readFacilitySite(ctx, c, site.WarehouseSiteID)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("facility-layout site %s (warehouseSiteId of %s): %w", site.WarehouseSiteID, fixturePath, err)
+	case fs == nil:
+		return nil, fmt.Errorf("the warehouse building %s (warehouseSiteId of %s, serving node %s) is not a facility-layout site (GET /facility-layout/sites/%s answered 404); nothing written. This seeder never creates a site: register it from the provisioning catalogue (%s; see its README), then rerun", site.WarehouseSiteID, fixturePath, site.SiteID, site.WarehouseSiteID, provisionBuildingHint(site.WarehouseSiteID))
+	case strings.EqualFold(fs.Status, "Decommissioned"):
+		return nil, fmt.Errorf("the warehouse building %s (warehouseSiteId of %s, serving node %s) is Decommissioned in facility-layout, which is one-way: no order can be fulfilled there; nothing written. Point warehouseSiteId at a live site of the provisioning catalogue (%s registers one)", site.WarehouseSiteID, fixturePath, site.SiteID, provisionBuildingHint(site.WarehouseSiteID))
+	}
+	return fs, nil
+}
+
+// verifyBuildingCPT reads the warehouse building's CPT schedule back and compares it with the
+// fixture's (order-insensitively). It returns the report line, or a problem when the schedule is
+// missing or differs: order-management would promise against the wrong cutoffs and
+// outbound-shipping would have none.
+func verifyBuildingCPT(ctx context.Context, c *client, site *SiteFixture) (line, problem string) {
+	id := site.WarehouseSiteID
+	got, err := observeCPT(ctx, c, id)
+	want := site.Request()
+	switch {
+	case err != nil:
+		return "", fmt.Sprintf("process-path-management CPT schedule of %s (warehouse building of %s) could not be read: %v", id, site.SiteID, err)
+	case got == nil:
+		return "", fmt.Sprintf("%s (warehouse building of %s) has no CPT schedule in process-path-management: order-management has nothing to promise against and outbound-shipping no cutoffs; run make provision-storefront (one PUT /sites/%s/cpt-schedule)", id, site.SiteID, id)
+	case !sameSchedule(got, want):
+		return "", fmt.Sprintf("the CPT schedule of %s (warehouse building of %s) is %s and differs from the fixture's %s; run make provision-storefront", id, site.SiteID, describeSchedule(got.Timezone, got.Cutoffs), describeSchedule(want.Timezone, want.Cutoffs))
+	}
+	return fmt.Sprintf("verify: process-path-management CPT schedule of %s (warehouse building of %s) equals the fixture: %s", id, site.SiteID, describeSchedule(got.Timezone, got.Cutoffs)), ""
 }
 
 // applyCPT defines (wholesale-replaces) the site's CPT schedule.
