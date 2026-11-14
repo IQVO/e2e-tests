@@ -152,7 +152,7 @@ func scriptedCrew(t *testing.T, answers ...scriptedAnswer) (*Crew, *scripted, *t
 	return c, s, clock
 }
 
-func post(c *Crew) sim.Resp {
+func postX(c *Crew) sim.Resp {
 	return c.C.Call(context.Background(), SvcInbound, http.MethodPost, "/x", "/x", map[string]any{})
 }
 
@@ -163,7 +163,7 @@ func TestCallTransientRetriesOnlyTheExactStatusAndSlugWithAFreshKeyEachTime(t *t
 		scriptedAnswer{status: 422, slug: "unknown-asn"},
 		scriptedAnswer{status: 422, slug: "unknown-asn"},
 		scriptedAnswer{status: 201})
-	r, err := c.callTransient(context.Background(), "book", []outbound.Transient{lagUnknownASN}, func() sim.Resp { return post(c) })
+	r, err := c.callTransient(context.Background(), "book", []outbound.Transient{lagUnknownASN}, func() sim.Resp { return postX(c) })
 	if err != nil || r.Status != 201 {
 		t.Fatalf("callTransient = %d, %v; want 201", r.Status, err)
 	}
@@ -194,7 +194,7 @@ func TestCallTransientDoesNotRetryOtherRefusals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, s, _ := scriptedCrew(t, tc.a)
-			_, err := c.callTransient(context.Background(), "book", []outbound.Transient{lagUnknownASN}, func() sim.Resp { return post(c) })
+			_, err := c.callTransient(context.Background(), "book", []outbound.Transient{lagUnknownASN}, func() sim.Resp { return postX(c) })
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want it to name %q", err, tc.want)
 			}
@@ -219,7 +219,7 @@ func TestCallTransientFailsAtOnceOnATransportError(t *testing.T) {
 
 func TestCallTransientTimeoutNamesTheLagThatNeverCleared(t *testing.T) {
 	c, s, _ := scriptedCrew(t, scriptedAnswer{status: 422, slug: "unknown-asn"})
-	_, err := c.callTransient(context.Background(), "book door", []outbound.Transient{lagUnknownASN}, func() sim.Resp { return post(c) })
+	_, err := c.callTransient(context.Background(), "book door", []outbound.Transient{lagUnknownASN}, func() sim.Resp { return postX(c) })
 	if err == nil || !IsTimeout(err) || !strings.Contains(err.Error(), "422 unknown-asn") {
 		t.Fatalf("err = %v, want a timeout naming 422 unknown-asn", err)
 	}
@@ -230,7 +230,7 @@ func TestCallTransientTimeoutNamesTheLagThatNeverCleared(t *testing.T) {
 
 func TestSlugIsTheFleetCodeElseTheLastSegmentOfType(t *testing.T) {
 	c, _, _ := scriptedCrew(t, scriptedAnswer{status: 409, code: "package-not-found"})
-	if got := outbound.Slug(post(c)); got != "package-not-found" {
+	if got := outbound.Slug(postX(c)); got != "package-not-found" {
 		t.Errorf("slug = %q", got)
 	}
 }
