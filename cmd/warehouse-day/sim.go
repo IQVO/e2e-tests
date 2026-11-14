@@ -186,7 +186,7 @@ type sim struct {
 
 func newSim(cfg config) *sim {
 	stats := newCallStats()
-	return &sim{
+	s := &sim{
 		cfg:      cfg,
 		api:      newAPI(cfg, stats),
 		stats:    stats,
@@ -195,6 +195,8 @@ func newSim(cfg config) *sim {
 		totes:    make(chan tote, 1024),
 		conveyor: make(chan parcel, 1024),
 	}
+	s.suspend.Log = logf
+	return s
 }
 
 func (s *sim) rf() float64 {
@@ -221,7 +223,7 @@ const suspendGrace = 6 * time.Minute
 
 func (s *sim) finding(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	duringSuspend := s.suspend.covers(time.Now(), suspendGrace)
+	duringSuspend := s.suspend.Covers(time.Now(), suspendGrace)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, f := range append(s.findings, s.findingsDuringSuspend...) {
@@ -261,9 +263,9 @@ func fail(format string, args ...any) error { return setupError{fmt.Sprintf(form
 func (s *sim) healthCheck(ctx context.Context) error {
 	var down []string
 	for _, svc := range allServices {
-		r := s.api.call(ctx, svc, http.MethodGet, "/healthz", "/healthz", nil)
-		if r.status != http.StatusOK {
-			down = append(down, fmt.Sprintf("%s(%d)", svc, r.status))
+		r := s.api.Call(ctx, svc, http.MethodGet, "/healthz", "/healthz", nil)
+		if r.Status != http.StatusOK {
+			down = append(down, fmt.Sprintf("%s(%d)", svc, r.Status))
 		}
 	}
 	if len(down) > 0 {
@@ -298,8 +300,8 @@ func (s *sim) ensureProcessPaths(ctx context.Context) error {
 		Status string `json:"status"`
 	}
 	existing, r := listAll[pathRow](ctx, s.api, svcProcessPath, "/process-paths", "/process-paths")
-	if !r.ok() {
-		return fail("GET /process-paths -> %d %s", r.status, truncate(string(r.body), 200))
+	if !r.OK() {
+		return fail("GET /process-paths -> %d %s", r.Status, truncate(string(r.Body), 200))
 	}
 	have := map[string]bool{}
 	for _, p := range existing {
@@ -311,12 +313,12 @@ func (s *sim) ensureProcessPaths(ctx context.Context) error {
 		if have[p.id] {
 			continue
 		}
-		r := s.api.call(ctx, svcProcessPath, http.MethodPost, "/process-paths", "/process-paths", map[string]any{
+		r := s.api.Call(ctx, svcProcessPath, http.MethodPost, "/process-paths", "/process-paths", map[string]any{
 			"pathId": p.id, "matchPrefix": p.prefix, "direct": true,
 			"requiredCapabilities": []string{p.capability}, "cycleTimeP95": "2h0m0s",
 		})
-		if !r.ok() && r.status != http.StatusConflict {
-			return fail("define process path %s -> %d %s", p.id, r.status, truncate(string(r.body), 200))
+		if !r.OK() && r.Status != http.StatusConflict {
+			return fail("define process path %s -> %d %s", p.id, r.Status, truncate(string(r.Body), 200))
 		}
 		logf("engineering", "defined process path %s", p.id)
 	}
@@ -341,10 +343,10 @@ func (s *sim) publishCPTSchedule(ctx context.Context) error {
 	for i, t := range truckCutoffs {
 		logf("transport", "truck %02d:%02d (sim) departs at %s UTC (real CPT, site %s)", t.h, t.m, cutoffs[i]["localTime"], s.cfg.cptSiteID)
 	}
-	r := s.api.call(ctx, svcProcessPath, http.MethodPut, "/sites/{siteId}/cpt-schedule", s.cptSchedulePath(),
+	r := s.api.Call(ctx, svcProcessPath, http.MethodPut, "/sites/{siteId}/cpt-schedule", s.cptSchedulePath(),
 		map[string]any{"timezone": "UTC", "cutoffs": cutoffs})
-	if !r.ok() {
-		return fail("PUT cpt-schedule for %s -> %d %s", s.cfg.cptSiteID, r.status, truncate(string(r.body), 300))
+	if !r.OK() {
+		return fail("PUT cpt-schedule for %s -> %d %s", s.cfg.cptSiteID, r.Status, truncate(string(r.Body), 300))
 	}
 	return nil
 }
@@ -383,11 +385,11 @@ func (s *sim) defineLaborStandards(ctx context.Context) error {
 		"SLAM": 1,
 	}
 	for _, tt := range []string{"PICK", "PACK", "SLAM"} {
-		r := s.api.call(ctx, svcLabor, http.MethodPost, "/standards", "/standards", map[string]any{
+		r := s.api.Call(ctx, svcLabor, http.MethodPost, "/standards", "/standards", map[string]any{
 			"taskType": tt, "expectedSeconds": std[tt],
 		})
-		if !r.ok() {
-			return fail("POST /standards %s -> %d %s", tt, r.status, truncate(string(r.body), 200))
+		if !r.OK() {
+			return fail("POST /standards %s -> %d %s", tt, r.Status, truncate(string(r.Body), 200))
 		}
 	}
 	logf("industrial-eng", "engineered labor standards: PICK %ds, PACK %ds, SLAM 1s", std["PICK"], std["PACK"])
@@ -407,9 +409,9 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 		{"name": "SimShelf", "role": "Storage", "defaultCapacity": map[string]any{"maxWeightKg": 250, "maxVolumeM3": 1.2}},
 		{"name": "SimWorkStation", "role": "WorkCenter"},
 	} {
-		r := s.api.call(ctx, svcFacility, http.MethodPost, "/location-types", "/location-types", lt)
-		if !r.ok() && r.status != http.StatusConflict {
-			return fail("register location type %v -> %d %s", lt["name"], r.status, truncate(string(r.body), 200))
+		r := s.api.Call(ctx, svcFacility, http.MethodPost, "/location-types", "/location-types", lt)
+		if !r.OK() && r.Status != http.StatusConflict {
+			return fail("register location type %v -> %d %s", lt["name"], r.Status, truncate(string(r.Body), 200))
 		}
 	}
 	var rows []map[string]any
@@ -430,9 +432,9 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 			"activities": []string{"Pack"},
 		})
 	}
-	r := s.api.call(ctx, svcFacility, http.MethodPost, "/location-imports", "/location-imports", rows)
-	if !r.ok() {
-		return fail("POST /location-imports -> %d %s", r.status, truncate(string(r.body), 300))
+	r := s.api.Call(ctx, svcFacility, http.MethodPost, "/location-imports", "/location-imports", rows)
+	if !r.OK() {
+		return fail("POST /location-imports -> %d %s", r.Status, truncate(string(r.Body), 300))
 	}
 	var rep struct {
 		RowsSubmitted, SlotsImported, RowsRejected int
@@ -442,7 +444,7 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 			Error        string `json:"error"`
 		} `json:"results"`
 	}
-	if err := r.decode(&rep); err != nil {
+	if err := r.Decode(&rep); err != nil {
 		return err
 	}
 	reused := 0
@@ -462,12 +464,12 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 	for a := 1; a <= storageAisles; a++ {
 		for b := 1; b <= storageBays; b++ {
 			code := s.storageCode(a, b)
-			r := s.api.call(ctx, svcInventory, http.MethodPut, "/bins/{binId}", "/bins/"+url.PathEscape(code), map[string]any{"capacity": binCapacity})
-			if r.status == http.StatusNotFound || r.status == http.StatusMethodNotAllowed {
-				return fail("inventory-storage has no PUT /bins/{binId} (got %d) — deploy inventory-storage with the bin-registration API (claudioed/inventory-storage#112)", r.status)
+			r := s.api.Call(ctx, svcInventory, http.MethodPut, "/bins/{binId}", "/bins/"+url.PathEscape(code), map[string]any{"capacity": binCapacity})
+			if r.Status == http.StatusNotFound || r.Status == http.StatusMethodNotAllowed {
+				return fail("inventory-storage has no PUT /bins/{binId} (got %d) — deploy inventory-storage with the bin-registration API (claudioed/inventory-storage#112)", r.Status)
 			}
-			if !r.ok() && r.status != http.StatusConflict {
-				return fail("PUT /bins/%s -> %d %s", code, r.status, truncate(string(r.body), 200))
+			if !r.OK() && r.Status != http.StatusConflict {
+				return fail("PUT /bins/%s -> %d %s", code, r.Status, truncate(string(r.Body), 200))
 			}
 			if a == storageAisles && b == storageBays {
 				s.overflow = code
@@ -482,9 +484,9 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 
 func (s *sim) receiveAndStow(ctx context.Context, who string, sd skuDef, qty int, bins []string) error {
 	sku := s.sku(sd.key)
-	r := s.api.call(ctx, svcInventory, http.MethodPost, "/stock-receipts", "/stock-receipts", map[string]any{"sku": sku, "quantity": qty})
-	if !r.ok() {
-		return fail("receive %d %s -> %d %s", qty, sku, r.status, truncate(string(r.body), 200))
+	r := s.api.Call(ctx, svcInventory, http.MethodPost, "/stock-receipts", "/stock-receipts", map[string]any{"sku": sku, "quantity": qty})
+	if !r.OK() {
+		return fail("receive %d %s -> %d %s", qty, sku, r.Status, truncate(string(r.Body), 200))
 	}
 	left := qty
 	start := s.ri(len(bins))
@@ -494,14 +496,14 @@ func (s *sim) receiveAndStow(ctx context.Context, who string, sd skuDef, qty int
 			chunk = left
 		}
 		bin := bins[(start+i)%len(bins)]
-		r := s.api.call(ctx, svcInventory, http.MethodPost, "/stowages", "/stowages", map[string]any{"sku": sku, "quantity": chunk, "binId": bin})
+		r := s.api.Call(ctx, svcInventory, http.MethodPost, "/stowages", "/stowages", map[string]any{"sku": sku, "quantity": chunk, "binId": bin})
 		switch {
-		case r.ok():
+		case r.OK():
 			left -= chunk
-		case r.status == http.StatusConflict:
+		case r.Status == http.StatusConflict:
 			continue // bin full or racing — try the next bin
 		default:
-			return fail("stow %d %s into %s -> %d %s", chunk, sku, bin, r.status, truncate(string(r.body), 200))
+			return fail("stow %d %s into %s -> %d %s", chunk, sku, bin, r.Status, truncate(string(r.Body), 200))
 		}
 	}
 	if left > 0 {
@@ -523,18 +525,18 @@ func (s *sim) catalogueProducts(ctx context.Context) error {
 	classified := 0
 	for _, sd := range skuCatalogue {
 		sku := s.sku(sd.key)
-		r := s.api.call(ctx, svcProductMaster, http.MethodPut, "/products/{sku}", "/products/"+url.PathEscape(sku),
+		r := s.api.Call(ctx, svcProductMaster, http.MethodPut, "/products/{sku}", "/products/"+url.PathEscape(sku),
 			map[string]any{"description": fmt.Sprintf("Simulated %s (%.2f kg)", strings.ToLower(sd.key), sd.weightKg)})
-		if !r.ok() {
-			return fail("register %s in product-master -> %d %s", sd.key, r.status, truncate(string(r.body), 200))
+		if !r.OK() {
+			return fail("register %s in product-master -> %d %s", sd.key, r.Status, truncate(string(r.Body), 200))
 		}
 		if !sd.fragile {
 			continue
 		}
-		r = s.api.call(ctx, svcProductMaster, http.MethodPut, "/products/{sku}/classification", "/products/"+url.PathEscape(sku)+"/classification",
+		r = s.api.Call(ctx, svcProductMaster, http.MethodPut, "/products/{sku}/classification", "/products/"+url.PathEscape(sku)+"/classification",
 			map[string]any{"handlingTags": []string{"Fragile"}})
-		if !r.ok() {
-			return fail("classify %s in product-master -> %d %s", sd.key, r.status, truncate(string(r.body), 200))
+		if !r.OK() {
+			return fail("classify %s in product-master -> %d %s", sd.key, r.Status, truncate(string(r.Body), 200))
 		}
 		classified++
 	}
@@ -576,13 +578,13 @@ func (s *sim) planTheDay(ctx context.Context) error {
 			"quantity": int(float64(units) * share),
 		})
 	}
-	r := s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/charge", "/paths/"+s.cfg.wesPickPath+"/charge", map[string]any{"buckets": buckets})
-	if !r.ok() {
-		return fail("POST /paths/PICK/charge -> %d %s", r.status, truncate(string(r.body), 200))
+	r := s.api.Call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/charge", "/paths/"+s.cfg.wesPickPath+"/charge", map[string]any{"buckets": buckets})
+	if !r.OK() {
+		return fail("POST /paths/PICK/charge -> %d %s", r.Status, truncate(string(r.Body), 200))
 	}
-	pr := s.api.call(ctx, svcWorkforce, http.MethodPost, "/paths/{pathId}/plan-proposals", "/paths/PICK/plan-proposals",
+	pr := s.api.Call(ctx, svcWorkforce, http.MethodPost, "/paths/{pathId}/plan-proposals", "/paths/PICK/plan-proposals",
 		map[string]any{"buildingId": s.cfg.buildingID, "charge": float64(units), "plannedRate": 60.0})
-	logf("planner", "forecast %d units across %d trucks; workforce proposal -> %d %s", units, len(buckets), pr.status, truncate(strings.TrimSpace(string(pr.body)), 160))
+	logf("planner", "forecast %d units across %d trucks; workforce proposal -> %d %s", units, len(buckets), pr.Status, truncate(strings.TrimSpace(string(pr.Body)), 160))
 
 	heads := map[string]int{
 		"PICK": s.cfg.pickers + s.cfg.flex, "PACK": s.cfg.packers + s.cfg.flex,
@@ -598,20 +600,20 @@ func (s *sim) planTheDay(ctx context.Context) error {
 			"plannedHours": float64(heads[p]) * 8, "installedStations": heads[p],
 		})
 	}
-	r = s.api.call(ctx, svcWorkforce, http.MethodPost, "/shift-plans", "/shift-plans",
+	r = s.api.Call(ctx, svcWorkforce, http.MethodPost, "/shift-plans", "/shift-plans",
 		map[string]any{"buildingId": s.cfg.buildingID, "shiftId": s.shiftID(), "lines": lines})
-	if !r.ok() {
+	if !r.OK() {
 		// Not fatal for the floor (associates are assigned individually),
 		// but the supervisor loses the planned-vs-active staffing view.
-		s.finding("workforce-management rejected the shift plan: %d %s", r.status, truncate(string(r.body), 220))
+		s.finding("workforce-management rejected the shift plan: %d %s", r.Status, truncate(string(r.Body), 220))
 	} else {
 		s.shiftPlanned = true
 	}
-	r = s.api.call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/plan", "/paths/"+s.cfg.wesPickPath+"/plan", map[string]any{
+	r = s.api.Call(ctx, svcWES, http.MethodPost, "/paths/{pathId}/plan", "/paths/"+s.cfg.wesPickPath+"/plan", map[string]any{
 		"plannedHeads": heads["PICK"], "installedStations": heads["PICK"], "rateUnitsPerHour": 60.0, "hours": 8.0,
 	})
-	if !r.ok() {
-		return fail("POST /paths/PICK/plan -> %d %s", r.status, truncate(string(r.body), 200))
+	if !r.OK() {
+		return fail("POST /paths/PICK/plan -> %d %s", r.Status, truncate(string(r.Body), 200))
 	}
 	logf("planner", "shift plan %s (committed=%v; PICK %d, PACK %d, SLAM %d, REBIN %d heads)", s.shiftID(), s.shiftPlanned, heads["PICK"], heads["PACK"], heads["SLAM"], heads["REBIN"])
 	return nil
@@ -745,11 +747,11 @@ type omOrder struct {
 
 func (s *sim) getOrder(ctx context.Context, id string) (omOrder, int) {
 	var o omOrder
-	r := s.api.call(ctx, svcOrder, http.MethodGet, "/orders/{id}", "/orders/"+url.PathEscape(id), nil)
-	if r.ok() {
-		_ = r.decode(&o)
+	r := s.api.Call(ctx, svcOrder, http.MethodGet, "/orders/{id}", "/orders/"+url.PathEscape(id), nil)
+	if r.OK() {
+		_ = r.Decode(&o)
 	}
-	return o, r.status
+	return o, r.Status
 }
 
 // orderBody is the POST /orders request of one simulated customer order.
@@ -769,15 +771,15 @@ func (s *sim) orderBody(o *orderRec) map[string]any {
 }
 
 func (s *sim) placeOrder(ctx context.Context, o *orderRec) {
-	r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders", "/orders", s.orderBody(o))
-	o.intakeHTTP = r.status
+	r := s.api.Call(ctx, svcOrder, http.MethodPost, "/orders", "/orders", s.orderBody(o))
+	o.intakeHTTP = r.Status
 	o.placedWall = time.Now()
-	if r.status != http.StatusCreated {
-		s.finding("POST /orders returned %d for a valid order: %s", r.status, truncate(string(r.body), 200))
+	if r.Status != http.StatusCreated {
+		s.finding("POST /orders returned %d for a valid order: %s", r.Status, truncate(string(r.Body), 200))
 		return
 	}
 	var created omOrder
-	if err := r.decode(&created); err != nil {
+	if err := r.Decode(&created); err != nil {
 		s.finding("POST /orders body undecodable: %v", err)
 		return
 	}
@@ -837,16 +839,16 @@ func (s *sim) customerService(ctx context.Context, wg *sync.WaitGroup) {
 		for _, o := range due {
 			done[o] = true
 			if o.kind == kindHeldRelease {
-				r := s.api.call(ctx, svcOrder, http.MethodPost, "/orders/{id}/releases", "/orders/"+o.id+"/releases", nil)
-				logf("cust-service", "held order #%03d confirmed by customer -> release %d", o.seq, r.status)
-				if !r.ok() {
-					s.finding("releasing held order %s -> %d %s", o.id, r.status, truncate(string(r.body), 200))
+				r := s.api.Call(ctx, svcOrder, http.MethodPost, "/orders/{id}/releases", "/orders/"+o.id+"/releases", nil)
+				logf("cust-service", "held order #%03d confirmed by customer -> release %d", o.seq, r.Status)
+				if !r.OK() {
+					s.finding("releasing held order %s -> %d %s", o.id, r.Status, truncate(string(r.Body), 200))
 				}
 			} else {
-				r := s.api.call(ctx, svcOrder, http.MethodDelete, "/orders/{id}", "/orders/"+o.id, nil)
-				logf("cust-service", "held order #%03d cancelled by customer -> %d", o.seq, r.status)
-				if r.status != http.StatusNoContent {
-					s.finding("cancelling held order %s -> %d %s", o.id, r.status, truncate(string(r.body), 200))
+				r := s.api.Call(ctx, svcOrder, http.MethodDelete, "/orders/{id}", "/orders/"+o.id, nil)
+				logf("cust-service", "held order #%03d cancelled by customer -> %d", o.seq, r.Status)
+				if r.Status != http.StatusNoContent {
+					s.finding("cancelling held order %s -> %d %s", o.id, r.Status, truncate(string(r.Body), 200))
 				} else {
 					s.mu.Lock()
 					o.cancelled = true
