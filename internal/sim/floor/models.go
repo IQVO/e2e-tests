@@ -149,6 +149,9 @@ type orderState struct {
 	failure  error
 	pkg      *pkgDTO
 	packTask string
+
+	releasedEvery bool // every unit was seen past Pending
+	foreign       int  // units of others the release operator admitted on this order's behalf
 }
 
 func (o *orderState) fail(err error) {
@@ -227,4 +230,68 @@ func (o *orderState) sealed() *pkgDTO {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.pkg
+}
+
+func (o *orderState) releasedAll() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.releasedEvery
+}
+
+func (o *orderState) markReleasedAll() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.releasedEvery = true
+}
+
+func (o *orderState) addForeignRelease() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.foreign++
+	return o.foreign
+}
+
+// syncUnitStates records the units' states as wes-work-planning last answered them and returns the
+// units still Pending, by line.
+func (o *orderState) syncUnitStates(state map[string]string) []workUnit {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var pending []workUnit
+	for _, l := range o.lines {
+		if s, found := state[l.Unit.ID]; found {
+			l.Unit.State = s
+		}
+		if l.Unit.State == UnitPending {
+			pending = append(pending, l.Unit)
+		}
+	}
+	return pending
+}
+
+func (o *orderState) line(no int) *lineState {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, l := range o.lines {
+		if l.No == no {
+			return l
+		}
+	}
+	return nil
+}
+
+func (o *orderState) unitState(no int) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, l := range o.lines {
+		if l.No == no {
+			return l.Unit.State
+		}
+	}
+	return ""
+}
+
+func (o *orderState) setPackage(p *pkgDTO, taskID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.pkg, o.packTask = p, taskID
 }
