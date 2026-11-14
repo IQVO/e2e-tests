@@ -24,6 +24,8 @@ type fakeInventory struct {
 	class    map[string]string
 	// staged is what ReceiptLineReceived booked as staged stock: not usable until it is stowed.
 	staged map[string]int
+	// failStow, when set, makes POST /stowages answer that status with the slug "dependency-unavailable".
+	failStow int
 }
 
 func newFakeInventory(w *world) *fakeInventory {
@@ -120,6 +122,9 @@ func (f *fakeInventory) stow(c *fctx) reply {
 	}
 	sku, binID := str(m["sku"]), str(m["binId"])
 	qty, _ := intOf(m["quantity"])
+	if f.failStow != 0 {
+		return refuse(f.failStow, "dependency-unavailable")
+	}
 	if sku == "" || binID == "" {
 		return refuse(400, "stow-requires-item-and-location")
 	}
