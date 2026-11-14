@@ -362,3 +362,59 @@ func TestTheSameOrderTwiceInOneBatchIsProcessedOnce(t *testing.T) {
 		t.Fatalf("results %+v", rs)
 	}
 }
+
+func TestALineTheOrderAlreadyTookOverIsNotScannedIntoRebinTwice(t *testing.T) {
+	// Two parties can notice one completed PICK task at the same time: the picker who completed it and
+	// the order's own look at fulfillment-execution while it waits. Whoever marks the line picked first
+	// scans it in; the other must not.
+	w := newWorld(t)
+	w.addOrder(std("OM-1"))
+	f := provisioned(t, w, Settings{}, Crew{Pickers: 1, Packers: 1})
+	ctx := context.Background()
+	st := &orderState{id: "OM-1"}
+	f.register(st)
+	if err := f.awaitOrder(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.awaitUnits(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	f.registerUnits(st)
+	w.mu.Lock()
+	u := w.wes.units[0]
+	u.State = UnitReleased
+	w.fe.createPick(u)
+	w.mu.Unlock()
+	st.markPicked(st.line(1), cptEvening, false) // the order's own look took line 1 over first
+
+	for i := 0; i < 5 && w.pendingPicks() > 0; i++ {
+		if _, _, err := f.pickStep(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w.pendingPicks() != 0 {
+		t.Fatal("the PICK task was never claimed")
+	}
+	if got := w.callsTo("POST /fulfillment-execution/rebin/arrivals"); got != 0 {
+		t.Fatalf("%d rebin arrivals for a line somebody else had already scanned in", got)
+	}
+	if err := st.failed(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestACancelledContextEndsTheRunWithAFindingAndNoWrites(t *testing.T) {
+	w := newWorld(t)
+	w.addOrder(std("OM-1"))
+	f := provisioned(t, w, Settings{}, Crew{Pickers: 1, Packers: 1})
+	before := w.writes()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := f.Process(ctx, "OM-1")
+	if r.OK() || len(r.Problems) == 0 {
+		t.Fatalf("result %+v", r)
+	}
+	if w.writes() != before {
+		t.Fatalf("%d writes after the context was cancelled", w.writes()-before)
+	}
+}
