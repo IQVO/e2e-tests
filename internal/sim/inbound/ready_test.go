@@ -126,3 +126,25 @@ func TestReadyWithServicesThatAreNotThereIsAnErrorPerCheckNotAPanic(t *testing.T
 		}
 	}
 }
+
+func TestConfigureHandsTheCrewTheDoorsBinsAndGridTheSiteDeclared(t *testing.T) {
+	w := newWorld(t)
+	w.seedSite()
+	w.with(func() { w.dock.calendar[siteCode].grid = 15 })
+	r := Ready(context.Background(), w.client, Site{Code: siteCode, Bins: []string{binA}}, ReadyOptions{})
+	if !r.Ready() {
+		t.Fatalf("not ready:\n%s", r)
+	}
+	c := w.crew(Site{Code: siteCode, Bins: []string{binA}})
+	r.Configure(c)
+	if len(c.Site.Doors) != 2 || len(c.Site.Bins) != 1 || c.GridMinutes != 15 {
+		t.Fatalf("crew = doors %v bins %v grid %d, want the 2 doors found, the 1 bin configured, grid 15", c.Site.Doors, c.Site.Bins, c.GridMinutes)
+	}
+	if w := c.NextWindow(); w.Start.Minute()%15 != 0 {
+		t.Errorf("window starts at minute %d, off the 15 minute grid", w.Start.Minute())
+	}
+	// And a full delivery works on that grid.
+	if d := c.Deliver(context.Background(), []Line{{skuA, 5}}); !d.OK() {
+		t.Errorf("delivery on the 15 minute grid: %+v", d)
+	}
+}

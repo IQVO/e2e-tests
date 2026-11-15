@@ -52,6 +52,16 @@ func (r Readiness) Apply(s Site) Site {
 	return s
 }
 
+// Configure applies what Ready found to the crew: the doors and bins its site left empty (Apply) and the dock
+// calendar's slot granularity, so the appointment windows start and end on the grid the site declared. A calendar
+// that was not read (zero grid) leaves the crew's grid as it was.
+func (r Readiness) Configure(c *Crew) {
+	c.Site = r.Apply(c.Site)
+	if g := r.Calendar.SlotGranularityMinutes; g > 0 {
+		c.GridMinutes = g
+	}
+}
+
 type ready struct {
 	c    *sim.Client
 	site Site
