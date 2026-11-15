@@ -60,7 +60,7 @@ func TestPrepareTakesTheDeadLetterSnapshotBeforeAnythingIsReadOrWritten(t *testi
 	if len(r.cl.requests()) == 0 || len(r.outCalls) == 0 {
 		t.Error("prepare did nothing after the snapshot")
 	}
-	if !strings.Contains(strings.Join(r.logged, "\n"), "dead-letter snapshot taken") {
+	if !strings.Contains(strings.Join(r.logged, "\n"), "prepare: dead letters: %s (taken before anything is read or written)") {
 		t.Errorf("the snapshot is not in the run's log: %v", r.logged)
 	}
 }
@@ -109,7 +109,7 @@ func TestTheBrokerHintNamesTheForwardForTheConfiguredPort(t *testing.T) {
 func TestBrokersIsEmptyOrOneHostPort(t *testing.T) {
 	for addr, ok := range map[string]bool{
 		"": true, "localhost:9092": true, "127.0.0.1:29092": true, "kafka.warehouse-systems.svc:9092": true,
-		"localhost": false, ":9092": false, "localhost:": false, "a:9092,b:9092": false, "9092": false,
+		"localhost": false, ":9092": false, "localhost:": false, "a:9092,b:9092": false, "a,b:9092": false, "9092": false,
 	} {
 		if got := checkBrokers(addr) == ""; got != ok {
 			t.Errorf("checkBrokers(%q) accepted=%v, want %v (%q)", addr, got, ok, checkBrokers(addr))
@@ -183,6 +183,47 @@ func TestNewPhasesWiresTheCompositeOverTheRestCollectorAndTheCounter(t *testing.
 	}
 	if n, known, err := p.Evidence.DeadLetters(context.Background(), "RDT2"); n != 2 || !known || err != nil || len(fd.asked) != 1 {
 		t.Errorf("DeadLetters: (%d, %v, %v), asked %v", n, known, err, fd.asked)
+	}
+}
+
+func TestTheBrokerAddressBuildsTheCounterAndCleanupReleasesIt(t *testing.T) {
+	var asked []string
+	released := 0
+	fd := &fakeDead{known: true}
+	old := newDeadLetterCounter
+	newDeadLetterCounter = func(addr string) (deadLetterCounter, func(), error) {
+		asked = append(asked, addr)
+		return fd, func() { released++ }, nil
+	}
+	t.Cleanup(func() { newDeadLetterCounter = old })
+	_, cfg := phasesRig(t, func(c *wireConfig) { c.Brokers = "127.0.0.1:29092" }, nil)
+	p, cleanup, err := newPhases(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 || asked[0] != "127.0.0.1:29092" {
+		t.Errorf("the counter was built for %v, want the -brokers address once", asked)
+	}
+	if n, known, err := p.Evidence.DeadLetters(context.Background(), "RDT2"); n != 0 || !known || err != nil || len(fd.asked) != 1 {
+		t.Errorf("DeadLetters: (%d, %v, %v), asked %v", n, known, err, fd.asked)
+	}
+	if released != 0 {
+		t.Error("the counter was released before the day ended")
+	}
+	cleanup()
+	if released != 1 {
+		t.Errorf("the counter was released %d time(s) at the end of the day, want 1", released)
+	}
+	// a counter handed in by the caller is the caller's to release, and is not built a second time
+	asked, released = nil, 0
+	_, cfg = phasesRig(t, func(c *wireConfig) { c.Brokers = "127.0.0.1:29092"; c.DeadLetters = fd }, nil)
+	_, cleanup, err = newPhases(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if len(asked) != 0 || released != 0 {
+		t.Errorf("an injected counter was replaced by one built from -brokers: %v, released %d", asked, released)
 	}
 }
 

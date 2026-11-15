@@ -251,7 +251,7 @@ func (c *Counter) Summary() string {
 		topics[p.Topic] = true
 		msgs += end
 	}
-	return fmt.Sprintf("%d %s topic(s), %d partition(s), %d message(s) already on them", len(topics), Suffix, len(c.snap), msgs)
+	return fmt.Sprintf("snapshot of %d %s topic(s), %d partition(s), %d message(s) already on them", len(topics), Suffix, len(c.snap), msgs)
 }
 
 // DeadLetters counts the dead letters of runID appended to any `.dlq` partition since the

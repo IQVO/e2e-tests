@@ -264,7 +264,7 @@ func TestACleanDayPassesEndToEndAndOnlyBecauseTheCountIsKnown(t *testing.T) {
 	if strings.Contains(out, "dead letters:") {
 		t.Errorf("a known count is listed as not verified:\n%s", out)
 	}
-	if !strings.Contains(errs, "dead-letter snapshot taken") {
+	if !strings.Contains(errs, "retail-day: prepare: dead letters: snapshot of 1 .dlq topic(s), 1 partition(s), 1 message(s) already on them (taken before anything is read or written)") {
 		t.Errorf("the snapshot is not in the log:\n%s", errs)
 	}
 	if h.world.preparedN != 1 {

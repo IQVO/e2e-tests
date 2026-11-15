@@ -118,7 +118,7 @@ func snapshotDeadLetters(ctx context.Context, d deadLetterCounter, addr string, 
 		return fmt.Errorf("the dead letters cannot be counted: the snapshot of the Kafka dead-letter topics at %s could not be taken before the day: %w. %s", addr, err, brokerHint(addr))
 	}
 	if logf != nil {
-		logf("prepare: dead-letter snapshot taken before anything is written (%s)", d.Summary())
+		logf("prepare: dead letters: %s (taken before anything is read or written)", d.Summary())
 	}
 	return nil
 }

@@ -658,7 +658,7 @@ func TestTheSnapshotSummarySaysWhatItHolds(t *testing.T) {
 	f.add("warehouse.yard-management.events.dlq", 0, "k", ours(2))
 	f.add("retailnetwork.node-topology.events.dlq", 0, "k", ours(3))
 	mustSnapshot(t, c)
-	if got, want := c.Summary(), "2 .dlq topic(s), 4 partition(s), 3 message(s) already on them"; got != want {
+	if got, want := c.Summary(), "snapshot of 2 .dlq topic(s), 4 partition(s), 3 message(s) already on them"; got != want {
 		t.Errorf("summary %q, want %q", got, want)
 	}
 }
@@ -710,7 +710,8 @@ func TestACancelledContextIsAPromptErrorNeverAZero(t *testing.T) {
 	f.add("retailnetwork.node-topology.events.dlq", 0, "k", ours(1))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	before := len(f.touched())
+	called := make(chan string, 16)
+	f.onCall = func(call string) { called <- call }
 	n, known, err := c.DeadLetters(ctx, runID)
 	if known || n != 0 || !errors.Is(err, context.Canceled) {
 		t.Fatalf("got (%d, %v, %v)", n, known, err)
@@ -718,8 +719,12 @@ func TestACancelledContextIsAPromptErrorNeverAZero(t *testing.T) {
 	if err := New(f, Options{}).Snapshot(ctx); err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("snapshot on a cancelled context: %v", err)
 	}
-	if calls := f.touched()[before:]; len(calls) != 0 {
-		t.Errorf("a cancelled context still reached Kafka: %v", calls)
+	// a call that was started would reach the fake within moments: it must not (this wait can only
+	// fail when a call was made, never because of timing)
+	select {
+	case call := <-called:
+		t.Errorf("a cancelled context still reached Kafka: %s", call)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
