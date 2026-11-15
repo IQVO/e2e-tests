@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/claudioed/warehouse-e2e/internal/paging"
@@ -38,6 +39,9 @@ type Client struct {
 
 // NewClient returns a client with the simulators' 15 s request timeout.
 func NewClient(base map[string]string, stats *CallStats) *Client {
+	if stats == nil {
+		stats = NewCallStats()
+	}
 	return &Client{HTTP: &http.Client{Timeout: 15 * time.Second}, Base: base, Stats: stats}
 }
 
@@ -59,10 +63,12 @@ func trimSlash(s string) string {
 }
 
 // Resp is one HTTP answer: status 0 means a transport error and Body then
-// holds the error text.
+// holds the error text. Header is the response header (nil on a transport
+// error): Idempotency-Replayed, Retry-After, Location.
 type Resp struct {
 	Status int
 	Body   []byte
+	Header http.Header
 }
 
 // OK reports a 2xx answer.
@@ -76,8 +82,10 @@ func (r Resp) Decode(v any) error {
 	return nil
 }
 
-// Call performs one request. route is the templated route used as the
-// metrics key (e.g. "POST /stations/{id}/task-claims"), path the concrete one.
+// Call performs one request. route is the templated route used as the metrics
+// key, path the concrete one. The statistics key is "<service> <METHOD> <route>"; a
+// route written with its method ("POST /stations/{id}/task-claims") and one written
+// without ("/stations/{id}/task-claims") give the same key.
 func (c *Client) Call(ctx context.Context, svc, method, route, path string, body any) Resp {
 	return c.CallWith(ctx, svc, method, route, path, body, nil)
 }
@@ -111,7 +119,7 @@ func (c *Client) CallWith(ctx context.Context, svc, method, route, path string, 
 	for k, v := range extra {
 		req.Header.Set(k, v)
 	}
-	key := svc + " " + method + " " + route
+	key := svc + " " + method + " " + strings.TrimPrefix(route, method+" ")
 	start := time.Now()
 	res, err := c.HTTP.Do(req)
 	if err != nil {
@@ -123,7 +131,7 @@ func (c *Client) CallWith(ctx context.Context, svc, method, route, path string, 
 	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)
 	c.Stats.Record(key, res.StatusCode, time.Since(start), string(b))
-	return Resp{Status: res.StatusCode, Body: b}
+	return Resp{Status: res.StatusCode, Body: b, Header: res.Header.Clone()}
 }
 
 // NewKey mints a random Idempotency-Key.
@@ -145,6 +153,10 @@ func Truncate(s string, n int) string {
 // following nextCursor until it is absent. route is the templated metrics key,
 // as for Call. The returned Resp is the last page's: !OK() means the walk
 // failed and the items are what was read so far.
+//
+// Pages are requested with limit=500 (the guideline's maximum) unless path
+// already carries a limit: a provider with a lower cap (outbound-shipping answers
+// 400 invalid-parameter above 200) is read with path "/x?limit=200".
 func ListAll[T any](ctx context.Context, c *Client, svc, route, path string) ([]T, Resp) {
 	var all []T
 	cursor := ""
