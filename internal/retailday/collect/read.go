@@ -150,6 +150,18 @@ func query(kv ...string) string {
 
 func esc(s string) string { return url.PathEscape(s) }
 
+// optTime is an RFC 3339 instant that may be absent, null or empty: all three are the zero time.
+// A malformed one is an error, so a body that is not the contract is noticed, not read as "none".
+type optTime struct{ time.Time }
+
+func (t *optTime) UnmarshalJSON(b []byte) error {
+	if s := string(b); s == "null" || s == `""` {
+		t.Time = time.Time{}
+		return nil
+	}
+	return t.Time.UnmarshalJSON(b)
+}
+
 // stamp renders an instant the one way every note does.
 func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 

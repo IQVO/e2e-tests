@@ -39,7 +39,9 @@ func (c *Collector) Order(ctx context.Context, p retailday.Placed) (f retailday.
 		r.note("disagree OrderID: no order was placed, but the payment records name order %s", id)
 	}
 
+	// The reads that need only the order id, at the same time; then the ones that need their answers.
 	var shop shopperFacts
+	var src sourcingFacts
 	r.par(
 		func() { shop = r.shopper(id) },
 		func() {
@@ -47,9 +49,11 @@ func (c *Collector) Order(ctx context.Context, p retailday.Placed) (f retailday.
 				m = r.money(id)
 			}
 		},
+		func() { src = r.sourcing(id) },
 	)
 	r.fillMoney(&f, m)
 	f.Status, f.PromiseEnd, f.TrackingNumbers = shop.status, shop.promiseEnd, shop.tracking
+	f.POs, f.DeliveredAt = r.network(id, shop, src)
 	return f, r.sortedNotes()
 }
 

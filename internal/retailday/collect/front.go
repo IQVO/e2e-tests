@@ -23,8 +23,8 @@ type orderView struct {
 		Quantity      int    `json:"quantity"`
 	} `json:"lines"`
 	Groups []struct {
-		Status          string    `json:"status"`
-		DeliverByLatest time.Time `json:"deliverByLatest"`
+		Status          string  `json:"status"`
+		DeliverByLatest optTime `json:"deliverByLatest"`
 	} `json:"groups"`
 }
 
@@ -41,6 +41,9 @@ type shopperFacts struct {
 	status     string
 	promiseEnd time.Time
 	tracking   []string
+	// trackingRead is true when customer-ordering answered (an order with no packages yet answers
+	// with none: tracking is empty and read).
+	trackingRead bool
 }
 
 // shopper reads the order and its tracking at the same time.
@@ -64,6 +67,7 @@ func (r *run) shopper(id string) shopperFacts {
 			if oc != found {
 				return
 			}
+			out.trackingRead = true
 			set := map[string]bool{}
 			for _, g := range t.Groups {
 				for _, p := range g.Packages {
@@ -85,7 +89,7 @@ func promiseEnd(o orderView) time.Time {
 	var end time.Time
 	for _, g := range o.Groups {
 		if g.Status != "CANCELLED" && g.DeliverByLatest.After(end) {
-			end = g.DeliverByLatest
+			end = g.DeliverByLatest.Time
 		}
 	}
 	return end
