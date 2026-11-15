@@ -806,7 +806,10 @@ func (s *run) audit() (string, string) {
 	}
 	shipped := map[string]int{}
 	for _, j := range s.js {
-		if j.buyer.Expect == retailday.Delivered && j.gotFacts && j.facts.Status == "DELIVERED" {
+		// The units left the shelf when the floor labelled the package (the pick is confirmed by then),
+		// whatever became of the order later: an order that failed at the dock or on the road fails on
+		// its own, and the stock rule must not report its units as lost.
+		if j.buyer.Expect == retailday.Delivered && j.pkg != nil {
 			for sku, n := range j.placed.SKUs {
 				shipped[sku] += n
 			}
