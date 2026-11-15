@@ -1,7 +1,7 @@
 // Package collect is the REST collector of the retail day: a retailday.Evidence that follows
 // one placed order across every context over their PUBLISHED REST and fills
-// retailday.OrderFacts, the shelf and the dead-letter evidence the verdict judges (ADR 0001 D5,
-// D6; docs/retail-day-journey.md).
+// retailday.OrderFacts and the shelf the verdict judges (ADR 0001 D5, D6; docs/retail-day-journey.md).
+// The run's dead letters are not on any REST route: see Collector.DeadLetters.
 //
 // It only reads. Every request goes through Collector.get, which can only issue a GET, and the
 // tests prove the contract fakes never received another verb. It is bounded (Settings.Parallel
@@ -186,8 +186,12 @@ func New(client *sim.Client, s Settings) *Collector {
 	return &Collector{c: &cc, set: s, sem: make(chan struct{}, s.Parallel)}
 }
 
-// DeadLetters says it cannot know. A dead letter lives on a Kafka <topic>.dlq topic
-// (warehouse-infra docs/dlq-runbook.md, read with scripts/dlq-redrive.sh over kubectl); no
-// service publishes a route that lists them, and the services' /metrics counters carry no run
-// id. known is false, so the report shows "not verified", never 0.
+// DeadLetters says it cannot know: the collector reads published REST only. A dead letter lives on
+// a Kafka <topic>.dlq topic (warehouse-infra docs/dlq-runbook.md, read with scripts/dlq-redrive.sh
+// over kubectl); no service publishes a route that lists them, and the services' /metrics counters
+// carry no run id. known is false, so a Collector used alone shows "not verified", never 0.
+//
+// cmd/retail-day does not use it alone: its composite Evidence forwards Order and Shelf here and
+// answers DeadLetters from internal/retailday/dlq, a read-only snapshot-and-count of the `*.dlq`
+// topics.
 func (c *Collector) DeadLetters(context.Context, string) (int, bool, error) { return 0, false, nil }
