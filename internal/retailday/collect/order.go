@@ -2,7 +2,6 @@ package collect
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/claudioed/warehouse-e2e/internal/retailday"
 )
@@ -62,9 +61,4 @@ func (c *Collector) Order(ctx context.Context, p retailday.Placed) (f retailday.
 
 func (r *run) fillMoney(f *retailday.OrderFacts, m moneyFacts) {
 	f.TotalMinor, f.AuthorizedMinor, f.CapturedMinor, f.VoidedMinor = m.total, m.authorized, m.captured, m.voided
-}
-
-// Shelf reads each SKU's usable stock and whether the storefront sells it. Not read yet.
-func (c *Collector) Shelf(_ context.Context, skus []string) (map[string]retailday.Shelf, error) {
-	return nil, fmt.Errorf("not read yet")
 }

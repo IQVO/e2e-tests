@@ -70,6 +70,9 @@ type world struct {
 	fails map[string]int
 	// routeFails: one route ("customer-ordering GET /orders/{orderId}") answers this status.
 	routeFails map[string]int
+	// raws: one route ("customer-ordering GET /orders/{orderId}") answers 200 with this JSON
+	// instead of its state, for a body that is not what the contract says.
+	raws map[string]string
 	// failsWhen: a request that matches answers the status (an internal-error problem).
 	failsWhen []failWhen
 	// drops: the connection to the service is closed without an answer (a transport error).
@@ -100,7 +103,7 @@ type world struct {
 // newWorld starts the fake services.
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	w := &world{t: t, mux: http.NewServeMux(), fails: map[string]int{}, routeFails: map[string]int{}, drops: map[string]bool{}}
+	w := &world{t: t, mux: http.NewServeMux(), fails: map[string]int{}, routeFails: map[string]int{}, drops: map[string]bool{}, raws: map[string]string{}}
 	w.ordering = newOrderingFake(w)
 	w.payments = newPaymentsFake(w)
 	w.checkout = newCheckoutFake(w)
@@ -205,6 +208,10 @@ func (w *world) get(svc, pattern string, h func(r *http.Request) reply) {
 			write(rw, problem(st, "internal-error", "an unexpected error occurred"))
 			return
 		}
+		if b, has := w.raws[svc+" GET "+pattern]; has {
+			write(rw, ok(json.RawMessage(b)))
+			return
+		}
 		for _, fw := range w.failsWhen {
 			if fw.svc == svc && fw.match(r) {
 				write(rw, problem(fw.status, "internal-error", "an unexpected error occurred"))
@@ -227,6 +234,13 @@ func (w *world) failRoute(svc, pattern string, status int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.routeFails[svc+" GET "+pattern] = status
+}
+
+// rawBody makes one route answer 200 with the given JSON.
+func (w *world) rawBody(svc, pattern, body string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.raws[svc+" GET "+pattern] = body
 }
 
 // failWhen makes the requests to the service that match answer status.
