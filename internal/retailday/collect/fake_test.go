@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/claudioed/warehouse-e2e/internal/retailday"
 	"github.com/claudioed/warehouse-e2e/internal/sim"
@@ -44,6 +45,12 @@ func problem(status int, slug, detail string) reply {
 
 func notFound(what string) reply { return problem(http.StatusNotFound, "not-found", what) }
 
+type failWhen struct {
+	svc    string
+	match  func(r *http.Request) bool
+	status int
+}
+
 type call struct {
 	Svc, Method, Path, Query string
 	Status                   int
@@ -63,10 +70,18 @@ type world struct {
 	fails map[string]int
 	// routeFails: one route ("customer-ordering GET /orders/{orderId}") answers this status.
 	routeFails map[string]int
+	// failsWhen: a request that matches answers the status (an internal-error problem).
+	failsWhen []failWhen
 	// drops: the connection to the service is closed without an answer (a transport error).
 	drops map[string]bool
 	// links: customer order id -> order-management ids, what the test gives Settings.OrderIDs.
 	links map[string][]string
+	// linger: every request waits this long, or until the client gives up on it.
+	linger time.Duration
+	// gate holds matching requests until enough of them are in flight at once.
+	gate *gate
+	// cur and peak count the requests being served at once.
+	cur, peak int
 
 	ordering *orderingFake
 	payments *paymentsFake
@@ -115,6 +130,26 @@ func (s *statusWriter) WriteHeader(code int) {
 
 func (w *world) serve(rw http.ResponseWriter, r *http.Request) {
 	svc := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 2)[0]
+	w.mu.Lock()
+	w.cur++
+	w.peak = max(w.peak, w.cur)
+	linger, g := w.linger, w.gate
+	w.mu.Unlock()
+	defer func() {
+		w.mu.Lock()
+		w.cur--
+		w.mu.Unlock()
+	}()
+	if g != nil {
+		g.pass(svc, strings.TrimPrefix(r.URL.Path, "/"+svc), r.URL.RawQuery)
+	}
+	if linger > 0 {
+		select {
+		case <-time.After(linger):
+		case <-r.Context().Done():
+			return
+		}
+	}
 	sw := &statusWriter{ResponseWriter: rw, status: http.StatusOK}
 	defer func() {
 		w.mu.Lock()
@@ -170,6 +205,12 @@ func (w *world) get(svc, pattern string, h func(r *http.Request) reply) {
 			write(rw, problem(st, "internal-error", "an unexpected error occurred"))
 			return
 		}
+		for _, fw := range w.failsWhen {
+			if fw.svc == svc && fw.match(r) {
+				write(rw, problem(fw.status, "internal-error", "an unexpected error occurred"))
+				return
+			}
+		}
 		write(rw, h(r))
 	})
 }
@@ -186,6 +227,13 @@ func (w *world) failRoute(svc, pattern string, status int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.routeFails[svc+" GET "+pattern] = status
+}
+
+// failWhen makes the requests to the service that match answer status.
+func (w *world) failWhen(svc string, match func(r *http.Request) bool, status int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.failsWhen = append(w.failsWhen, failWhen{svc, match, status})
 }
 
 // drop makes the service close the connection without answering.
@@ -305,6 +353,48 @@ func pageOf(r *http.Request, maxLimit, n int, item func(i int) any) reply {
 		body["nextCursor"] = "cur-" + strconv.Itoa(end)
 	}
 	return ok(body)
+}
+
+// gate is a rendezvous: a request it matches waits until need matching requests are in flight at
+// the same time, so a test can prove that reads which do not depend on each other are made together
+// (a collector that read them one after the other never reaches need). A request that waits
+// longer than the timeout goes on and the gate remembers it was never joined.
+type gate struct {
+	mu       sync.Mutex
+	need     int
+	arrived  int
+	match    func(svc, path, rawQuery string) bool
+	open     chan struct{}
+	timedOut bool
+}
+
+func newGate(need int, match func(svc, path, rawQuery string) bool) *gate {
+	return &gate{need: need, match: match, open: make(chan struct{})}
+}
+
+func (g *gate) pass(svc, path, rawQuery string) {
+	if !g.match(svc, path, rawQuery) {
+		return
+	}
+	g.mu.Lock()
+	g.arrived++
+	if g.arrived == g.need {
+		close(g.open)
+	}
+	g.mu.Unlock()
+	select {
+	case <-g.open:
+	case <-time.After(5 * time.Second):
+		g.mu.Lock()
+		g.timedOut = true
+		g.mu.Unlock()
+	}
+}
+
+func (g *gate) joined() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return !g.timedOut && g.arrived >= g.need
 }
 
 func q(r *http.Request, k string) string { return r.URL.Query().Get(k) }

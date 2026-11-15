@@ -53,7 +53,10 @@ func (c *Collector) Order(ctx context.Context, p retailday.Placed) (f retailday.
 	)
 	r.fillMoney(&f, m)
 	f.Status, f.PromiseEnd, f.TrackingNumbers = shop.status, shop.promiseEnd, shop.tracking
-	f.POs, f.DeliveredAt = r.network(id, shop, src)
+	net := r.network(id, shop, src)
+	f.POs, f.DeliveredAt = net.pos, net.deliveredAt
+	wh := r.warehouse(id, net.numbers)
+	f.OMOrders, f.WorkUnits, f.PickTasksDone, f.PackTasks, f.Packages, f.ShipmentConfirmations = wh.orders, wh.units, wh.picks, wh.packs, wh.pkgs, wh.shipments
 	return f, r.sortedNotes()
 }
 

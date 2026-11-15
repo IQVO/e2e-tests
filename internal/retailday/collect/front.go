@@ -202,7 +202,7 @@ func (r *run) money(orderID string) moneyFacts {
 			return out
 		}
 		auths = got
-		if want := r.p.AuthorizationID; want != "" && !slices.ContainsFunc(auths, func(a authView) bool { return a.AuthorizationID == want }) {
+		if want := r.p.AuthorizationID; oc == found && want != "" && !slices.ContainsFunc(auths, func(a authView) bool { return a.AuthorizationID == want }) {
 			r.note("disagree AuthorizedMinor: the shopper's authorization %s is not bound to order %s", want, orderID)
 		}
 	case r.p.AuthorizationID != "":

@@ -104,7 +104,7 @@ func TestTheShoppersFiguresAreComparedNotTrusted(t *testing.T) {
 
 	fx.placed.SKUs = map[string]int{"SKU-A": 3, "SKU-B": 1}
 	_, notes = fx.collect(t, c)
-	hasNote(t, notes, "disagree Lines", "SKU-A x3", "SKU-A x2")
+	hasNote(t, notes, "disagree Lines", "SKU-A x3", "customer-ordering holds {SKU-A x2")
 	fx.placed.SKUs = map[string]int{"SKU-A": 2, "SKU-B": 1, "SKU-C": 1}
 	_, notes = fx.collect(t, c)
 	hasNote(t, notes, "disagree Lines: the shopper bought 3 lines, customer-ordering holds 2")

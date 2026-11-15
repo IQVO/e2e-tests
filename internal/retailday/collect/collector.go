@@ -128,6 +128,8 @@ type Collector struct {
 	c   *sim.Client
 	set Settings
 	sem chan struct{}
+	// memo holds the packages of loads that already left, so a run of many orders reads each once.
+	memo loadMemo
 }
 
 var _ retailday.Evidence = (*Collector)(nil)

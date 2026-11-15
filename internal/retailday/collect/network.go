@@ -36,11 +36,13 @@ type release struct {
 	po           string
 }
 
-// sourcingFacts is what order-sourcing holds for the order. ok is false when it could not be read.
+// sourcingFacts is what order-sourcing holds for the order. ok is false when it could not be read;
+// answered is true when it did answer (a 404 is neither: nothing is known, and nothing is wrong).
 type sourcingFacts struct {
 	releases []release
 	tracking []string
 	ok       bool
+	answered bool
 }
 
 // derivePONumber is vendor-connectivity's purchaseorder.NumberFor (ADR 0002 A1, domain code
@@ -54,7 +56,7 @@ func derivePONumber(assignmentID string, releaseNo int) string {
 
 func (r *run) sourcing(id string) sourcingFacts {
 	as, oc := fetchList[assignmentView](r, "POs", "order-sourcing", "/assignments?orderId", "/assignments"+query("orderId", id))
-	out := sourcingFacts{ok: oc != failed}
+	out := sourcingFacts{ok: oc != failed, answered: oc == found}
 	if oc == failed {
 		return out
 	}
@@ -235,7 +237,7 @@ func unionOf(lists ...[]string) []string {
 
 // checkTracking compares what the shopper sees with what order-sourcing holds.
 func (r *run) checkTracking(shop shopperFacts, s sourcingFacts) {
-	if !shop.trackingRead || !s.ok {
+	if !shop.trackingRead || !s.answered {
 		return
 	}
 	if !slices.Equal(shop.tracking, s.tracking) {
@@ -243,10 +245,19 @@ func (r *run) checkTracking(shop shopperFacts, s sourcingFacts) {
 	}
 }
 
+// networkResult is the network side of OrderFacts. numbers are the purchase order numbers the
+// order has, read or not: the link to order-management is asked about them even when
+// vendor-connectivity could not be read.
+type networkResult struct {
+	pos         []retailday.PO
+	deliveredAt time.Time
+	numbers     []string
+}
+
 // network completes the network facts once the shopper's and sourcing's reads are in: the
 // purchase orders (derived from the releases, plus any a journey names that the derivation
 // missed) and the delivery.
-func (r *run) network(id string, shop shopperFacts, s sourcingFacts) (pos []retailday.PO, deliveredAt time.Time) {
+func (r *run) network(id string, shop shopperFacts, s sourcingFacts) networkResult {
 	r.checkTracking(shop, s)
 	var pf poFacts
 	var jf journeyFacts
@@ -283,7 +294,7 @@ func (r *run) network(id string, shop shopperFacts, s sourcingFacts) (pos []reta
 	// A fact that could not be read is zero as a whole: the derived half is unknown when sourcing
 	// failed, and a purchase order that failed to read must not be counted as absent.
 	all := s.ok && pf.ok
-	pos = pf.pos
+	pos := pf.pos
 	for _, x := range res {
 		if !x.read {
 			all = false
@@ -296,5 +307,13 @@ func (r *run) network(id string, shop shopperFacts, s sourcingFacts) (pos []reta
 		pos = nil
 	}
 	sort.Slice(pos, func(i, j int) bool { return pos[i].Number < pos[j].Number })
-	return pos, jf.deliveredAt
+	return networkResult{pos: pos, deliveredAt: jf.deliveredAt, numbers: unionOf(derivedNumbers(s), extra)}
+}
+
+func derivedNumbers(s sourcingFacts) []string {
+	out := make([]string, len(s.releases))
+	for i, rl := range s.releases {
+		out[i] = rl.po
+	}
+	return out
 }
