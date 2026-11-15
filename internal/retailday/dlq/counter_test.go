@@ -496,6 +496,43 @@ func TestAShortReadIsNotACount(t *testing.T) {
 	}
 }
 
+func TestADuplicatedMessageIsCountedOnce(t *testing.T) {
+	f, c := world(t)
+	const dlq = "retailnetwork.node-topology.events.dlq"
+	mustSnapshot(t, c)
+	f.add(dlq, 0, "k", ours(1))
+	f.add(dlq, 0, "k", ours(2))
+	f.extra = func(_ Partition, _, _ int64, log []Message) []Message {
+		return []Message{log[0], log[0], log[1], log[1]}
+	}
+	if n, known, err := count(t, c); n != 2 || !known || err != nil {
+		t.Fatalf("got (%d, %v, %v), want (2, true, nil)", n, known, err)
+	}
+}
+
+func TestATopicWithNoPartitionsOrABrokenMetadataIsUnreadable(t *testing.T) {
+	// at the snapshot
+	f, c := world(t)
+	f.topic("warehouse.empty.events.dlq", 0) // listed with no partition
+	err := c.Snapshot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "warehouse.empty.events.dlq: the broker lists no partition") {
+		t.Fatalf("snapshot with a partition-less dead-letter topic: %v", err)
+	}
+	// at the count: a topic created after the snapshot whose metadata is not ready, then one with no partition
+	f, c = world(t)
+	mustSnapshot(t, c)
+	f.topic("warehouse.new.events.dlq", 1).err = errors.New("LEADER_NOT_AVAILABLE")
+	n, known, err := count(t, c)
+	if known || n != 0 || err == nil || !strings.Contains(err.Error(), "warehouse.new.events.dlq: its metadata could not be read: LEADER_NOT_AVAILABLE") {
+		t.Fatalf("got (%d, %v, %v)", n, known, err)
+	}
+	f.topics["warehouse.new.events.dlq"].err = nil
+	f.topics["warehouse.new.events.dlq"].parts = nil
+	if n, known, err := count(t, c); known || n != 0 || err == nil || !strings.Contains(err.Error(), "warehouse.new.events.dlq: the broker lists no partition") {
+		t.Fatalf("got (%d, %v, %v)", n, known, err)
+	}
+}
+
 func TestTheCounterEnforcesItsOwnRangeWhateverTheSourceReturns(t *testing.T) {
 	// a broker may return a batch that starts before the requested offset; a source that passes it on
 	// must not make the counter charge the run with what was there before the snapshot
@@ -673,12 +710,34 @@ func TestACancelledContextIsAPromptErrorNeverAZero(t *testing.T) {
 	f.add("retailnetwork.node-topology.events.dlq", 0, "k", ours(1))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	before := len(f.touched())
 	n, known, err := c.DeadLetters(ctx, runID)
 	if known || n != 0 || !errors.Is(err, context.Canceled) {
 		t.Fatalf("got (%d, %v, %v)", n, known, err)
 	}
 	if err := New(f, Options{}).Snapshot(ctx); err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("snapshot on a cancelled context: %v", err)
+	}
+	if calls := f.touched()[before:]; len(calls) != 0 {
+		t.Errorf("a cancelled context still reached Kafka: %v", calls)
+	}
+}
+
+func TestTheSnapshotStopsAtTheFirstPartitionAfterItsContextEndsAndSaysSoOnce(t *testing.T) {
+	f, _ := world(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.onCall = func(call string) {
+		if strings.HasPrefix(call, "offsets ") {
+			cancel()
+		}
+	}
+	err := New(f, Options{}).Snapshot(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if k := strings.Count(err.Error(), "stopped before"); k != 1 {
+		t.Errorf("the error says it stopped %d times, want once: %v", k, err)
 	}
 }
 

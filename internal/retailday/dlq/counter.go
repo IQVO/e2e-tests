@@ -299,8 +299,9 @@ func (c *Counter) DeadLetters(ctx context.Context, runID string) (n int, known b
 			bad = append(bad, fmt.Errorf("stopped before %s: %w", p, err))
 			break
 		}
-		from, onSnapshot := snap[p]
-		k, err := c.count(ctx, p, from, onSnapshot, runID)
+		// a partition that is not on the snapshot is read from offset 0 (the map's zero value),
+		// where every partition starts: nothing on it predates the day
+		k, err := c.count(ctx, p, snap[p], runID)
 		if err != nil {
 			bad = append(bad, fmt.Errorf("%s: %w", p, err))
 			continue
@@ -317,17 +318,13 @@ func (c *Counter) DeadLetters(ctx context.Context, runID string) (n int, known b
 	return found, true, nil
 }
 
-// count reads one partition from where the snapshot left it to where it ends now. A partition
-// that is not on the snapshot is read from offset 0, where every partition starts: nothing on it
-// predates the day, so every message it ever held is this day's, and if the log no longer starts
-// at 0 some of them were deleted unseen.
-func (c *Counter) count(ctx context.Context, p Partition, from int64, onSnapshot bool, runID string) (int, error) {
+// count reads one partition from offset from (where the snapshot left it; 0 for a partition the
+// snapshot did not have, whose every message is therefore this day's) to where it ends now. If the
+// log no longer starts at from, some of those messages were deleted unseen.
+func (c *Counter) count(ctx context.Context, p Partition, from int64, runID string) (int, error) {
 	off, err := bounded(ctx, c.opt.CallTimeout, func(ctx context.Context) (Offsets, error) { return c.src.Offsets(ctx, p) })
 	if err != nil {
 		return 0, fmt.Errorf("its offsets could not be read: %w", err)
-	}
-	if !onSnapshot {
-		from = 0
 	}
 	if off.End < from {
 		return 0, fmt.Errorf("its end offset %d is below the snapshot's %d: the topic was recreated, nothing can be said about it", off.End, from)
