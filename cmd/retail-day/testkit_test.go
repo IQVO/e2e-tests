@@ -82,4 +82,9 @@ func respondJSON(v any) http.HandlerFunc {
 	}
 }
 
-func page(items ...any) map[string]any { return map[string]any{"items": items} }
+func page(items ...any) map[string]any {
+	if items == nil {
+		items = []any{}
+	}
+	return map[string]any{"items": items}
+}
