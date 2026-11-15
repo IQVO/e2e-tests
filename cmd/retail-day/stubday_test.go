@@ -39,6 +39,7 @@ type stubWorld struct {
 	deadLetters func() (int, bool, error)
 
 	preparedN, cleanedN int
+	floorParallel       int
 }
 
 func newStubWorld(items []day.Item, usable int) *stubWorld {
@@ -94,9 +95,10 @@ func (stubLinker) OrderIDs(_ context.Context, p retailday.Placed) ([]string, err
 
 type stubFloor struct{ w *stubWorld }
 
-func (f stubFloor) ProcessAll(_ context.Context, ids []string, _ int) []day.FloorResult {
+func (f stubFloor) ProcessAll(_ context.Context, ids []string, parallel int) []day.FloorResult {
 	f.w.mu.Lock()
 	defer f.w.mu.Unlock()
+	f.w.floorParallel = parallel
 	out := make([]day.FloorResult, len(ids))
 	for i, omID := range ids {
 		id := omID[len("OM-"):]

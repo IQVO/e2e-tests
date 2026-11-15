@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/claudioed/warehouse-e2e/internal/retailday"
 	"github.com/claudioed/warehouse-e2e/internal/sim"
 	"github.com/claudioed/warehouse-e2e/internal/sim/floor"
 	"github.com/claudioed/warehouse-e2e/internal/sim/inbound"
@@ -514,5 +516,40 @@ func TestRealPrepareWritesNothingWithoutProvisionAndNeverTheCPTSchedule(t *testi
 				t.Errorf("cleanup of a floor that never opened: %v", err)
 			}
 		})
+	}
+}
+
+func TestTheActorsAreSetUpForTheStorefrontsBuilding(t *testing.T) {
+	cfg := wireConfig{Building: "AUS3", VendorID: "V-WS", LinkTimeout: 90 * time.Minute}
+	if got := floorSettings(cfg); got.Site != "AUS3" || got.Lag.Timeout < time.Minute {
+		t.Errorf("floor settings %+v: the floor must refuse an order that has no site", got)
+	}
+	if got := linkSettings(cfg); got.Timeout != 90*time.Minute {
+		t.Errorf("link settings %+v", got)
+	}
+	called := false
+	orderIDs := func(context.Context, retailday.Placed, []string) ([]string, error) { called = true; return nil, nil }
+	dict := dictionary{ItemBySKU: map[string]string{"S": "c"}}
+	got := collectSettings(cfg, dict, orderIDs)
+	if got.BuildingSite != "AUS3" || got.VendorID != "V-WS" || got.Catalogue["S"] != "c" || got.OrderIDs == nil {
+		t.Errorf("collector settings %+v", got)
+	}
+	_, _ = got.OrderIDs(context.Background(), retailday.Placed{}, nil)
+	if !called {
+		t.Error("the collector's order link is not the one it was given")
+	}
+}
+
+func TestTheDaysHTTPClientWaitsLongerThanTheBFFAndPoolsConnections(t *testing.T) {
+	c := dayHTTPClient()
+	if c.Timeout < 30*time.Second {
+		t.Errorf("timeout %s: the BFF's confirm budget is 15 s", c.Timeout)
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok || tr.MaxIdleConnsPerHost < 32 || tr.MaxIdleConns < tr.MaxIdleConnsPerHost {
+		t.Errorf("transport %+v: parallel actors against one gateway need a wide idle pool or every request opens a socket", c.Transport)
+	}
+	if tr == http.DefaultTransport {
+		t.Error("the shared default transport was modified")
 	}
 }

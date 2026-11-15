@@ -46,7 +46,7 @@ help:
 	@echo "  provision-storefront-dry-run  the same checks and plans, nothing written"
 	@echo "  provision-storefront-verify   read-only: network verify, dictionary check, purchasable/quote/search verify"
 	@echo "  retail-day-preflight          read-only: cluster gate + REST checks for the three-tier run (docs/adr/0001-retail-day.md)"
-	@echo "  retail-day                    the three-tier run; refuses until the actors are wired (exit 2)"
+	@echo "  retail-day                    WRITES: the three-tier day (shoppers -> floor -> dock -> network -> doorstep), judged; RETAIL_DAY_ARGS=\"-start-now -allow-unverified\""
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:
@@ -119,7 +119,7 @@ retail-day-preflight:
 	bash scripts/11-run-retail-day.sh --preflight
 
 retail-day:
-	bash scripts/11-run-retail-day.sh
+	bash scripts/11-run-retail-day.sh $(RETAIL_DAY_ARGS)
 
 # Offline tests of the seeders (contract fakes; no cluster) and of warehouse-day's site guard
 # and order body (httptest fakes), as in CI's seed-products-tests job.

@@ -102,17 +102,10 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 
 	prefixes := &orderPrefixes{}
 	nodes := &nodeBook{c: cfg.Client, vendorID: cfg.VendorID, networkSite: cfg.NetworkSite, prefixes: prefixes}
-	fl := floor.New(cfg.Client, nil, cfg.ActorLog, cfg.RunID, floor.Settings{
-		Site: cfg.Building,
-		// the order is released by network-fulfillment's reconcile, a minute or two after the link
-		Lag: floor.Waits{Timeout: 5 * time.Minute, Interval: time.Second},
-	})
+	fl := floor.New(cfg.Client, nil, cfg.ActorLog, cfg.RunID, floorSettings(cfg))
 	tr := transport.New(cfg.Client, transport.SystemClock{}, cfg.ActorLog, transport.Settings{})
-	lk := link.New(cfg.Client, link.Settings{Timeout: cfg.LinkTimeout})
-	ev := collect.New(cfg.Client, collect.Settings{
-		Catalogue: dict.ItemBySKU, BuildingSite: cfg.Building, VendorID: cfg.VendorID,
-		OrderIDs: lk.ForPurchaseOrders,
-	})
+	lk := link.New(cfg.Client, linkSettings(cfg))
+	ev := collect.New(cfg.Client, collectSettings(cfg, dict, lk.ForPurchaseOrders))
 
 	watch := &sim.SuspendWatch{Log: cfg.ActorLog}
 	wctx, stop := context.WithCancel(ctx)
@@ -140,6 +133,22 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 		Prepare: b.prepare,
 		Cleanup: b.cleanup,
 	}, stop, nil
+}
+
+// floorSettings: the floor works for the storefront's building (an order that reaches it without that
+// site is a finding: its PackageManifested would be ignored by outbound-shipping, journey gap G2), and
+// waits for the order to be released by network-fulfillment's reconcile, a minute or two after the link.
+func floorSettings(cfg wireConfig) floor.Settings {
+	return floor.Settings{Site: cfg.Building, Lag: floor.Waits{Timeout: 5 * time.Minute, Interval: time.Second}}
+}
+
+// linkSettings bounds the wait for ONE purchase order to be raised in order-management.
+func linkSettings(cfg wireConfig) link.Settings { return link.Settings{Timeout: cfg.LinkTimeout} }
+
+// collectSettings: the collector reads the building's loads, the vendor's purchase orders and, through
+// orderIDs (the linker's single read), the order-management order raised for each purchase order.
+func collectSettings(cfg wireConfig, dict dictionary, orderIDs collect.OrderIDs) collect.Settings {
+	return collect.Settings{Catalogue: dict.ItemBySKU, BuildingSite: cfg.Building, VendorID: cfg.VendorID, OrderIDs: orderIDs}
 }
 
 // stationCrew is what the building needs of *floor.Floor beyond ProcessAll.

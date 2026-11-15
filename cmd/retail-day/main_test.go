@@ -88,6 +88,7 @@ type harness struct {
 	built     int
 	gotCfg    wireConfig
 	preflight int
+	preClient *sim.Client
 	buildErr  error
 	released  int
 
@@ -101,8 +102,9 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, items: stubItems(30), checks: []retailday.Check{{Name: "health a", OK: true, Detail: "ok"}}, window: retailday.Window{InWindow: true}}
 	h.world = newStubWorld(h.items, 20)
 	oldPre, oldWin, oldBuild := runPreflight, findWindow, buildPhases
-	runPreflight = func(context.Context, *sim.Client, retailday.Config) []retailday.Check {
+	runPreflight = func(_ context.Context, cl *sim.Client, _ retailday.Config) []retailday.Check {
 		h.preflight++
+		h.preClient = cl
 		return h.checks
 	}
 	findWindow = func(context.Context, *sim.Client, retailday.Config) (retailday.Window, error) {
@@ -111,6 +113,9 @@ func newHarness(t *testing.T) *harness {
 	buildPhases = func(_ context.Context, cfg wireConfig) (day.Phases, func(), error) {
 		h.built++
 		h.gotCfg = cfg
+		if cfg.ActorLog != nil {
+			cfg.ActorLog("stub", "actor chatter %d", 1)
+		}
 		if h.buildErr != nil {
 			return day.Phases{}, nil, h.buildErr
 		}
@@ -372,6 +377,36 @@ func TestTheFlagsReachTheWiring(t *testing.T) {
 	if c.Client.Stats == nil {
 		t.Error("no call statistics")
 	}
+	if c.Client == h.preClient || c.Client.Stats == h.preClient.Stats {
+		t.Error("the day shares the preflight's client or call statistics: the report's 5xx count would include the preflight's calls")
+	}
+}
+
+func TestTheRunIdAndTheParallelismReachTheRunner(t *testing.T) {
+	h := newHarness(t)
+	_, out, _ := h.run("-json", "-run-id", "RDXYZ9", "-parallel", "7")
+	var rep day.Report
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.RunID != "RDXYZ9" {
+		t.Errorf("report run id %q", rep.RunID)
+	}
+	if h.world.floorParallel != 7 {
+		t.Errorf("the floor was given parallel %d, want 7", h.world.floorParallel)
+	}
+}
+
+func TestActorChatterIsOnStderrOnlyWithV(t *testing.T) {
+	h := newHarness(t)
+	_, out, errs := h.run("-v")
+	if !strings.Contains(errs, "retail-day: stub: actor chatter 1") || strings.Contains(out, "chatter") {
+		t.Errorf("-v: stdout %.80q stderr %.200q", out, errs)
+	}
+	h = newHarness(t)
+	if _, _, errs := h.run(); strings.Contains(errs, "chatter") || h.gotCfg.ActorLog != nil {
+		t.Errorf("the actors chatter without -v: %q", errs)
+	}
 }
 
 func TestDefaultsOfTheWiring(t *testing.T) {
@@ -450,7 +485,12 @@ func TestOutsideTheWindowTheDayRefusesToStartUnlessToldHow(t *testing.T) {
 		t.Errorf("notes %v: the report must say the run started outside the window and what bounds the wait", rep.Notes)
 	}
 
-	// a release further away than the link wait could only fail
+	// a release no sooner than the link wait ends could only fail (the boundary included)
+	h = newHarness(t)
+	h.window = retailday.Window{Wait: 2 * time.Hour}
+	if code, _, _ := h.run("-start-now"); code != 2 || h.built != 0 {
+		t.Errorf("a release exactly at -link-timeout: exit %d built %d", code, h.built)
+	}
 	h = newHarness(t)
 	h.window = retailday.Window{Wait: 3 * time.Hour}
 	if code, _, errs := h.run("-start-now"); code != 2 || h.built != 0 || !strings.Contains(errs, "-link-timeout") {

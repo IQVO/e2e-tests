@@ -5,7 +5,15 @@
 # through Kong (docs/adr/0001-retail-day.md, docs/retail-day-journey.md).
 #
 #   bash scripts/11-run-retail-day.sh --preflight   # make retail-day-preflight: gate + read-only checks, writes nothing
-#   bash scripts/11-run-retail-day.sh               # make retail-day: refuses to run until the day is built
+#   bash scripts/11-run-retail-day.sh [flags]       # make retail-day [RETAIL_DAY_ARGS="..."]: plays the day
+#
+# The day WRITES to the cluster: shoppers register, buy and cancel on the storefront, the floor picks and
+# packs, the dock ships, the network delivers, the restock leg stows stock. Its readiness steps write
+# nothing unless -provision is given (go run ./cmd/retail-day -h). Run it in the release window (the
+# preflight prints the minutes to it), or pass -wait-for-window, or -start-now (see ADR 0001 D3).
+# Exit: 0 the day passed; 1 the gate or the preflight failed or the verdict is FAILED; 2 usage, or the
+# cluster gate / the release window refuses the run. The dead letters of a run cannot be counted over REST:
+# a day passes only with -allow-unverified, which lists them as NOT VERIFIED and excuses nothing else.
 #
 # 1. CLUSTER GATE (kubectl): the context is k3s-multipass (kind is retired), both nodes Ready, every
 #    non-Job pod of warehouse-systems Running and Ready, the container restart counters do not move over
@@ -16,7 +24,9 @@
 #
 # Env: KONG_URL (http://localhost:8000), STOREFRONT_BASE_URL (http://storefront.localhost/api/storefront),
 #   RETAIL_DAY_SETTLE (30), RETAIL_DAY_SKIP_ARGO=1 (skip the ArgoCD check), RETAIL_DAY_SKIP_CLUSTER_GATE=1
-#   (REST preflight only: use when kubectl is not available). Other arguments go to cmd/retail-day.
+#   (REST preflight only: use when kubectl is not available), WAREHOUSE_INFRA_DIR (${REPOS_ROOT}/warehouse-infra:
+#   its scripts/data/retail-network-seed.json maps the storefront's SKUs to catalogue titles). Other arguments
+#   go to cmd/retail-day.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -25,6 +35,9 @@ source "${SCRIPT_DIR}/lib.sh"
 NS="${RETAIL_DAY_NAMESPACE:-warehouse-systems}"
 SETTLE="${RETAIL_DAY_SETTLE:-30}"
 KONG="${KONG_URL:-http://localhost:8000}"
+
+# gate_die: the cluster gate refusing the run is exit 2 (a usage-class refusal, not a failed day).
+gate_die() { fail "$*"; exit 2; }
 
 # pod_state prints "<total container restarts> <names of pods that are not Running+Ready>" as JSON.
 # Job-owned pods (the CronJob sweeps) are history, not capacity: they are ignored.
@@ -46,16 +59,16 @@ print(json.dumps({"restarts": restarts, "bad": sorted(bad)}))
 }
 
 cluster_gate() {
-  command -v kubectl >/dev/null || die "kubectl not found (RETAIL_DAY_SKIP_CLUSTER_GATE=1 skips this gate)"
+  command -v kubectl >/dev/null || gate_die "kubectl not found (RETAIL_DAY_SKIP_CLUSTER_GATE=1 skips this gate)"
   local ctx
   ctx="$(kubectl config current-context)"
-  [[ "${ctx}" == "k3s-multipass" ]] || die "kube context is '${ctx}': the retail day runs on k3s-multipass (kind is retired)"
+  [[ "${ctx}" == "k3s-multipass" ]] || gate_die "kube context is '${ctx}': the retail day runs on k3s-multipass (kind is retired)"
   ok "context ${ctx}"
 
   local not_ready
   not_ready="$(kubectl get nodes --no-headers --request-timeout=15s | awk '$2 != "Ready" {print $1 "=" $2}')" \
-    || die "the API did not answer: do not touch the machine, wait for it"
-  [[ -z "${not_ready}" ]] || die "nodes not Ready: ${not_ready}"
+    || gate_die "the API did not answer: do not touch the machine, wait for it"
+  [[ -z "${not_ready}" ]] || gate_die "nodes not Ready: ${not_ready}"
   ok "both nodes Ready"
 
   local first summary restarts_a restarts_b
@@ -68,7 +81,7 @@ if bad:
 ' "${first}")"
   if [[ -n "${summary}" ]]; then
     fail "${summary}"
-    die "fix the cluster first; if many contexts crash-loop look at: kubectl -n ${NS} get pod kafka-controller-0"
+    gate_die "fix the cluster first; if many contexts crash-loop look at: kubectl -n ${NS} get pod kafka-controller-0"
   fi
   ok "every non-Job pod is Running and Ready"
 
@@ -76,7 +89,7 @@ if bad:
   log "settling ${SETTLE}s to see whether restart counters move"
   sleep "${SETTLE}"
   restarts_b="$(pod_state | python3 -c 'import json,sys; print(json.load(sys.stdin)["restarts"])')"
-  [[ "${restarts_a}" == "${restarts_b}" ]] || die "restart counters moved (${restarts_a} -> ${restarts_b}): a rollout or a crash loop is still going"
+  [[ "${restarts_a}" == "${restarts_b}" ]] || gate_die "restart counters moved (${restarts_a} -> ${restarts_b}): a rollout or a crash loop is still going"
   ok "restart counters steady at ${restarts_a}"
 
   if [[ "${RETAIL_DAY_SKIP_ARGO:-}" == "1" ]]; then
@@ -85,8 +98,8 @@ if bad:
   fi
   local unhealthy
   unhealthy="$(kubectl get applications -n argocd --no-headers --request-timeout=20s -o custom-columns=N:.metadata.name,S:.status.sync.status,H:.status.health.status \
-    | awk '$2 != "Synced" || $3 != "Healthy" {print $1 "(" $2 "/" $3 ")"}')" || die "could not read the ArgoCD applications"
-  [[ -z "${unhealthy}" ]] || die "ArgoCD applications not Synced+Healthy: ${unhealthy//$'\n'/ }"
+    | awk '$2 != "Synced" || $3 != "Healthy" {print $1 "(" $2 "/" $3 ")"}')" || gate_die "could not read the ArgoCD applications"
+  [[ -z "${unhealthy}" ]] || gate_die "ArgoCD applications not Synced+Healthy: ${unhealthy//$'\n'/ }"
   ok "every ArgoCD application Synced and Healthy"
 }
 
@@ -106,6 +119,13 @@ else
   cluster_gate
 fi
 
-log "REST preflight through ${KONG}/api"
+INFRA="${WAREHOUSE_INFRA_DIR:-${REPOS_ROOT}/warehouse-infra}"
+DAY_ARGS=()
+if [[ "${MODE}" == "run" ]]; then
+  DAY_ARGS+=(-fixtures "${WORKSPACE_ROOT}/fixtures/storefront" -network-data "${INFRA}/scripts/data/retail-network-seed.json")
+  log "the retail day through ${KONG}/api (it writes to the cluster; -preflight does not)"
+else
+  log "REST preflight through ${KONG}/api"
+fi
 cd "${SCRIPT_DIR}/.."
-exec go run ./cmd/retail-day -gateway "${KONG}/api" "${ARGS[@]+"${ARGS[@]}"}"
+exec go run ./cmd/retail-day -gateway "${KONG}/api" "${DAY_ARGS[@]+"${DAY_ARGS[@]}"}" "${ARGS[@]+"${ARGS[@]}"}"

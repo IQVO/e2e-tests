@@ -14,10 +14,16 @@ import (
 
 func nodeRoutes() map[string]http.HandlerFunc {
 	return map[string]http.HandlerFunc{
-		"GET vendor-connectivity/vendor/nodes": respondJSON(page(
-			map[string]any{"nodeId": "node-other", "vendorNodeCode": "site-9", "status": "ACTIVE"},
-			map[string]any{"nodeId": "node-site1", "vendorNodeCode": "site-1", "status": "ACTIVE"},
-		)),
+		"GET vendor-connectivity/vendor/nodes": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("vendorId") != "V-WS" {
+				problem(w, 404, "vendor-not-found") // a request for another vendor, or for none, finds nothing
+				return
+			}
+			respondJSON(page(
+				map[string]any{"nodeId": "node-other", "vendorNodeCode": "site-9", "status": "ACTIVE"},
+				map[string]any{"nodeId": "node-site1", "vendorNodeCode": "site-1", "status": "ACTIVE"},
+			))(w, r)
+		},
 		"GET node-topology/service-areas/786": respondJSON(map[string]any{"postalPrefix": "786", "deliveryStationNodeId": "node-ds-a"}),
 		"GET node-topology/service-areas/787": respondJSON(map[string]any{"postalPrefix": "787", "deliveryStationNodeId": "node-ds-b"}),
 	}
