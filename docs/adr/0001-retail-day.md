@@ -92,7 +92,7 @@ in the owning repo. Known: none for the roles in the journey page, which all hav
 
 Per order: payment authorised once and captured once for the order total (capture follows `FulfillmentShipped`); one PO;
 one order-management order; one work unit per line; PICK tasks done and one PACK; one package, one label, one
-shipment confirmation; one tracking journey ending DELIVERED inside the promised window; the ids agree across
+shipment confirmation; one tracking journey ending DELIVERED not after the promised window's end (a compressed run delivers long before the window opens, so "inside" cannot be required); the ids agree across
 contexts. Estate: stock consumed equals units shipped; listing quantity and `purchasable` followed; no dead letter
 carrying the run id; no 5xx outside a recorded suspension. Failure scenarios (decline, cancel before the PO is
 accepted, out of area, sold out, infeasible deadline, network-fulfillment restarted mid-flow = exactly one order per PO)

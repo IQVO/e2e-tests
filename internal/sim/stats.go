@@ -23,6 +23,9 @@ func NewCallStats() *CallStats {
 
 // Record notes one answer. Status 0 is a transport error.
 func (s *CallStats) Record(route string, status int, d time.Duration, detail string) {
+	if s == nil {
+		return // a Client built without statistics must not panic on its first call
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.byRoute[route] == nil {
