@@ -149,6 +149,10 @@ func TestAPaymentRecordThatNamesAnOrderIsFollowed(t *testing.T) {
 	if f.Status != "DELIVERED" || len(f.TrackingNumbers) == 0 {
 		t.Fatalf("the named order was not followed: %+v", f)
 	}
+	// The link is asked about the order that is followed, not about the empty id the shopper phase had.
+	if len(f.OMOrders) != 1 || f.OMOrders[0].ID != "om-1" || f.WorkUnits != 2 {
+		t.Fatalf("the warehouse side of the named order was not followed: %+v", f)
+	}
 }
 
 func TestNothingToLookUpIsSaid(t *testing.T) {

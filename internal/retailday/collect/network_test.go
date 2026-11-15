@@ -1,7 +1,10 @@
 package collect
 
 import (
+	"context"
+	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,8 +156,16 @@ func TestAPurchaseOrderOnlyAJourneyNamesIsAdded(t *testing.T) {
 	w.vendor.pos["PO-drifted"] = &vcPO{PONumber: "PO-drifted", VendorID: vendorID, NodeID: "node-1", State: "SHIPPED", IssuedAt: ts(t0), RequiredShipBy: ts(t0), AckBy: ts(t0), Lines: []vcLine{}, Labels: []any{}, TrackingNumbers: []string{}}
 	w.tracking.journeys[fx.tn].PONumber = "PO-drifted"
 	w.mu.Unlock()
-	f, notes := fx.collect(t, newCollector(w))
+	var numbers []string
+	link := func(_ context.Context, _ retailday.Placed, n []string) ([]string, error) {
+		numbers = n
+		return []string{fx.om}, nil
+	}
+	f, notes := fx.collect(t, newCollector(w, func(s *Settings) { s.OrderIDs = link }))
 	wantNotes(t, notes)
+	if want := []string{"PO-drifted", fx.po}; !slices.Equal(numbers, sorted(want)) {
+		t.Fatalf("the link was given %v, want the derived and the journey's %v", numbers, sorted(want))
+	}
 	want := []retailday.PO{po(fx.po, "SHIPPED"), po("PO-drifted", "SHIPPED")}
 	if !slices.Equal(f.POs, want) {
 		t.Fatalf("POs %v want %v", f.POs, want)
@@ -315,5 +326,54 @@ func TestACancelledOrderHasNothingInTheNetwork(t *testing.T) {
 	}
 	if n := w.requests("shipping-and-tracking", ""); n != 0 {
 		t.Fatalf("%d journey reads for an order with no tracking number", n)
+	}
+}
+
+func sorted(s []string) []string {
+	out := slices.Clone(s)
+	slices.Sort(out)
+	return out
+}
+
+// A purchase order that could not be read must not be counted as absent, and the ones that were read
+// do not make up for it: the fact is zero as a whole.
+func TestOneUnreadablePurchaseOrderZeroesTheFactEvenWhenAnotherWasRead(t *testing.T) {
+	t.Run("a second release", func(t *testing.T) {
+		w := newWorld(t)
+		fx := seedDelivered(w, "1")
+		second := fx.addRelease(2, "EXPIRED", "ISSUED")
+		w.failWhen("vendor-connectivity", func(r *http.Request) bool { return strings.HasSuffix(r.URL.Path, "/"+second) }, 500)
+		f, notes := fx.collect(t, newCollector(w))
+		hasNote(t, notes, "unread POs: vendor-connectivity /vendor/purchase-orders/{poNumber}: HTTP 500")
+		if len(notes) != 1 || f.POs != nil {
+			t.Fatalf("POs %v notes %q: one purchase order was read, one was not, and one is not the answer", f.POs, notes)
+		}
+	})
+	t.Run("a purchase order only a journey names", func(t *testing.T) {
+		w := newWorld(t)
+		fx := seedDelivered(w, "1")
+		w.mu.Lock()
+		w.tracking.journeys[fx.tn].PONumber = "PO-drifted"
+		w.mu.Unlock()
+		w.failWhen("vendor-connectivity", func(r *http.Request) bool { return strings.HasSuffix(r.URL.Path, "/PO-drifted") }, 500)
+		f, notes := fx.collect(t, newCollector(w))
+		hasNote(t, notes, "unread POs: vendor-connectivity /vendor/purchase-orders/{poNumber}: HTTP 500")
+		if len(notes) != 1 || f.POs != nil {
+			t.Fatalf("POs %v notes %q", f.POs, notes)
+		}
+	})
+}
+
+// An assignment of another order in the answer is not this order's release.
+func TestAnAssignmentOfAnotherOrderIsNotThisOrdersRelease(t *testing.T) {
+	w := newWorld(t)
+	fx := seedDelivered(w, "1")
+	w.rawBody("order-sourcing", "/assignments", `{"items":[{"assignmentId":"asg-x","orderId":"ord-other","releases":[{"releaseNo":1,"outcome":"ACCEPTED"}],"trackingNumbers":[]}]}`)
+	_, notes := fx.collect(t, newCollector(w))
+	hasNote(t, notes, "disagree POs", "assignment asg-x of order ord-other for order ord-1")
+	for _, n := range notes {
+		if strings.Contains(n, "release 1 of assignment asg-x") {
+			t.Fatalf("a purchase order was derived from another order's assignment: %q", n)
+		}
 	}
 }

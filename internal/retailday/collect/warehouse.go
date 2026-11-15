@@ -310,7 +310,7 @@ func (r *run) warehouse(id string, poNumbers []string) (f warehouseResult) {
 	if !linked {
 		return f
 	}
-	res := make([]omResult, len(ids))
+	res := make([]omResult, len(ids)) // ids are sorted (unionOf), so the orders come out sorted
 	var ship count
 	fns := make([]func(), 0, len(ids)+1)
 	for i, omID := range ids {
@@ -342,7 +342,6 @@ func (r *run) warehouse(id string, poNumbers []string) (f warehouseResult) {
 			f.pkgs = append(f.pkgs, x.pkgs...)
 		}
 	}
-	sort.Slice(f.orders, func(i, j int) bool { return f.orders[i].ID < f.orders[j].ID })
 	sort.Slice(f.pkgs, func(i, j int) bool { return f.pkgs[i].ID < f.pkgs[j].ID })
 	if ship.ok {
 		f.shipments = ship.n
