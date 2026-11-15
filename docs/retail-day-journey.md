@@ -200,9 +200,9 @@ network and the restock leg act. Nothing here has been run against the cluster.
 | ship | `outbound.Floor.ShipAll`, one call per load | doors and staging lanes found by the readiness step |
 | deliver | `transport.Transport.DeliverOrder` | origin: vendor-connectivity `GET /vendor/nodes` (node with `vendorNodeCode` site-1, ACTIVE); station: node-topology `GET /service-areas/{prefix}` of the order's prefix |
 | restock | `inbound.Crew.Restock` | inbound doors (inbound-receiving), stow bins (`-stow-bins`, else the building's Storage slots that are registered bins with room) |
-| evidence | `collect.Collector` with the linker's `ForPurchaseOrders` | published REST only |
+| evidence | composite: `collect.Collector` (with the linker's `ForPurchaseOrders`) answers Order and Shelf over published REST; `dlq.Counter` answers DeadLetters over Kafka, read only | the broker at `-brokers` (below) |
 
-Flags: `-seed`, `-shoppers` (>= 5), `-shelf`, `-parallel`, `-json`, `-allow-unverified`, `-run-id`, `-fixtures`,
+Flags: `-seed`, `-shoppers` (>= 5), `-shelf`, `-parallel`, `-json`, `-allow-unverified`, `-brokers`, `-run-id`, `-fixtures`,
 `-network-data`, `-stow-bins`, `-v`; `-start-now` (play outside the release window: the PO wait lasts until the computed
 release time, so `-link-timeout`, default 2h, must be longer than that; without it, or `-wait-for-window`, a run outside
 the window is refused); `-provision` (below).
@@ -210,9 +210,25 @@ the window is refused); `-provision` (below).
 Exit codes: 0 the verdict is PASSED with every planned order accounted for; 1 the preflight failed, a phase could not be
 built or the verdict is FAILED; 2 usage, the cluster gate or the release window refusing the run.
 
-**Dead letters cannot be counted over REST**, so the collector reports them as not verified and the day fails on that line
-unless `-allow-unverified` is given. That flag lists what the evidence could not read as NOT VERIFIED and excuses no failed
-rule.
+**Dead letters are counted from Kafka, read only** (`internal/retailday/dlq`; no REST route lists them). A dead letter is the
+original message (key, value and headers unchanged) republished to `<source-topic>.dlq` with `x-dlq-*` headers
+(warehouse-infra `docs/dlq-runbook.md`; the services' `deadletter.go`). `Prepare` takes, before anything is read or written,
+a snapshot of the end offset of every partition of every topic whose name ends in `.dlq` (found by the suffix: a new context
+adds one, and a `.dlq` topic exists only after its first poison message). After the day the audit reads each partition from
+the snapshot to its end now and counts the messages whose value, a header value or key contains the run id. A run with none
+is `0, known`; a dead letter of the run fails the day, `-allow-unverified` or not. Anything that cannot be read (broker
+unreachable, a topic unreadable or gone, messages deleted before they were counted, no snapshot) makes the count UNKNOWN,
+never 0: the day then fails on the NOT VERIFIED line unless `-allow-unverified` is given, which lists what the evidence
+could not read and excuses no failed rule.
+
+**`-brokers` (env `KAFKA_BROKERS`, default `localhost:9092`).** One host:port; `""` runs without counting. The default is the
+address `cmd/warehouse-day` and `env.sh` use and the one `kubectl port-forward svc/kafka 9092:9092` binds, **not an address the
+k3s cluster answers on by itself**: `k3s-edges.sh` forwards no Kafka and the broker has no external listener
+(warehouse-infra ADR 0011). So start `kubectl --context k3s-multipass -n warehouse-systems port-forward --address 127.0.0.1
+svc/kafka 9092:9092` and leave it open. The broker advertises its in-cluster DNS name, so the counter dials the one address
+it was given for every connection, whatever the metadata names (one broker only). The preflight checks the broker (a
+throwaway snapshot, reads only) after the REST checks pass, so an unreachable broker stops the run before the release window
+is waited for; `Prepare` takes the real snapshot and fails closed with the same message.
 
 **`-provision` (default off).** The readiness steps (`outbound.Provision`, `inbound.Ready`) are read-only and fail closed:
 anything not ready is an error naming the check. With `-provision` the dock readiness may write what the building lacks, each

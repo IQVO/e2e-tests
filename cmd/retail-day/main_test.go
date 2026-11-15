@@ -95,13 +95,24 @@ type harness struct {
 	checks []retailday.Check
 	window retailday.Window
 	winErr error
+
+	// the preflight's Kafka check: off (no check) unless a test turns it on
+	kafka      *retailday.Check
+	kafkaAsked []string
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{t: t, items: stubItems(30), checks: []retailday.Check{{Name: "health a", OK: true, Detail: "ok"}}, window: retailday.Window{InWindow: true}}
 	h.world = newStubWorld(h.items, 20)
-	oldPre, oldWin, oldBuild := runPreflight, findWindow, buildPhases
+	oldPre, oldWin, oldBuild, oldKafka := runPreflight, findWindow, buildPhases, checkKafka
+	checkKafka = func(_ context.Context, addr string) (retailday.Check, bool) {
+		h.kafkaAsked = append(h.kafkaAsked, addr)
+		if h.kafka == nil {
+			return retailday.Check{}, false
+		}
+		return *h.kafka, true
+	}
 	runPreflight = func(_ context.Context, cl *sim.Client, _ retailday.Config) []retailday.Check {
 		h.preflight++
 		h.preClient = cl
@@ -121,7 +132,7 @@ func newHarness(t *testing.T) *harness {
 		}
 		return stubPhases(h.world, h.items), func() { h.released++ }, nil
 	}
-	t.Cleanup(func() { runPreflight, findWindow, buildPhases = oldPre, oldWin, oldBuild })
+	t.Cleanup(func() { runPreflight, findWindow, buildPhases, checkKafka = oldPre, oldWin, oldBuild, oldKafka })
 	return h
 }
 

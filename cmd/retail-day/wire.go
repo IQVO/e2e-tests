@@ -48,6 +48,12 @@ type wireConfig struct {
 	// inventory-storage bins the restock may stow into; empty means "discover them, read-only".
 	Doors, Staging, StowBins []string
 
+	// Brokers is the Kafka address the run's dead letters are counted through (-brokers); empty means
+	// they are not counted and the verdict says so. DeadLetters replaces the counter built from it
+	// (a test's fake broker).
+	Brokers     string
+	DeadLetters deadLetterCounter
+
 	// Log is the run's progress line (stderr); ActorLog the actors' own chatter (nil unless -v).
 	Log      func(format string, args ...any)
 	ActorLog sim.LogFunc
@@ -105,14 +111,22 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 	fl := floor.New(cfg.Client, nil, cfg.ActorLog, cfg.RunID, floorSettings(cfg))
 	tr := transport.New(cfg.Client, transport.SystemClock{}, cfg.ActorLog, transport.Settings{})
 	lk := link.New(cfg.Client, linkSettings(cfg))
-	ev := collect.New(cfg.Client, collectSettings(cfg, dict, lk.ForPurchaseOrders))
+	dead, releaseDead := cfg.DeadLetters, func() {}
+	if dead == nil {
+		if dead, releaseDead, err = newDeadLetterCounter(cfg.Brokers); err != nil {
+			return day.Phases{}, nil, fmt.Errorf("-brokers: %w", err)
+		}
+	}
+	// the REST collector answers Order and Shelf; the counter answers DeadLetters (no route lists them)
+	ev := evidence{rest: collect.New(cfg.Client, collectSettings(cfg, dict, lk.ForPurchaseOrders)), dead: dead}
 
 	watch := &sim.SuspendWatch{Log: cfg.ActorLog}
-	wctx, stop := context.WithCancel(ctx)
+	wctx, stopWatch := context.WithCancel(ctx)
 	go watch.Run(wctx)
+	stop := func() { stopWatch(); releaseDead() }
 
 	b := &building{
-		cfg: cfg, site: site, nodes: nodes, fl: fl,
+		cfg: cfg, site: site, nodes: nodes, fl: fl, dead: dead,
 		provisionOutbound: outbound.Provision,
 		readyInbound:      inbound.Ready,
 		listStorageBins:   func(ctx context.Context) ([]string, error) { return storageBins(ctx, cfg.Client, cfg.Building) },
@@ -167,6 +181,8 @@ type building struct {
 	site  siteFixture
 	nodes *nodeBook
 	fl    stationCrew
+	// dead takes the snapshot the day's dead letters are counted from; it is the first thing prepare does.
+	dead deadLetterCounter
 
 	// the readiness steps; the real ones unless a test swaps them
 	provisionOutbound func(ctx context.Context, c *sim.Client, s outbound.Site, o outbound.ProvisionOptions) outbound.Report
@@ -216,6 +232,9 @@ func crewFor(parallel int) floor.Crew {
 
 // prepare readies the building, read-only unless the run was given -provision, and fails closed:
 //
+//  0. the Kafka dead-letter topics are snapshotted (internal/retailday/dlq), before anything is read
+//     or written, so every dead letter the day causes lies after the snapshot. A configured broker
+//     that cannot be snapshotted stops the day here;
 //  1. the transport's node ids are read (vendor-connectivity, node-topology);
 //  2. outbound.Provision checks the CPT schedule, the dock doors and staging lanes, the dock calendar
 //     and the yard board. Without -provision it is ReadOnly and writes nothing. With it, it may register the
@@ -230,6 +249,9 @@ func crewFor(parallel int) floor.Crew {
 // Any check that is not ready is an error naming every one of them.
 func (b *building) prepare(ctx context.Context) error {
 	cfg := b.cfg
+	if err := snapshotDeadLetters(ctx, b.dead, cfg.Brokers, cfg.Log); err != nil {
+		return err
+	}
 	if err := b.nodes.resolve(ctx); err != nil {
 		return err
 	}

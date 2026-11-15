@@ -10,8 +10,13 @@
 // the day package's phase interfaces (wire*.go), linked by internal/retailday/link and judged by the
 // REST collector (internal/retailday/collect). It exits 0 only when every planned order is accounted
 // for, no rule failed, every phase ran and nothing the evidence could not read was left unexplained.
-// The dead letters of the run cannot be counted over REST, so a day passes only with -allow-unverified,
-// which lists them as NOT VERIFIED instead of failing the day on them (nothing else is excused).
+// The dead letters of the run are counted from the Kafka `*.dlq` topics (internal/retailday/dlq): Prepare
+// snapshots their end offsets before anything is written and the audit counts what carries the run id
+// since. No REST route lists them, so the broker must be reachable (-brokers, default localhost:9092,
+// which k3s-edges.sh does NOT forward: the preflight names the kubectl port-forward that does). A broker
+// that cannot be read, or -brokers "", makes the count unknown: the day then passes only with
+// -allow-unverified, which lists it as NOT VERIFIED instead of failing the day on it (nothing else is
+// excused). A dead letter that carries the run id fails the day.
 //
 // The preflight only reads and fails closed: an answer it cannot read is a failed check. The day writes
 // (it plays shoppers and a warehouse), but its readiness steps write nothing unless -provision is given
@@ -84,7 +89,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	parallel := fs.Int("parallel", 4, "buyers, orders on the floor, loads at the dock and parcels in transit at once; also sizes the floor's crew")
 	startNow := fs.Bool("start-now", false, "play the day outside the release window: the purchase-order wait then lasts until the computed release time (ADR 0001 D3), bounded by -link-timeout")
 	linkTimeout := fs.Duration("link-timeout", 2*time.Hour, "longest the day waits for ONE purchase order to be released, acknowledged and raised in order-management")
-	allowUnverified := fs.Bool("allow-unverified", false, "list what the evidence could not read (the run's dead letters, always) as NOT VERIFIED instead of failing the day on it")
+	allowUnverified := fs.Bool("allow-unverified", false, "list what the evidence could not read (the run's dead letters when the broker cannot be read or -brokers is empty) as NOT VERIFIED instead of failing the day on it")
+	brokers := fs.String("brokers", envOr("KAFKA_BROKERS", defaultBrokers), "the ONE Kafka broker address (host:port) the run's dead letters are counted through; the k3s broker is not forwarded by k3s-edges.sh, so this needs a `kubectl port-forward svc/kafka 9092:9092` (the preflight says so). Empty: dead letters are not counted")
 	provision := fs.Bool("provision", false, "let the readiness steps WRITE setup data: register missing -doors and -staging slots and declare a never-declared dock calendar. Never the CPT schedule (make provision-storefront), never bins")
 	runID := fs.String("run-id", "", "run id stamped on stations, plates, seals and ASNs: 3-12 upper-case letters or digits (default RD + the clock)")
 	fixtures := fs.String("fixtures", envOr("RETAIL_DAY_FIXTURES", "fixtures/storefront"), "directory of catalogue.json and fulfilment-site.json (the SKUs and the building's CPT schedule)")
@@ -98,6 +104,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "retail-day: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	if msg := checkBrokers(*brokers); msg != "" {
+		fmt.Fprintf(stderr, "retail-day: %s\n", msg)
 		return 2
 	}
 	id := *runID
@@ -123,6 +133,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		RequireWindow: *requireWindow, Handling: *handling, AckBudget: *ackBudget,
 	}
 	checks := runPreflight(ctx, client, cfg)
+	if retailday.Failed(checks) == 0 {
+		// the broker is read only once the cluster is known to answer: a day that cannot count its dead letters
+		// stops here, not after the release window was waited for
+		if c, ok := checkKafka(ctx, *brokers); ok {
+			checks = append(checks, c)
+		}
+	}
 	failed := retailday.Failed(checks)
 	switch {
 	case *asJSON && (*preflightOnly || failed > 0):
@@ -165,7 +182,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Client: dayClient, RunID: id, Building: *building, NetworkSite: *netSite, VendorID: *vendor,
 		FixtureDir: *fixtures, NetworkData: *networkData, LinkTimeout: *linkTimeout, Parallel: *parallel,
 		Provision: *provision, Doors: splitList(*doors), Staging: splitList(*staging), StowBins: splitList(*stowBins),
-		Log: logf, ActorLog: actorLog,
+		Brokers: *brokers, Log: logf, ActorLog: actorLog,
 	})
 	if release != nil {
 		defer release()

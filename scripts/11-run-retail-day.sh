@@ -12,8 +12,12 @@
 # nothing unless -provision is given (go run ./cmd/retail-day -h). Run it in the release window (the
 # preflight prints the minutes to it), or pass -wait-for-window, or -start-now (see ADR 0001 D3).
 # Exit: 0 the day passed; 1 the gate or the preflight failed or the verdict is FAILED; 2 usage, or the
-# cluster gate / the release window refuses the run. The dead letters of a run cannot be counted over REST:
-# a day passes only with -allow-unverified, which lists them as NOT VERIFIED and excuses nothing else.
+# cluster gate / the release window refuses the run. The dead letters of a run are counted from the Kafka
+# *.dlq topics (read only; cmd/retail-day -brokers, KAFKA_BROKERS, default localhost:9092). k3s-edges.sh does
+# NOT forward Kafka, so keep `kubectl --context k3s-multipass -n warehouse-systems port-forward --address
+# 127.0.0.1 svc/kafka 9092:9092` open while this runs; without it the preflight fails and says so. With
+# -brokers "" the count is unknown and the day passes only with -allow-unverified, which lists it as NOT
+# VERIFIED and excuses nothing else.
 #
 # 1. CLUSTER GATE (kubectl): the context is k3s-multipass (kind is retired), both nodes Ready, every
 #    non-Job pod of warehouse-systems Running and Ready, the container restart counters do not move over

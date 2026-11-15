@@ -45,8 +45,8 @@ help:
 	@echo "  provision-storefront          WRITES: network seed + dictionary check + cmd/seed-storefront, verified; a rerun writes nothing"
 	@echo "  provision-storefront-dry-run  the same checks and plans, nothing written"
 	@echo "  provision-storefront-verify   read-only: network verify, dictionary check, purchasable/quote/search verify"
-	@echo "  retail-day-preflight          read-only: cluster gate + REST checks for the three-tier run (docs/adr/0001-retail-day.md)"
-	@echo "  retail-day                    WRITES: the three-tier day (shoppers -> floor -> dock -> network -> doorstep), judged; RETAIL_DAY_ARGS=\"-start-now -allow-unverified\""
+	@echo "  retail-day-preflight          read-only: cluster gate + REST checks + Kafka dead-letter snapshot for the three-tier run (docs/adr/0001-retail-day.md)"
+	@echo "  retail-day                    WRITES: the three-tier day (shoppers -> floor -> dock -> network -> doorstep), judged; RETAIL_DAY_ARGS=\"-start-now\" (needs a Kafka port-forward: docs/retail-day-journey.md)"
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:

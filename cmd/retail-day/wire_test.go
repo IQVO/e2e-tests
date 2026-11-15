@@ -37,9 +37,10 @@ func (f *fakeStations) Findings() []string             { return f.findings }
 func (f *fakeStations) Stats() floor.Stats             { return f.stats }
 
 type rig struct {
-	b  *building
-	fs *fakeStations
-	cl *fakeCluster
+	b    *building
+	fs   *fakeStations
+	cl   *fakeCluster
+	dead *fakeDead
 
 	outCalls []outboundCall
 	inCalls  []inboundCall
@@ -83,6 +84,7 @@ func okReadiness() inbound.Readiness {
 func newRig(t *testing.T, mod func(*wireConfig)) *rig {
 	t.Helper()
 	r := &rig{fs: &fakeStations{}, cl: newFakeCluster(t, nodeRoutes()), outReport: okReport(), inReady: okReadiness(), bins: []string{"AUS3-STO-1", "AUS3-STO-2"}}
+	r.dead = &fakeDead{known: true}
 	cfg := wireConfig{
 		Client: r.cl.client(), RunID: "RDT1", Building: "AUS3", NetworkSite: "site-1", VendorID: "V-WS", Parallel: 6,
 		Log: func(f string, a ...any) { r.logged = append(r.logged, f) },
@@ -91,7 +93,7 @@ func newRig(t *testing.T, mod func(*wireConfig)) *rig {
 		mod(&cfg)
 	}
 	r.b = &building{
-		cfg: cfg, nodes: &nodeBook{c: cfg.Client, vendorID: cfg.VendorID, networkSite: cfg.NetworkSite, prefixes: &orderPrefixes{}}, fl: r.fs,
+		cfg: cfg, nodes: &nodeBook{c: cfg.Client, vendorID: cfg.VendorID, networkSite: cfg.NetworkSite, prefixes: &orderPrefixes{}}, fl: r.fs, dead: r.dead,
 		site: siteFixture{SiteID: "site-1", WarehouseSiteID: "AUS3", Cutoffs: []outbound.Cutoff{{CptID: "aus-1700", LocalTime: "17:00"}}},
 		provisionOutbound: func(_ context.Context, _ *sim.Client, s outbound.Site, o outbound.ProvisionOptions) outbound.Report {
 			r.outCalls = append(r.outCalls, outboundCall{s, o})
