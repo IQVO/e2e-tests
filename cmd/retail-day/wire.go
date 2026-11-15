@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"sort"
@@ -62,6 +63,15 @@ func (c wireConfig) logf(format string, args ...any) {
 // phases. The returned cleanup releases what buildPhases started (the host-suspension watch); the
 // undoing of what Prepare did is Phases.Cleanup, which the runner always calls.
 var buildPhases = newPhases
+
+// dayHTTPClient is the client of the day: a 30 s timeout (the BFF's confirm budget is 15 s, so the
+// sim package's 15 s default could cut a slow confirmation off) and a connection pool wide enough for
+// the parallel actors, so a run does not open a socket per request and exhaust the host's ephemeral ports.
+func dayHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConns, tr.MaxIdleConnsPerHost, tr.IdleConnTimeout = 128, 64, 90*time.Second
+	return &http.Client{Transport: tr, Timeout: 30 * time.Second}
+}
 
 func errNotReadied(what string) error {
 	return fmt.Errorf("the %s was never readied: the prepare phase did not complete", what)
