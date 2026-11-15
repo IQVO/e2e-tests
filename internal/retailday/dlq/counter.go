@@ -122,6 +122,10 @@ func (p problems) Unwrap() []error { return p }
 func bounded[T any](ctx context.Context, d time.Duration, fn func(context.Context) (T, error)) (T, error) {
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, err // a context that already ended starts no call
+	}
 	type result struct {
 		v   T
 		err error
