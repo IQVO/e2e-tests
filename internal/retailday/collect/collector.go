@@ -4,12 +4,31 @@
 // D6; docs/retail-day-journey.md).
 //
 // It only reads. Every request goes through Collector.get, which can only issue a GET, and the
-// tests prove the contract fakes never received another verb. A fact that cannot be read is
-// left at its zero value AND named in the notes Order returns, so "none exists" (a 404, no note)
-// differs from "could not look" (a 5xx, a transport error, a refusal, a missing link: a note):
+// tests prove the contract fakes never received another verb. It is bounded (Settings.Parallel
+// requests in flight, Settings.Timeout per call, Settings.PageSize and Settings.MaxLoads per
+// collection), reads in parallel what does not depend on each other, and gives the same facts and
+// the same notes, in the same order, for the same state of the estate. It does not panic: a reader
+// that fails unexpectedly is a note.
 //
-//	unread <fact>: <service> <route>: HTTP <status> <problem slug>   could not look; the fact is zero
-//	disagree <fact>: ...                                             two reads of one fact differ
+// # What a fact is when it cannot be read
+//
+// A fact that cannot be read is left at its zero value AND named in the notes Order returns, so
+// "none exists" differs from "could not look":
+//
+//	404                                  none exists: the fact is zero, nothing is noted
+//	5xx, 429, any other refusal,         could not look: the fact is zero, and
+//	a transport error, a timeout,        unread <facts>: <service> <route>: HTTP <status> <slug>
+//	a body that is not the contract,     unread <facts>: <service> <route>: no usable answer: ...
+//	a service with no base URL, a        unread <facts>: Settings.OrderIDs is not set ...
+//	missing or failing link
+//	two reads of one fact differ         disagree <fact>: ...  (the facts are what each context said)
+//
+// A fact that is a total over several reads (purchase orders, work units, picks, packages) is zero
+// as a whole when any read of it failed: a count missing a leg would pass for a smaller order. The
+// one 404 that is not silent is a 404 for something another context said exists (a release the node
+// accepted has a purchase order; a journey's poNumber; the order-management order the link named):
+// that is a disagreement and is noted, and the fact is still zero. Shelf is stricter, because its
+// zero is a number the estate rules accept: see Collector.Shelf.
 //
 // # The id chain
 //
@@ -18,8 +37,10 @@
 //
 //	customer-ordering   GET /orders/{orderId}                  status, lines, promise (deliverByLatest)
 //	                    GET /orders/{orderId}/tracking         the tracking numbers the shopper sees
-//	customer-payments   GET /payment-authorizations?orderId=   authorised (totalMinor), captured and
-//	                                                           voided/released (allocations[].state)
+//	customer-payments   GET /payment-authorizations?orderId=   authorised (totalMinor, unless DECLINED),
+//	                                                           captured and released (allocations[].state)
+//	                    GET /payment-authorizations/{id}       when nothing was placed (a declined
+//	                                                           payment), by the shopper's authorizationId
 //	checkout            GET /checkout-sessions/{sessionId}     the order total (sessionId from the
 //	                                                           authorization)
 //	order-sourcing      GET /assignments?orderId=              assignmentId + releases[].releaseNo
@@ -33,6 +54,12 @@
 //	                    GET /packages?orderRef=<omOrderId>     the package and its SLAM outcome
 //	outbound-shipping   GET /loads?state=SHIP_CONFIRMED, GET /loads/{id}/packages
 //	                                                           packages with source_order_id = omOrderId
+//	inventory-storage   GET /inventory/{sku}/usable            Shelf: usable stock
+//	storefront-bff      GET /products/{catalogItemId}          Shelf: purchasable
+//
+// When the shopper phase placed no order (a declined payment) the money records are read first by
+// the authorization id; if they name an order anyway, that order is followed and the disagreement
+// is noted, so "nothing downstream" is checked and not assumed.
 //
 // # Two links no published route gives
 //
@@ -41,27 +68,34 @@
 // order-sourcing publishes both parts (assignmentId, releases[].releaseNo) at
 // GET /assignments?orderId=. No route lists purchase orders by order. A journey's poNumber
 // (shipping-and-tracking) is read as a cross-check and adds a purchase order the derivation
-// missed; a derived number that answers 404 is noted, because that is also what a drifted
-// derivation looks like.
+// missed. A derived number that answers 404 is "none" unless order-sourcing says the node
+// accepted that release, when it is noted, because that is also what a drifted derivation
+// looks like.
 //
-// The order-management order raised for a purchase order is NOT readable over REST at all.
-// network-fulfillment mints an opaque NetworkRef per purchase order (ADR 0026: "never derived
-// from the network's purchase order number") and keeps the PO -> localOrderId mapping in its
-// own tables; GET /network-orders/{networkRef} exposes localOrderId but nothing maps a PO or a
-// customer order to a networkRef, GET /network-orders lists only NEW orders, and
-// order-management has no list route. The runner supplies the link: Settings.OrderIDs. Without
-// it every order-management-side fact (OMOrders, WorkUnits, PickTasksDone, PackTasks,
-// Packages, ShipmentConfirmations) stays zero and is named in the notes.
+// The order-management order raised for a purchase order is NOT readable from the customer order
+// over any route that is published today. network-fulfillment mints an opaque NetworkRef per
+// purchase order (ADR 0026: "never derived from the network's purchase order number") and keeps
+// the PO -> localOrderId mapping in its own tables, and order-management has no list route. The
+// runner supplies the link: Settings.OrderIDs, which is given the order and the purchase order
+// numbers the collector found. The implementation is link.OrderIDs (internal/retailday/link),
+// over network-fulfillment's GET /purchase-orders/{poNumber} (the NetworkOrder of a purchase
+// order: state, siteId and localOrderId once acknowledged; 404 purchase-order-not-found) once
+// that route is deployed. Without a link every order-management-side fact (OMOrders, WorkUnits,
+// PickTasksDone, PackTasks, Packages, ShipmentConfirmations) stays zero and is named in the
+// notes, whatever the order's expected outcome: a zero read without looking would pass the rules
+// of a cancelled or declined order.
 //
 // # ShipmentConfirmed
 //
 // The event cannot be counted over REST. outbound-shipping raises it when TrailerDeparted
 // arrives for a CLOSED load, and the load state itself is the guard (ADR 0002): a load is
 // SHIP_CONFIRMED at most once. ShipmentConfirmations is therefore the number of SHIP_CONFIRMED
-// loads that carry a SHIPPED package whose source_order_id is the order's order-management id
-// (ADR 0003: ShipmentConfirmed.orders[].order_id comes from source_order_id). It proves the
-// load left and was confirmed; it cannot prove that the event reached Kafka or how many times it
-// was published.
+// loads (of the building's site) that carry a SHIPPED package whose source_order_id is the order's
+// order-management id (ADR 0003: ShipmentConfirmed.orders[].order_id comes from source_order_id).
+// It proves the load left and was confirmed; it cannot prove that the event reached Kafka or how
+// many times it was published. The scan reads the newest Settings.MaxLoads loads and says so when
+// there are more; the packages of a load that left are remembered per load version, so a run of
+// many orders reads each load once.
 package collect
 
 import (
@@ -73,10 +107,14 @@ import (
 )
 
 // OrderIDs links a placed order to the order-management orders raised for its purchase orders.
-// No published route does (see the package comment); the runner knows how it can (the Kafka tap
-// sees network-fulfillment's and order-management's events, the operator can read a
-// network order). poNumbers are the purchase orders the collector found for the order. Return
-// every order id found, including a duplicate: the audit's one-order rule needs to see it.
+// No route published today does (see the package comment); link.OrderIDs will, over
+// network-fulfillment's GET /purchase-orders/{poNumber}, and a runner can supply its own meanwhile
+// (the Kafka tap sees network-fulfillment's and order-management's events). poNumbers are the
+// purchase orders the collector found for the order: the ones order-sourcing's releases imply and
+// the ones a tracking journey names, whether or not vendor-connectivity could be read; p.OrderID
+// is the order being followed. Return every distinct order id found: two orders for one purchase
+// order is the audit's one-order finding, so a duplicate must reach it. An id returned twice is
+// one order. An error means "could not look": every warehouse fact is zero and named.
 type OrderIDs func(ctx context.Context, p retailday.Placed, poNumbers []string) ([]string, error)
 
 // Settings tunes the collector. Catalogue and BuildingSite are the day's; the rest has defaults.
