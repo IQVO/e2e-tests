@@ -359,7 +359,9 @@ func TestOnlyCompletedPicksCountAndACancelledUnitIsNotWork(t *testing.T) {
 	w.fe.tasks = append(w.fe.tasks,
 		&feTask{ID: "tk-reloc", Type: "RELOCATE", Status: "COMPLETED", OrderRef: "om-1-line-1"},
 		&feTask{ID: "tk-pick-3", Type: "PICK", Status: "COMPLETED", OrderRef: "om-1-line-3"},
-		&feTask{ID: "tk-pack-other", Type: "PACK", Status: "COMPLETED", OrderRef: "om-other"})
+		&feTask{ID: "tk-pack-other", Type: "PACK", Status: "COMPLETED", OrderRef: "om-other"},
+		// the order's own SLAM task shares its ref with the PACK task and is not a pack
+		&feTask{ID: "tk-slam", Type: "SLAM", Status: "COMPLETED", OrderRef: "om-1"})
 	w.mu.Unlock()
 	f, notes := fx.collect(t, newCollector(w))
 	wantNotes(t, notes)
@@ -447,7 +449,8 @@ func TestShipmentConfirmationsAreLoadsThatLeftCarryingTheOrder(t *testing.T) {
 	}
 	w.mu.Unlock()
 	// A load that has not left, or one at another site, does not count.
-	fx.addLoad("load-closed", "CLOSED", site, 3, &obPackage{ID: "p-c", SiteID: site, SourceOrderID: fx.om, State: "LOADED"})
+	// The load state is the guard (ADR 0002): even a SHIPPED package on a load that is not SHIP_CONFIRMED proves nothing.
+	fx.addLoad("load-closed", "CLOSED", site, 3, &obPackage{ID: "p-c", SiteID: site, SourceOrderID: fx.om, State: "SHIPPED"})
 	fx.addLoad("load-elsewhere", "SHIP_CONFIRMED", "SIM1", 3, &obPackage{ID: "p-e", SiteID: "SIM1", SourceOrderID: fx.om, State: "SHIPPED"})
 	if n := count(); n != 1 {
 		t.Fatalf("a load that has not left, or at another site, counted: %d", n)
