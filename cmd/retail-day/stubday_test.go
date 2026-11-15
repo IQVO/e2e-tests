@@ -37,6 +37,7 @@ type stubWorld struct {
 	// breakage knobs
 	skipCapture bool // the evidence reports no capture for delivered orders
 	deadLetters func() (int, bool, error)
+	duringDay   func() // runs while the dock ships: something the day causes elsewhere (a dead letter)
 
 	preparedN, cleanedN int
 	floorParallel       int
@@ -115,6 +116,9 @@ func (f stubFloor) ProcessAll(_ context.Context, ids []string, parallel int) []d
 type stubShipper struct{ w *stubWorld }
 
 func (s stubShipper) ShipAll(_ context.Context, pkgs []day.Package) []day.Shipment {
+	if s.w.duringDay != nil {
+		s.w.duringDay()
+	}
 	s.w.mu.Lock()
 	defer s.w.mu.Unlock()
 	out := make([]day.Shipment, len(pkgs))
