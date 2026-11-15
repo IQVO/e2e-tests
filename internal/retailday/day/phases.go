@@ -51,8 +51,18 @@ type Shopper interface {
 	Buy(ctx context.Context, b Buyer) (Bought, error)
 }
 
-// Floor packages and labels. ProcessAll is floor.Floor.ProcessAll: it waits by itself for
-// order-management to release the orders and returns one result per id, in order.
+// Linker follows a placed customer order to the order-management order raised for its purchase
+// order. The floor, the dock and inventory work on THAT id: the storefront's order id is another
+// context's and no floor route knows it. No published route links the two ids by itself (the
+// link is network-fulfillment's PO -> local order mapping), so this is a phase of its own: it
+// waits, bounded, for the purchase order to be released, acknowledged and raised, and returns
+// every order id found (more than one is a defect the runner reports).
+type Linker interface {
+	OrderIDs(ctx context.Context, p retailday.Placed) ([]string, error)
+}
+
+// Floor packages and labels. ProcessAll is floor.Floor.ProcessAll: it takes ORDER-MANAGEMENT ids (Linker's),
+// waits by itself for order-management to release the orders and returns one result per id, in order.
 type Floor interface {
 	ProcessAll(ctx context.Context, orderIDs []string, parallel int) []FloorResult
 }
@@ -153,6 +163,7 @@ type Suspensions interface {
 type Phases struct {
 	Catalogue Catalogue
 	Shopper   Shopper
+	Linker    Linker
 	Floor     Floor
 	Shipper   Shipper
 	Carrier   Carrier

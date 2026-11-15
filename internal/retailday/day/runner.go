@@ -59,6 +59,7 @@ type journey struct {
 	bought Bought
 	ran    bool // Buy returned an answer
 
+	omID        string // the order-management order raised for the PO (Linker): the floor's id
 	pkg         *Package
 	deliveredAt time.Time
 
@@ -140,6 +141,7 @@ func (r *Runner) Run(ctx context.Context) (rep Report) {
 		{PhasePlan, true, s.makePlan},
 		{PhaseShelf, true, s.readShelf},
 		{PhaseShoppers, false, s.shoppers},
+		{PhaseLink, false, s.link},
 		{PhaseFloor, false, s.floor},
 		{PhaseShip, false, s.ship},
 		{PhaseDeliver, false, s.deliver},
@@ -173,6 +175,7 @@ func (r *Runner) missing() []string {
 	}
 	add(r.Catalogue == nil, "Catalogue")
 	add(r.Shopper == nil, "Shopper")
+	add(r.Linker == nil, "Linker")
 	add(r.Floor == nil, "Floor")
 	add(r.Shipper == nil, "Shipper")
 	add(r.Carrier == nil, "Carrier")
@@ -396,18 +399,88 @@ func firstN(in []string, n int) []string {
 	return append(slices.Clone(in[:n]), fmt.Sprintf("(+%d more)", len(in)-n))
 }
 
-// ---- 4. the floor ----
+// ---- 4. the link ----
+
+// link finds, for each order placed for delivery, the order-management order raised for its
+// purchase order. Without it the floor would be handed the storefront's id, which order-management
+// has never heard of.
+func (s *run) link() (string, string) {
+	var in []*journey
+	for _, j := range s.js {
+		if j.buyer.Expect == retailday.Delivered && !j.stopped && j.bought.Status == StatusPlaced && j.bought.OrderID != "" {
+			in = append(in, j)
+		}
+	}
+	if len(in) == 0 {
+		return PhaseIdle, "no order was placed for delivery"
+	}
+	sem := make(chan struct{}, s.cfg.Parallel)
+	var wg sync.WaitGroup
+	for _, j := range in {
+		select {
+		case sem <- struct{}{}:
+		case <-s.ctx.Done():
+			j.stop()
+			j.fail("phase/link", "not run: the context ended before this order was linked")
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.linkOne(j)
+		}()
+	}
+	wg.Wait()
+	if err := s.ctx.Err(); err != nil {
+		return PhaseAborted, "interrupted: " + err.Error()
+	}
+	linked := 0
+	for _, j := range in {
+		if j.omID != "" {
+			linked++
+		}
+	}
+	if linked == 0 {
+		return PhaseFailed, fmt.Sprintf("none of %d orders reached order-management", len(in))
+	}
+	return PhaseOK, fmt.Sprintf("%d of %d orders found in order-management", linked, len(in))
+}
+
+func (s *run) linkOne(j *journey) {
+	var ids []string
+	if err := guard("linker", func() (e error) { ids, e = s.r.Linker.OrderIDs(s.ctx, j.placed); return }); err != nil {
+		j.stop()
+		j.fail("link/order", "no order-management order was found for the order: %v", err)
+		return
+	}
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+	if len(ids) == 0 {
+		j.stop()
+		j.fail("link/order", "no order-management order was raised for the order")
+		return
+	}
+	if len(ids) > 1 {
+		// the floor works the first so the rest of the chain is still exercised; the evidence
+		// reports the duplicate on its own
+		j.fail("link/one-order", "%d order-management orders were raised for one order (%s), want 1; the floor works %s", len(ids), strings.Join(ids, ", "), ids[0])
+	}
+	j.omID = ids[0]
+	j.note("order-management order %s", j.omID)
+}
+
+// ---- 5. the floor ----
 
 func (s *run) floor() (string, string) {
 	var in []*journey
 	var ids []string
 	for _, j := range s.js {
-		if j.buyer.Expect == retailday.Delivered && !j.stopped && j.bought.Status == StatusPlaced && j.bought.OrderID != "" {
-			in, ids = append(in, j), append(ids, j.bought.OrderID)
+		if j.buyer.Expect == retailday.Delivered && !j.stopped && j.bought.Status == StatusPlaced && j.omID != "" {
+			in, ids = append(in, j), append(ids, j.omID)
 		}
 	}
 	if len(in) == 0 {
-		return PhaseIdle, "no order was placed for delivery"
+		return PhaseIdle, "no order reached the floor"
 	}
 	var res []FloorResult
 	err := guard("floor", func() error { res = s.r.Floor.ProcessAll(s.ctx, slices.Clone(ids), s.cfg.Parallel); return nil })
@@ -441,7 +514,7 @@ func (s *run) floor() (string, string) {
 			j.fail(rule, "no labelled package came out of the floor: package %q is %q", r.PackageID, r.Status)
 			continue
 		}
-		j.pkg = &Package{OrderID: j.bought.OrderID, PackageID: r.PackageID, OrderRef: orElse(r.OrderRef, j.bought.OrderID), SourceOrderID: orElse(r.SourceOrderID, j.bought.OrderID), SiteID: r.SiteID, CPT: r.CPT, WeightG: r.WeightG}
+		j.pkg = &Package{OrderID: j.bought.OrderID, PackageID: r.PackageID, OrderRef: orElse(r.OrderRef, j.omID), SourceOrderID: orElse(r.SourceOrderID, j.omID), SiteID: r.SiteID, CPT: r.CPT, WeightG: r.WeightG}
 		j.note("package %s labelled (cpt %s)", r.PackageID, r.CPT)
 		labelled++
 	}
@@ -449,6 +522,15 @@ func (s *run) floor() (string, string) {
 		return PhaseAborted, "interrupted: " + err.Error()
 	}
 	return PhaseOK, fmt.Sprintf("%d of %d orders labelled", labelled, len(in))
+}
+
+// copyMap hands a phase its own copy: no phase may change what the run later compares against.
+func copyMap(in map[string]int) map[string]int {
+	out := make(map[string]int, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func orElse(a, b string) string {

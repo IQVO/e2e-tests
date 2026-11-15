@@ -42,6 +42,7 @@ const (
 	PhasePlan     = "plan"
 	PhaseShelf    = "shelf"
 	PhaseShoppers = "shoppers"
+	PhaseLink     = "link"
 	PhaseFloor    = "floor"
 	PhaseShip     = "ship"
 	PhaseDeliver  = "deliver"
@@ -50,7 +51,7 @@ const (
 	PhaseEstate   = "estate"
 )
 
-var requiredPhases = []string{PhasePrepare, PhasePlan, PhaseShelf, PhaseShoppers, PhaseFloor, PhaseShip, PhaseDeliver, PhaseRestock, PhaseEvidence, PhaseEstate}
+var requiredPhases = []string{PhasePrepare, PhasePlan, PhaseShelf, PhaseShoppers, PhaseLink, PhaseFloor, PhaseShip, PhaseDeliver, PhaseRestock, PhaseEvidence, PhaseEstate}
 
 // OrderReport is one buyer's row: the order, what the plan expected, how it was judged, the
 // rules that failed and what the journey noted on the way.

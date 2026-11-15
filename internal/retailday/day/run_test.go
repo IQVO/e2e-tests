@@ -70,8 +70,15 @@ func TestEachPhaseSeesExactlyTheOrdersItShouldAndEveryBuyerIsJudged(t *testing.T
 		}
 	}
 	sort.Strings(delivered)
-	if got := g.floor.ids(); !reflect.DeepEqual(got, delivered) {
-		t.Errorf("the floor processed %v, want %v", got, delivered)
+	var floorWant []string
+	for _, id := range delivered {
+		floorWant = append(floorWant, omIDOf(id))
+	}
+	if got := g.floor.ids(); !reflect.DeepEqual(got, floorWant) {
+		t.Errorf("the floor processed %v, want the order-management orders %v (never the storefront's ids)", got, floorWant)
+	}
+	if got := g.linker.linked(); !reflect.DeepEqual(got, delivered) {
+		t.Errorf("the linker was asked for %v, want exactly the orders placed for delivery %v", got, delivered)
 	}
 	if got := g.carrier.delivered(); !reflect.DeepEqual(got, delivered) {
 		t.Errorf("the carrier delivered %v, want %v", got, delivered)
@@ -146,7 +153,7 @@ func TestAnOrderThatNeverReachesTheFloorFailsThatOrderOnly(t *testing.T) {
 	g := newRig()
 	victim := firstDelivered(g)
 	g.floor.onProcess = func(ctx context.Context, id string) FloorResult {
-		if id == orderID(victim) {
+		if id == omIDOf(orderID(victim)) {
 			return FloorResult{OrderID: id, Problems: []string{"order " + id + ": wait for its lines to be Released: the order is Held (the release was not made, or not consumed)"}}
 		}
 		return g.w.label(id)
@@ -193,7 +200,7 @@ func TestAPhaseFailureAloneFailsTheOrderWhateverTheEvidenceSays(t *testing.T) {
 	}{
 		{"the floor reports a problem and no package", func(g *rig, id string) {
 			g.floor.onProcess = func(_ context.Context, i string) FloorResult {
-				if i == id {
+				if i == omIDOf(id) {
 					return FloorResult{OrderID: i, Problems: []string{"timed out"}}
 				}
 				return g.w.label(i)
@@ -202,7 +209,7 @@ func TestAPhaseFailureAloneFailsTheOrderWhateverTheEvidenceSays(t *testing.T) {
 		{"the package is DIVERTED", func(g *rig, id string) {
 			g.floor.onProcess = func(_ context.Context, i string) FloorResult {
 				r := g.w.label(i)
-				if i == id {
+				if i == omIDOf(id) {
 					r.Status = "DIVERTED"
 				}
 				return r
@@ -560,7 +567,7 @@ func TestDeclinedCancelledAndNotServedOrdersAreJudgedWithNothingDownstream(t *te
 			}
 			// and nothing downstream was ever played for it
 			for _, id := range append(g.floor.ids(), g.carrier.delivered()...) {
-				if id == orderID(victim) {
+				if id == orderID(victim) || id == omIDOf(orderID(victim)) {
 					t.Errorf("the %s order reached a downstream phase", e)
 				}
 			}

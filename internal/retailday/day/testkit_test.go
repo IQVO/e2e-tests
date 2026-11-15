@@ -56,6 +56,48 @@ func (w *world) usable(sku string) int {
 
 func orderID(b Buyer) string { return fmt.Sprintf("ORD-%02d", b.Index) }
 
+// omIDOf is the order-management order of a customer order: a different id, as in the estate, so a
+// phase handed the wrong one is refused instead of working by coincidence.
+func omIDOf(customerOrder string) string { return "OM-" + customerOrder }
+
+// customerOf undoes omIDOf; ok is false for an id that is not an order-management id.
+func customerOf(id string) (string, bool) {
+	c, ok := strings.CutPrefix(id, "OM-")
+	return c, ok && c != ""
+}
+
+// ---- linker ----
+
+type stubLinker struct {
+	mu     sync.Mutex
+	calls  []retailday.Placed
+	onLink func(p retailday.Placed) ([]string, error)
+}
+
+func (l *stubLinker) OrderIDs(ctx context.Context, p retailday.Placed) ([]string, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, p)
+	l.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if l.onLink != nil {
+		return l.onLink(p)
+	}
+	return []string{omIDOf(p.OrderID)}, nil
+}
+
+func (l *stubLinker) linked() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, p := range l.calls {
+		out = append(out, p.OrderID)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ---- shopper ----
 
 type stubShopper struct {
@@ -140,15 +182,20 @@ func (f *stubFloor) ids() []string {
 }
 
 // label picks and packs: the stock leaves the shelf when the pick is confirmed.
-func (w *world) label(id string) FloorResult {
+func (w *world) label(omID string) FloorResult {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	id, ok := customerOf(omID)
+	if !ok || w.stage[id] == stageNone {
+		// what order-management answers for an id it never raised (a storefront id, for one)
+		return FloorResult{OrderID: omID, Problems: []string{"order-management GET /orders/" + omID + ": 404 order-not-found"}}
+	}
 	b := w.buyers[id]
 	for sku, n := range b.Placed.SKUs {
 		w.stock[sku] -= n
 	}
 	w.stage[id] = stageLabeled
-	return FloorResult{OrderID: id, PackageID: "PKG-" + id, Status: "LABELED", OrderRef: id, SourceOrderID: "OM-" + id, SiteID: "AUS3", CPT: cptFor(b)}
+	return FloorResult{OrderID: omID, PackageID: "PKG-" + id, Status: "LABELED", OrderRef: omID, SourceOrderID: omID, SiteID: "AUS3", CPT: cptFor(b)}
 }
 
 func cptFor(b Buyer) string {
@@ -280,14 +327,6 @@ func (w *world) restock(start map[string]int) RestockResult {
 		}
 	}
 	return res
-}
-
-func copyMap(in map[string]int) map[string]int {
-	out := make(map[string]int, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }
 
 // ---- evidence ----
@@ -422,6 +461,7 @@ type rig struct {
 	floor     *stubFloor
 	shipper   *stubShipper
 	carrier   *stubCarrier
+	linker    *stubLinker
 	restocker *stubRestocker
 	evidence  *stubEvidence
 	calls     stubCalls
@@ -439,6 +479,7 @@ func newRig() *rig {
 	g.catalogue = &stubCatalogue{items: items}
 	g.shopper = &stubShopper{w: w}
 	g.floor = &stubFloor{w: w}
+	g.linker = &stubLinker{}
 	g.shipper = &stubShipper{w: w}
 	g.carrier = &stubCarrier{w: w}
 	g.restocker = &stubRestocker{w: w}
@@ -446,7 +487,7 @@ func newRig() *rig {
 	g.calls = stubCalls{lines: []sim.RouteLine{{Route: "storefront POST /checkout", Calls: 12, Statuses: map[int]int{200: 12}, AvgMs: 8}}}
 	g.runner = &Runner{
 		Phases: Phases{
-			Catalogue: g.catalogue, Shopper: g.shopper, Floor: g.floor, Shipper: g.shipper,
+			Catalogue: g.catalogue, Shopper: g.shopper, Linker: g.linker, Floor: g.floor, Shipper: g.shipper,
 			Carrier: g.carrier, Restocker: g.restocker, Evidence: g.evidence,
 			Calls:   g.calls,
 			Prepare: func(context.Context) error { g.prepared++; return g.prepareErr },
