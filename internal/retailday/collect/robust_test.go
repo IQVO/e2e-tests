@@ -319,3 +319,34 @@ func TestAServiceWithoutABaseURLIsNotedAndNeverRequested(t *testing.T) {
 		t.Fatal("the caller's client was modified")
 	}
 }
+
+// A reader that fails unexpectedly is a note, never a crash: the evidence must still come back.
+func TestAReaderThatPanicsIsANoteAndNeverACrash(t *testing.T) {
+	t.Run("inside the parallel readers", func(t *testing.T) {
+		r := &run{c: New(newWorld(t).client(), Settings{}), ctx: t.Context()}
+		done := false
+		r.par(func() { panic("boom") }, func() { done = true })
+		if !done {
+			t.Fatal("a reader that panicked stopped the others")
+		}
+		wantNotes(t, r.sortedNotes(), "unread order: a reader failed unexpectedly: boom")
+	})
+	t.Run("in the call itself", func(t *testing.T) {
+		// A collector with no client: the first read dereferences nil.
+		c := &Collector{set: Settings{}.withDefaults(), sem: make(chan struct{}, 1)}
+		f, notes := c.Order(t.Context(), retailday.Placed{RunID: "RUN1", Expect: retailday.Declined, AuthorizationID: "pay-1"})
+		if len(notes) != 1 || !strings.HasPrefix(notes[0], "unread order: the collector failed unexpectedly") {
+			t.Fatalf("notes %q", notes)
+		}
+		if f.Expect != retailday.Declined {
+			t.Fatalf("facts %+v", f)
+		}
+	})
+	t.Run("in the shelf", func(t *testing.T) {
+		c := &Collector{set: Settings{Catalogue: catalogue()}.withDefaults(), sem: make(chan struct{}, 1)}
+		got, err := c.Shelf(t.Context(), []string{"SKU-A"})
+		if err == nil || got != nil || !strings.Contains(err.Error(), "a reader failed unexpectedly") {
+			t.Fatalf("shelf %v err %v", got, err)
+		}
+	})
+}

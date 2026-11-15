@@ -531,7 +531,7 @@ func newInventoryFake(w *world) *inventoryFake {
 		}
 		sku := r.PathValue("sku")
 		// "0 if the SKU is unknown": an unknown SKU is a 200, never a 404.
-		return ok(map[string]any{"sku": sku, "usable": f.usable[sku], "looseUsable": f.usable[sku], "reservableCases": 0})
+		return ok(map[string]any{"sku": sku, "usable": f.usable[sku], "looseUsable": f.usable[sku] / 2, "reservableCases": 0})
 	})
 	return f
 }
