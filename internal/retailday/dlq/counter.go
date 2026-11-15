@@ -182,16 +182,19 @@ func deadLetterPartitions(topics []Topic) ([]Partition, problems) {
 	return parts, bad
 }
 
-// list reads the topic listing and refuses an empty one.
-func (c *Counter) list(ctx context.Context) ([]Partition, problems) {
+// list reads the topic listing and refuses an empty one. listed is false when there is no
+// usable listing at all (the caller stops: whatever else it could say would be noise); otherwise
+// bad names the `.dlq` topics inside it that cannot be used.
+func (c *Counter) list(ctx context.Context) (parts []Partition, bad problems, listed bool) {
 	topics, err := bounded(ctx, c.opt.CallTimeout, c.src.Topics)
 	if err != nil {
-		return nil, problems{fmt.Errorf("the topics could not be listed: %w", err)}
+		return nil, problems{fmt.Errorf("the topics could not be listed: %w", err)}, false
 	}
 	if len(topics) == 0 {
-		return nil, problems{errors.New("the broker listed no topic at all (not even its internal ones): that is not an answer to \"are there dead letters\"")}
+		return nil, problems{errors.New("the broker listed no topic at all (not even its internal ones): that is not an answer to \"are there dead letters\"")}, false
 	}
-	return deadLetterPartitions(topics)
+	parts, bad = deadLetterPartitions(topics)
+	return parts, bad, true
 }
 
 // Snapshot records the end offset of every `.dlq` partition. It is taken once, before the day
@@ -211,7 +214,10 @@ func (c *Counter) Snapshot(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, c.opt.Timeout)
 	defer cancel()
 
-	parts, bad := c.list(ctx)
+	parts, bad, listed := c.list(ctx)
+	if !listed {
+		return fmt.Errorf("dlq: the dead-letter topics could not be snapshotted: %w", bad)
+	}
 	end := make(map[Partition]int64, len(parts))
 	for _, p := range parts {
 		if err := ctx.Err(); err != nil {
@@ -264,13 +270,13 @@ func (c *Counter) DeadLetters(ctx context.Context, runID string) (n int, known b
 	if snap == nil {
 		return 0, false, ErrNoSnapshot
 	}
-	if err := ctx.Err(); err != nil {
-		return 0, false, fmt.Errorf("dlq: not counted: %w", err)
-	}
 	ctx, cancel := context.WithTimeout(ctx, c.opt.Timeout)
 	defer cancel()
 
-	parts, bad := c.list(ctx)
+	parts, bad, listed := c.list(ctx)
+	if !listed {
+		return 0, false, fmt.Errorf("dlq: dead letters not counted: %w", bad)
+	}
 	// a partition of the snapshot that is not listed now cannot be counted: its dead letters may be gone
 	now := make(map[Partition]bool, len(parts))
 	for _, p := range parts {
@@ -312,21 +318,22 @@ func (c *Counter) DeadLetters(ctx context.Context, runID string) (n int, known b
 }
 
 // count reads one partition from where the snapshot left it to where it ends now. A partition
-// that is not on the snapshot is read from its first offset: nothing on it predates the day.
+// that is not on the snapshot is read from offset 0, where every partition starts: nothing on it
+// predates the day, so every message it ever held is this day's, and if the log no longer starts
+// at 0 some of them were deleted unseen.
 func (c *Counter) count(ctx context.Context, p Partition, from int64, onSnapshot bool, runID string) (int, error) {
 	off, err := bounded(ctx, c.opt.CallTimeout, func(ctx context.Context) (Offsets, error) { return c.src.Offsets(ctx, p) })
 	if err != nil {
 		return 0, fmt.Errorf("its offsets could not be read: %w", err)
 	}
 	if !onSnapshot {
-		from = off.Start
-	} else {
-		if off.End < from {
-			return 0, fmt.Errorf("its end offset %d is below the snapshot's %d: the topic was recreated, nothing can be said about it", off.End, from)
-		}
-		if off.Start > from {
-			return 0, fmt.Errorf("offsets %d-%d were deleted by retention before they were counted", from, off.Start-1)
-		}
+		from = 0
+	}
+	if off.End < from {
+		return 0, fmt.Errorf("its end offset %d is below the snapshot's %d: the topic was recreated, nothing can be said about it", off.End, from)
+	}
+	if off.Start > from {
+		return 0, fmt.Errorf("offsets %d-%d were deleted by retention before they were counted", from, off.Start-1)
 	}
 	to := off.End
 	if from >= to {

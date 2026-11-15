@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ type fakeKafka struct {
 	deaf       bool         // every call blocks forever, ignoring its context
 	panicOn    string       // method name that panics
 	extra      func(p Partition, from, to int64, log []Message) []Message
+	onCall     func(call string) // runs on every call, before it is answered
 }
 
 type fakeTopic struct {
@@ -82,6 +84,9 @@ func (f *fakeKafka) touched() []string {
 
 func (f *fakeKafka) gate(ctx context.Context, method string) error {
 	f.record(method)
+	if f.onCall != nil {
+		f.onCall(method)
+	}
 	if f.panicOn == method {
 		panic("boom in " + method)
 	}
@@ -357,6 +362,9 @@ func TestEveryUnreadableTopicIsNamed(t *testing.T) {
 			t.Errorf("the error lacks %q: %v", want, err)
 		}
 	}
+	if strings.Contains(err.Error(), "already found") {
+		t.Errorf("the error claims dead letters were found: %v", err)
+	}
 }
 
 func TestATopicWhoseMetadataIsBrokenIsUnreadableNotAbsent(t *testing.T) {
@@ -390,6 +398,25 @@ func TestATopicCreatedAfterTheSnapshotIsCountedFromItsFirstMessage(t *testing.T)
 	}
 	if !containsCall(f.touched(), "read warehouse.outbound-shipping.events.dlq[1] 0-3") {
 		t.Errorf("the new topic was not read from offset 0: %v", f.touched())
+	}
+}
+
+func TestATopicCreatedAfterTheSnapshotWhoseLogNoLongerStartsAtZeroIsUnknown(t *testing.T) {
+	// everything on a topic created after the snapshot is the day's: offsets below the log start were
+	// deleted unseen, and they may have been this run's
+	f, c := world(t)
+	mustSnapshot(t, c)
+	f.topic("warehouse.outbound-shipping.events.dlq", 1)
+	f.add("warehouse.outbound-shipping.events.dlq", 0, "k", theirs(1))
+	f.add("warehouse.outbound-shipping.events.dlq", 0, "k", theirs(2))
+	f.add("warehouse.outbound-shipping.events.dlq", 0, "k", theirs(3))
+	f.mu.Lock()
+	f.topics["warehouse.outbound-shipping.events.dlq"].start[0] = 2
+	f.topics["warehouse.outbound-shipping.events.dlq"].parts[0] = f.topics["warehouse.outbound-shipping.events.dlq"].parts[0][2:]
+	f.mu.Unlock()
+	n, known, err := count(t, c)
+	if known || n != 0 || err == nil || !strings.Contains(err.Error(), "deleted by retention") {
+		t.Fatalf("got (%d, %v, %v)", n, known, err)
 	}
 }
 
@@ -655,6 +682,37 @@ func TestACancelledContextIsAPromptErrorNeverAZero(t *testing.T) {
 	}
 }
 
+func TestTheCountStopsAtTheFirstPartitionAfterItsContextEndsAndSaysSoOnce(t *testing.T) {
+	f, c := world(t)
+	mustSnapshot(t, c)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.mu.Lock()
+	before := len(f.calls)
+	f.mu.Unlock()
+	f.onCall = func(call string) {
+		if strings.HasPrefix(call, "offsets ") {
+			cancel() // the context ends while the first partition is being measured
+		}
+	}
+	n, known, err := c.DeadLetters(ctx, runID)
+	if known || n != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("got (%d, %v, %v)", n, known, err)
+	}
+	if k := strings.Count(err.Error(), "stopped before"); k != 1 {
+		t.Errorf("the error says it stopped %d times, want once: %v", k, err)
+	}
+	offsets := 0
+	for _, call := range f.touched()[before:] {
+		if strings.HasPrefix(call, "offsets ") {
+			offsets++
+		}
+	}
+	if offsets != 1 {
+		t.Errorf("%d partitions were measured after the context ended, want 1", offsets)
+	}
+}
+
 func TestACallThatBlocksUntilItsContextEndsIsEndedByThatContext(t *testing.T) {
 	f, c := world(t)
 	mustSnapshot(t, c)
@@ -758,5 +816,40 @@ func TestTheListingFailingAtCountTimeIsUnknown(t *testing.T) {
 	n, known, err := count(t, c)
 	if known || n != 0 || err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("got (%d, %v, %v)", n, known, err)
+	}
+	if strings.Contains(err.Error(), "not listed now") {
+		t.Errorf("the error blames every topic of the snapshot for a listing that failed as a whole: %v", err)
+	}
+}
+
+func TestPartitionsAreReadAndNamedInAStableOrder(t *testing.T) {
+	f, c := world(t)
+	mustSnapshot(t, c)
+	before := len(f.touched())
+	if _, known, err := count(t, c); !known || err != nil {
+		t.Fatal(known, err)
+	}
+	var got []string
+	for _, call := range f.touched()[before:] {
+		if strings.HasPrefix(call, "offsets ") {
+			got = append(got, strings.TrimPrefix(call, "offsets "))
+		}
+	}
+	want := []string{
+		"retailnetwork.node-topology.events.dlq[0]",
+		"warehouse.yard-management.events.dlq[0]", "warehouse.yard-management.events.dlq[1]", "warehouse.yard-management.events.dlq[2]",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("read order\n got %v\nwant %v", got, want)
+	}
+	// topics of the snapshot that vanished are named in the same order
+	f.drop("warehouse.yard-management.events.dlq")
+	_, _, err := count(t, c)
+	if err == nil {
+		t.Fatal("a dropped topic was not noticed")
+	}
+	i0, i1, i2 := strings.Index(err.Error(), "events.dlq[0]"), strings.Index(err.Error(), "events.dlq[1]"), strings.Index(err.Error(), "events.dlq[2]")
+	if i0 < 0 || !(i0 < i1 && i1 < i2) {
+		t.Errorf("the vanished partitions are not named in order: %v", err)
 	}
 }

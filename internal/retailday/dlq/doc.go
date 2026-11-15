@@ -40,8 +40,10 @@
 //
 // A partition that did not exist at the snapshot (its topic was created after it, or a
 // partition was added to a topic) cannot hold a message from before the snapshot, so it is read
-// from its first offset. That is sound only because the snapshot's topic listing was complete:
-// a snapshot that could not list or measure a `.dlq` partition is not taken at all.
+// from offset 0, where every partition starts. That is sound only because the snapshot's topic
+// listing was complete: a snapshot that could not list or measure a `.dlq` partition is not
+// taken at all. If such a partition's log no longer starts at 0, messages of the day were
+// deleted unseen and the count is unknown.
 //
 // # known
 //
