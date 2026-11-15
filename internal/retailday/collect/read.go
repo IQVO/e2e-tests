@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/claudioed/warehouse-e2e/internal/paging"
 	"github.com/claudioed/warehouse-e2e/internal/retailday"
@@ -66,7 +67,7 @@ func problemSlug(body []byte) string {
 // describe says what a failed answer was, short enough for a note.
 func describe(svc, route string, r sim.Resp) string {
 	if r.Status == 0 {
-		return fmt.Sprintf("%s %s: transport error: %s", svc, route, sim.Truncate(string(r.Body), 120))
+		return fmt.Sprintf("%s %s: no usable answer: %s", svc, route, sim.Truncate(string(r.Body), 120))
 	}
 	s := fmt.Sprintf("%s %s: HTTP %d", svc, route, r.Status)
 	if slug := problemSlug(r.Body); slug != "" {
@@ -98,32 +99,41 @@ const maxPages = 1000
 // following nextCursor to the end. path carries the filters (repeated on every page). The returned
 // Resp is the last page's: !OK() means the walk stopped and the items are what was read so far.
 func listAll[T any](ctx context.Context, c *Collector, svc, route, path string) ([]T, sim.Resp) {
+	items, _, r := listUpTo[T](ctx, c, svc, route, path, 0)
+	return items, r
+}
+
+// listUpTo is listAll that stops once bound items are in hand (bound <= 0: no bound). more reports
+// that the collection had items beyond the bound, so the caller knows what it did not see.
+func listUpTo[T any](ctx context.Context, c *Collector, svc, route, path string, bound int) (all []T, more bool, last sim.Resp) {
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
 	}
 	path = fmt.Sprintf("%s%slimit=%d", path, sep, c.set.PageSize)
-	var all []T
 	cursor := ""
 	for i := 0; i < maxPages; i++ {
 		r := c.get(ctx, svc, route, paging.With(path, cursor))
 		if !r.OK() {
-			return all, r
+			return all, false, r
 		}
 		items, next, err := paging.Decode[T](r.Body)
 		if err != nil {
-			return all, sim.Resp{Status: 0, Body: []byte(err.Error())}
+			return all, false, sim.Resp{Status: 0, Body: []byte(err.Error())}
 		}
 		all = append(all, items...)
+		if bound > 0 && len(all) >= bound {
+			return all[:bound], len(all) > bound || next != "", r
+		}
 		if next == "" {
-			return all, r
+			return all, false, r
 		}
 		if next == cursor {
-			return all, sim.Resp{Status: 0, Body: []byte(fmt.Sprintf("provider repeated cursor %q", cursor))}
+			return all, false, sim.Resp{Status: 0, Body: []byte(fmt.Sprintf("provider repeated cursor %q", cursor))}
 		}
 		cursor = next
 	}
-	return all, sim.Resp{Status: 0, Body: []byte("paging did not end")}
+	return all, false, sim.Resp{Status: 0, Body: []byte("paging did not end")}
 }
 
 // query builds a query string with its keys sorted, so the same request is the same bytes.
@@ -139,6 +149,9 @@ func query(kv ...string) string {
 }
 
 func esc(s string) string { return url.PathEscape(s) }
+
+// stamp renders an instant the one way every note does.
+func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // run is the state of one Order call: the placed order and the notes the readers raise. Readers
 // return their facts; only the notes are shared, so the merge order of the facts is fixed and
@@ -180,15 +193,56 @@ func (r *run) sortedNotes() []string {
 	return out
 }
 
-// par runs the readers at the same time and returns when every one has finished.
-func par(fns ...func()) {
+// par runs the readers at the same time and returns when every one has finished. A reader that
+// panics is a note, never a crash: the evidence must still come back.
+func (r *run) par(fns ...func()) {
 	var wg sync.WaitGroup
 	for _, f := range fns {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if e := recover(); e != nil {
+					r.note("unread order: a reader failed unexpectedly: %v", e)
+				}
+			}()
 			f()
 		}()
 	}
 	wg.Wait()
+}
+
+// fetchOne reads one resource and decodes a 2xx body into T. none is a 404 (the thing does not
+// exist: nothing is noted); failed is every other refusal, a transport error or a body that is
+// not a T (noted under what, the facts that stay zero).
+func fetchOne[T any](r *run, what, svc, route, path string) (T, outcome) {
+	var v, zero T
+	resp := r.c.get(r.ctx, svc, route, path)
+	switch classify(resp) {
+	case found:
+		if err := resp.Decode(&v); err != nil {
+			r.note("unread %s: %s %s: the body is not what the contract says: %s", what, svc, route, sim.Truncate(err.Error(), 160))
+			return zero, failed
+		}
+		return v, found
+	case none:
+		return zero, none
+	default:
+		r.unread(what, svc, route, resp)
+		return zero, failed
+	}
+}
+
+// fetchList is fetchOne for a paginated collection: the whole collection, or none/failed.
+func fetchList[T any](r *run, what, svc, route, path string) ([]T, outcome) {
+	items, resp := listAll[T](r.ctx, r.c, svc, route, path)
+	switch classify(resp) {
+	case found:
+		return items, found
+	case none:
+		return nil, none
+	default:
+		r.unread(what, svc, route, resp)
+		return nil, failed
+	}
 }
