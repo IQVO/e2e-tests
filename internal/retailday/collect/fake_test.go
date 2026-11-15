@@ -382,6 +382,11 @@ type gate struct {
 	timedOut bool
 }
 
+// gateTimeout is how long a request waits for the others: far longer than any scheduler stall, so
+// a collector that does read them together never loses the rendezvous; one that reads them one after
+// the other fails after this long.
+const gateTimeout = 30 * time.Second
+
 func newGate(need int, match func(svc, path, rawQuery string) bool) *gate {
 	return &gate{need: need, match: match, open: make(chan struct{})}
 }
@@ -398,7 +403,7 @@ func (g *gate) pass(svc, path, rawQuery string) {
 	g.mu.Unlock()
 	select {
 	case <-g.open:
-	case <-time.After(5 * time.Second):
+	case <-time.After(gateTimeout):
 		g.mu.Lock()
 		g.timedOut = true
 		g.mu.Unlock()
