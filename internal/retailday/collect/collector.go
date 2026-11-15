@@ -77,10 +77,11 @@
 // purchase order (ADR 0026: "never derived from the network's purchase order number") and keeps
 // the PO -> localOrderId mapping in its own tables, and order-management has no list route. The
 // runner supplies the link: Settings.OrderIDs, which is given the order and the purchase order
-// numbers the collector found. The implementation is link.OrderIDs (internal/retailday/link),
+// numbers the collector found. The implementation is the link package
+// (internal/retailday/link): (*link.Linker).ForPurchaseOrders has this signature and reads once,
 // over network-fulfillment's GET /purchase-orders/{poNumber} (the NetworkOrder of a purchase
-// order: state, siteId and localOrderId once acknowledged; 404 purchase-order-not-found) once
-// that route is deployed. Without a link every order-management-side fact (OMOrders, WorkUnits,
+// order: state, siteId and localOrderId once acknowledged; 404 purchase-order-not-found), so it
+// works once that route is deployed. Without a link every order-management-side fact (OMOrders, WorkUnits,
 // PickTasksDone, PackTasks, Packages, ShipmentConfirmations) stays zero and is named in the
 // notes, whatever the order's expected outcome: a zero read without looking would pass the rules
 // of a cancelled or declined order.
@@ -107,9 +108,10 @@ import (
 )
 
 // OrderIDs links a placed order to the order-management orders raised for its purchase orders.
-// No route published today does (see the package comment); link.OrderIDs will, over
-// network-fulfillment's GET /purchase-orders/{poNumber}, and a runner can supply its own meanwhile
-// (the Kafka tap sees network-fulfillment's and order-management's events). poNumbers are the
+// No route published today does (see the package comment); (*link.Linker).ForPurchaseOrders does,
+// over network-fulfillment's GET /purchase-orders/{poNumber}, once that route is deployed, and a
+// runner can supply its own meanwhile (the Kafka tap sees network-fulfillment's and
+// order-management's events). poNumbers are the
 // purchase orders the collector found for the order: the ones order-sourcing's releases imply and
 // the ones a tracking journey names, whether or not vendor-connectivity could be read; p.OrderID
 // is the order being followed. Return every distinct order id found: two orders for one purchase
