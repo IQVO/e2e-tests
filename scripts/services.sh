@@ -261,6 +261,7 @@ up_workforce() {
     PATH_CATALOGUE_SOURCE=kafka \
     INSTALLED_CAPACITY_MODE=http \
     FULFILLMENT_EXECUTION_BASE_URL="${FULFILLMENT_BASE_URL}" \
+    LABOUR_PLAN_CONSUMER_GROUP="${WORKFORCE_LABOUR_PLAN_CONSUMER_GROUP}" \
     LOG_LEVEL=info
   wait_for_http "${WORKFORCE_BASE_URL}/healthz"
 }
@@ -309,7 +310,7 @@ up_network() {
 
 # warehouse-planning: producer of CapacityPlanPublished. Every consumer group
 # is mandatory (labor capacity, storage capacity, order demand, dock
-# appointment, observed capacity) plus the one DEMAND_SITE_ID the consumed
+# appointment, observed capacity, labour standards) plus the one DEMAND_SITE_ID the consumed
 # orders and task completions are attributed to.
 up_planning() {
   log "starting warehouse-planning on ${WAREHOUSE_PLANNING_BASE_URL}"
@@ -325,6 +326,7 @@ up_planning() {
     DEMAND_CONSUMER_GROUP="${WAREHOUSE_PLANNING_DEMAND_CONSUMER_GROUP}" \
     DOCK_APPOINTMENT_CONSUMER_GROUP="${WAREHOUSE_PLANNING_DOCK_APPOINTMENT_CONSUMER_GROUP}" \
     OBSERVED_CAPACITY_CONSUMER_GROUP="${WAREHOUSE_PLANNING_OBSERVED_CAPACITY_CONSUMER_GROUP}" \
+    LABOR_STANDARD_CONSUMER_GROUP="${WAREHOUSE_PLANNING_LABOR_STANDARD_CONSUMER_GROUP}" \
     DEMAND_SITE_ID="${WAREHOUSE_PLANNING_DEMAND_SITE_ID}" \
     OUTBOX_RELAY_INTERVAL="500ms" \
     LOG_LEVEL=info
