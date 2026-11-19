@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/claudioed/warehouse-e2e/internal/sim"
@@ -23,6 +24,15 @@ type Transport struct {
 	Driver     *Driver
 	Carrier    *Carrier
 	Tracker    *Tracker
+
+	// Tap, when set, is where the delivery-point flag is observed as an event: last-mile-delivery's
+	// DeliveryPointFlagged on its events topic (TopicLastMile). *sim.EventTap satisfies it and must be
+	// reading that topic. Optional: the order's tracking view (Parcel.OrderID) observes the same flag
+	// downstream, over REST. See flag.go.
+	Tap FlagTap
+
+	mu      sync.Mutex
+	tracked map[string]bool // tracking numbers already registered on Tap: EventTap.Track appends, a second one would count twice
 }
 
 // New builds the actors over c. log may be nil; a zero Settings takes the defaults.
@@ -53,7 +63,7 @@ func (t *Transport) DeliverOrder(ctx context.Context, orderID string, packages i
 	if err != nil {
 		return Delivery{Problems: []string{err.Error()}}
 	}
-	return t.Deliver(ctx, Parcel{TrackingNumbers: tns, OriginNodeID: origin, DestStationNodeID: destStation}, o)
+	return t.Deliver(ctx, Parcel{TrackingNumbers: tns, OriginNodeID: origin, DestStationNodeID: destStation, OrderID: orderID}, o)
 }
 
 // Deliver runs one parcel from its shipment to PackageDelivered over published
@@ -66,9 +76,14 @@ func (t *Transport) DeliverOrder(ctx context.Context, orderID string, packages i
 //     created minutes ahead), wait for induction, close it, ensure a partner,
 //     plan the route (the wave must be INDUCTION_CLOSED), dispatch the wave,
 //     start the route (the wave must be DISPATCHED);
-//  4. attempts: DELIVERED, or with FailFirstAttempt FAILED first and then, after
-//     the packages are re-inducted onto a second wave, a second route that
-//     delivers them (the redelivery);
+//  4. attempts: DELIVERED, or with FailFirstAttempt / FailedAttempts FAILED first
+//     (reporting FailureDetail) and then, after the packages are re-inducted onto
+//     the next wave, a new route per round, the one that delivers them (the
+//     redelivery). After FlagAfterStrikes counted failures (NOT_HOME or
+//     ACCESS_PROBLEM) at the stop last-mile-delivery flags the delivery point:
+//     (unless SkipVerify) the run waits to OBSERVE the flag, as the event on the
+//     Tap and as the advisory on the order's tracking view (flag.go), before the
+//     delivering round, and checks the advisory ends with the delivery;
 //  5. (unless SkipVerify) every package's journey reaches DELIVERED and none of
 //     its scans was stored without being applied.
 //
@@ -116,24 +131,47 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 	}
 
 	wantDelivered := len(p.TrackingNumbers)
-	outcome := OutcomeDelivered
-	if o.FailFirstAttempt {
-		outcome = OutcomeFailed
+	failures := o.failures()
+	if failures < 0 || failures > MaxFailedAttempts {
+		add("options: %d failed attempts asked, but the package can fail %d times at most (the third failure initiates its return instead of a redelivery)", failures, MaxFailedAttempts)
+		return d
 	}
-	recorded := t.round(ctx, &d, node, lr.Packed, lr.ArrivedAt, outcome, o)
-	if o.FailFirstAttempt && len(recorded) > 0 {
-		since := latestAttempt(d.Attempts)
+	detail := o.failureDetail()
+	if !DetailFits(OutcomeFailed, detail) || !DetailFits(OutcomeDelivered, o.DeliveredDetail) {
+		add("options: outcomeDetail %q on a failed and %q on a delivered attempt: not in the contract's closed list", detail, o.DeliveredDetail)
+		return d
+	}
+	flagExpected := !o.SkipVerify && Counted(detail) && failures >= FlagAfterStrikes
+	if flagExpected {
+		t.trackFlags(p.TrackingNumbers)
+	}
+
+	// Each failed round re-inducts its packages onto a later wave; the last round delivers them.
+	tns, since, strikes := lr.Packed, lr.ArrivedAt, 0
+	for i := 0; i < failures; i++ {
+		tns = t.round(ctx, &d, node, tns, since, OutcomeFailed, detail, o)
+		if len(tns) == 0 {
+			break
+		}
+		since = latestAttempt(d.Attempts)
+		if Counted(detail) {
+			strikes++
+		}
 		if !o.SkipVerify {
-			for _, tn := range recorded {
+			for _, tn := range tns {
 				if _, err := t.Tracker.AwaitState(ctx, tn, "AT_STATION"); err != nil {
 					add("%s", err)
 					break
 				}
 			}
 		}
-		recorded = t.round(ctx, &d, node, recorded, since, OutcomeDelivered, o)
-	} else if o.FailFirstAttempt {
-		recorded = nil
+		if flagExpected && strikes == FlagAfterStrikes {
+			t.awaitFlag(ctx, &d, p.OrderID, tns, FlagReason(detail))
+		}
+	}
+	var recorded []string
+	if failures == 0 || len(tns) > 0 {
+		recorded = t.round(ctx, &d, node, tns, since, OutcomeDelivered, o.DeliveredDetail, o)
 	}
 
 	delivered := recorded
@@ -149,16 +187,19 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 			}
 			d.Problems = append(d.Problems, ScanFindings(j)...)
 		}
+		if len(d.Flagged) > 0 && p.OrderID != "" {
+			t.awaitAdvisoryEnded(ctx, &d, p.OrderID, d.Flagged, delivered)
+		}
 	}
 	t.logf("parcel %v: %d problem(s), delivered=%v", p.TrackingNumbers, len(d.Problems), d.Delivered())
 	return d
 }
 
 // round is one pass over the station: wave, induction, dispatch, route, start,
-// attempts with the given outcome. since is the instant the packages are at the
+// attempts with the given outcome and outcomeDetail. since is the instant the packages are at the
 // station (the load's arrival, or a failed attempt's time); a wave must have an
 // induct cutoff after it. It returns the packages whose attempt was recorded.
-func (t *Transport) round(ctx context.Context, d *Delivery, node Node, tns []string, since time.Time, outcome string, o Options) []string {
+func (t *Transport) round(ctx context.Context, d *Delivery, node Node, tns []string, since time.Time, outcome, detail string, o Options) []string {
 	add := func(format string, a ...any) { d.Problems = append(d.Problems, fmt.Sprintf(format, a...)) }
 	if _, _, err := t.Station.EnsureWave(ctx, node, since); err != nil {
 		add("%s", err)
@@ -210,7 +251,7 @@ func (t *Transport) round(ctx context.Context, d *Delivery, node Node, tns []str
 			}
 		}
 	}
-	atts, problems := t.Driver.RunRoute(ctx, route.RouteID, tns, outcome)
+	atts, problems := t.Driver.RunRouteDetail(ctx, route.RouteID, tns, outcome, detail)
 	d.Attempts = append(d.Attempts, atts...)
 	d.Problems = append(d.Problems, problems...)
 	var recorded []string
