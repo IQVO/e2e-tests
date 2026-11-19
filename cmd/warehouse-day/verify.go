@@ -29,6 +29,9 @@ var tappedTopics = []string{
 	"warehouse.order-management.events",
 	"warehouse.workforce.events",
 	"warehouse.labor-performance.events",
+	// The planner's morning (warehouse-planning ADR 0023):
+	// WorkloadForecastReceived and LabourPlanCommitted.
+	planningEventsTopic,
 	// Analytics topics: most domain facts (StockReceived, TaskClaimed,
 	// PackageSealed, AssociateShiftStarted, ...) are published ONLY on a
 	// context's analytics stream, never on its integration topic (see each
@@ -303,25 +306,8 @@ func (s *sim) audit(ctx context.Context) bool {
 
 	// events
 	if s.tap != nil {
-		required := []string{
-			"StockReceived", "ItemStowed", "StockReserved", "StockPicked", "CycleCountCompleted", "DiscrepancyDetected",
-			"OrderAllocated", "WorkUnitCreated", "WorkReleased", "TaskCreated", "TaskClaimed", "TaskCompleted",
-			"PackageSealed", "LabelApplied", "PackageManifested", "PackageDiverted", "WeightDiscrepancyDetected",
-			"AssociateShiftStarted", "LaborAssigned", "AssociateBreakStarted", "AssociateBreakEnded", "AssociateShiftEnded",
-			"ShiftPlanCommitted", "TaskPerformanceRecorded", "CPTScheduleChanged", "LocationSlotRegistered",
-		}
-		if s.slotsImported == 0 {
-			// The site was already mapped on an earlier day: no slot is new,
-			// so facility-layout correctly registers (and publishes) nothing.
-			required = removeString(required, "LocationSlotRegistered")
-		}
-		var missing []string
-		for _, ty := range required {
-			if s.tap.Total(ty) == 0 {
-				missing = append(missing, ty)
-			}
-		}
-		add("integration events published", len(missing) == 0, "%d/%d required event types observed on Kafka; missing: %v", len(required)-len(missing), len(required), missing)
+		missing, required := s.missingEvents()
+		add("integration events published", len(missing) == 0, "%d/%d required event types observed on Kafka; missing: %v", required-len(missing), required, missing)
 		s.tap.Mu.Lock()
 		dlq := 0
 		for _, n := range s.tap.Dlq {
@@ -490,6 +476,55 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 		}
 	}
 	return a
+}
+
+// planningEventsTopic is warehouse-planning's integration topic: the
+// planner's WorkloadForecastReceived and LabourPlanCommitted.
+const planningEventsTopic = "warehouse.warehouse-planning.events"
+
+// plannerEvents are the planner's required event types, each counted on its
+// producer's topics only. The tap keys on the SHORT type (the last dotted
+// segment of the CloudEvents type), summed over every tapped topic, and
+// wes-work-planning publishes its own
+// com.warehouse.wes.work-planning.plan.ShiftPlanCommitted (retiring with
+// POST /paths/{pathId}/plan, its ADR 0049) on warehouse.work-planning.events
+// and warehouse.wes.analytics: counted fleet-wide it would stand in for
+// workforce-management's ShiftPlanCommitted.
+var plannerEvents = []struct {
+	typ    string
+	topics []string
+}{
+	{"WorkloadForecastReceived", []string{planningEventsTopic}},
+	{"LabourPlanCommitted", []string{planningEventsTopic}},
+	{"ShiftPlanCommitted", []string{"warehouse.workforce.events", "warehouse.workforce.analytics"}},
+}
+
+// missingEvents lists the required event types the tap did not observe and
+// says how many types are required.
+func (s *sim) missingEvents() (missing []string, required int) {
+	types := []string{
+		"StockReceived", "ItemStowed", "StockReserved", "StockPicked", "CycleCountCompleted", "DiscrepancyDetected",
+		"OrderAllocated", "WorkUnitCreated", "WorkReleased", "TaskCreated", "TaskClaimed", "TaskCompleted",
+		"PackageSealed", "LabelApplied", "PackageManifested", "PackageDiverted", "WeightDiscrepancyDetected",
+		"AssociateShiftStarted", "LaborAssigned", "AssociateBreakStarted", "AssociateBreakEnded", "AssociateShiftEnded",
+		"TaskPerformanceRecorded", "CPTScheduleChanged", "LocationSlotRegistered",
+	}
+	if s.slotsImported == 0 {
+		// The site was already mapped on an earlier day: no slot is new,
+		// so facility-layout correctly registers (and publishes) nothing.
+		types = removeString(types, "LocationSlotRegistered")
+	}
+	for _, ty := range types {
+		if s.tap.Total(ty) == 0 {
+			missing = append(missing, ty)
+		}
+	}
+	for _, e := range plannerEvents {
+		if s.tap.TotalOn(e.typ, e.topics...) == 0 {
+			missing = append(missing, e.typ+" on "+strings.Join(e.topics, "|"))
+		}
+	}
+	return missing, len(types) + len(plannerEvents)
 }
 
 func (s *sim) auditLabor(ctx context.Context) (bool, string) {

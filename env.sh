@@ -486,6 +486,10 @@ WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP="warehouse-planning-storage-${E2E_CONS
 WAREHOUSE_PLANNING_DEMAND_CONSUMER_GROUP="warehouse-planning-demand-${E2E_CONSUMER_GROUP_SUFFIX}"
 WAREHOUSE_PLANNING_DOCK_APPOINTMENT_CONSUMER_GROUP="warehouse-planning-dock-appointment-${E2E_CONSUMER_GROUP_SUFFIX}"
 WAREHOUSE_PLANNING_OBSERVED_CAPACITY_CONSUMER_GROUP="warehouse-planning-observed-capacity-${E2E_CONSUMER_GROUP_SUFFIX}"
+# warehouse-planning ADR 0022: the labour-standard copy of labor-performance (required at boot).
+WAREHOUSE_PLANNING_LABOR_STANDARD_CONSUMER_GROUP="warehouse-planning-labor-standards-${E2E_CONSUMER_GROUP_SUFFIX}"
+# workforce-management ADR 0043: the labour-plan copy of warehouse-planning (required at boot).
+WORKFORCE_LABOUR_PLAN_CONSUMER_GROUP="workforce-management-labour-plans-${E2E_CONSUMER_GROUP_SUFFIX}"
 WAREHOUSE_PLANNING_DEMAND_SITE_ID="${WAREHOUSE_PLANNING_DEMAND_SITE_ID:-E2E-DEMAND}"
 # NIP's pack-level consumer (product-master ProductPackLevel* facts).
 NIP_PACK_LEVEL_CONSUMER_GROUP="nip-pack-level-${E2E_CONSUMER_GROUP_SUFFIX}"
