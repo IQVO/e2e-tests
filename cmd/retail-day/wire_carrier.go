@@ -139,6 +139,8 @@ type carrierAdapter struct {
 	t     parcels
 	route func(orderID string) (origin, dest string, err error)
 	opt   transport.Options
+	// point, when set (-delivery-point), gives the first order delivered the delivery-point journey.
+	point *pointJourney
 }
 
 var _ day.Carrier = carrierAdapter{}
@@ -148,7 +150,17 @@ func (a carrierAdapter) DeliverOrder(ctx context.Context, orderID string, packag
 	if err != nil {
 		return day.Delivery{Problems: []string{err.Error()}}
 	}
-	d := a.t.DeliverOrder(ctx, orderID, packages, origin, dest, a.opt)
+	opt := a.opt
+	var journey bool
+	if a.point != nil {
+		var done func()
+		opt, journey, done = a.point.begin(a.opt)
+		defer done()
+	}
+	d := a.t.DeliverOrder(ctx, orderID, packages, origin, dest, opt)
+	if journey {
+		a.point.report(orderID, d)
+	}
 	return toDelivery(d)
 }
 

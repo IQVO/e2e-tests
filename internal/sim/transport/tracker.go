@@ -63,6 +63,9 @@ type TrackedPackage struct {
 	State          string `json:"state"`
 	GroupNo        int    `json:"-"`
 	GroupStatus    string `json:"-"`
+	// DeliveryPointAdvisory is present while the package has not ended and a delivery-point flag reached
+	// customer-ordering (its ADR 0015); nil means no flag arrived.
+	DeliveryPointAdvisory *Advisory `json:"deliveryPointAdvisory,omitempty"`
 }
 
 // OrderTracking is customer-ordering's tracking view of one order.

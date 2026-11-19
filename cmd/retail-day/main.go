@@ -91,6 +91,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	linkTimeout := fs.Duration("link-timeout", 2*time.Hour, "longest the day waits for ONE purchase order to be released, acknowledged and raised in order-management")
 	allowUnverified := fs.Bool("allow-unverified", false, "list what the evidence could not read (the run's dead letters when the broker cannot be read or -brokers is empty) as NOT VERIFIED instead of failing the day on it")
 	brokers := fs.String("brokers", envOr("KAFKA_BROKERS", defaultBrokers), "the ONE Kafka broker address (host:port) the run's dead letters are counted through; the k3s broker is not forwarded by k3s-edges.sh, so this needs a `kubectl port-forward svc/kafka 9092:9092` (the preflight says so). Empty: dead letters are not counted")
+	deliveryPoint := fs.Bool("delivery-point", false, "exercise the delivery-point chain (gap G67): the FIRST delivered order fails twice (the driver reports NOT_HOME), runs alone, and the day must observe DeliveryPointFlagged on last-mile-delivery's topic (read through -brokers; without it only the advisory on the order's tracking view) and the advisory on customer-ordering's tracking view")
 	provision := fs.Bool("provision", false, "let the readiness steps WRITE setup data: register missing -doors and -staging slots and declare a never-declared dock calendar. Never the CPT schedule (make provision-storefront), never bins")
 	runID := fs.String("run-id", "", "run id stamped on stations, plates, seals and ASNs: 3-12 upper-case letters or digits (default RD + the clock)")
 	fixtures := fs.String("fixtures", envOr("RETAIL_DAY_FIXTURES", "fixtures/storefront"), "directory of catalogue.json and fulfilment-site.json (the SKUs and the building's CPT schedule)")
@@ -182,7 +183,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Client: dayClient, RunID: id, Building: *building, NetworkSite: *netSite, VendorID: *vendor,
 		FixtureDir: *fixtures, NetworkData: *networkData, LinkTimeout: *linkTimeout, Parallel: *parallel,
 		Provision: *provision, Doors: splitList(*doors), Staging: splitList(*staging), StowBins: splitList(*stowBins),
-		Brokers: *brokers, Log: logf, ActorLog: actorLog,
+		Brokers: *brokers, DeliveryPoint: *deliveryPoint, Log: logf, ActorLog: actorLog,
 	})
 	if release != nil {
 		defer release()

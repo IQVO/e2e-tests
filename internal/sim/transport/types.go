@@ -28,6 +28,57 @@ const (
 	OutcomeCollected = "COLLECTED"
 )
 
+// Outcome details of POST /routes/{id}/attempts (schema OutcomeDetail, last-mile-delivery ADR 0014): a
+// closed list. FAILED accepts NOT_HOME, ACCESS_PROBLEM and OTHER; DELIVERED accepts SAFE_PLACE_USED; any
+// other pairing is 422 validation-failed. Omitted means "not reported" and is NOT the same as OTHER.
+const (
+	DetailNotHome       = "NOT_HOME"
+	DetailAccessProblem = "ACCESS_PROBLEM"
+	DetailOther         = "OTHER"
+	DetailSafePlaceUsed = "SAFE_PLACE_USED"
+)
+
+// FlagAfterStrikes is the number of counted failed visits (routes) at one delivery point after which
+// last-mile-delivery flags it (ADR 0014, FlagAfterStrikes). MaxFailedAttempts is how many failed attempts a
+// package can have and still be re-inducted: the third failure initiates its return instead (so a
+// delivery-point journey needs exactly FlagAfterStrikes failures and then a delivery).
+const (
+	FlagAfterStrikes  = 2
+	MaxFailedAttempts = 2
+)
+
+// DetailFits reports whether the contract accepts detail for outcome ("" is always accepted: not reported).
+func DetailFits(outcome, detail string) bool {
+	switch detail {
+	case "":
+		return true
+	case DetailNotHome, DetailAccessProblem, DetailOther:
+		return outcome == OutcomeFailed
+	case DetailSafePlaceUsed:
+		return outcome == OutcomeDelivered
+	}
+	return false
+}
+
+// Counted reports whether a FAILED attempt with this detail is a strike of the delivery point: only
+// NOT_HOME and ACCESS_PROBLEM count; OTHER and "not reported" are tallied, never counted.
+func Counted(detail string) bool { return detail == DetailNotHome || detail == DetailAccessProblem }
+
+// FlagReason is the reason last-mile-delivery gives a flag raised by these counted details: ACCESS_PROBLEM
+// when any of them is one, else NOT_HOME; "" when none is counted.
+func FlagReason(details ...string) string {
+	reason := ""
+	for _, d := range details {
+		switch d {
+		case DetailAccessProblem:
+			return DetailAccessProblem
+		case DetailNotHome:
+			reason = DetailNotHome
+		}
+	}
+	return reason
+}
+
 // Parcel is what the warehouse side hands to the network: the tracking numbers
 // of one shipped order (the ONLY link between the warehouse and the network
 // side), the node the load leaves from and the delivery station it goes to.
@@ -35,6 +86,9 @@ type Parcel struct {
 	TrackingNumbers   []string
 	OriginNodeID      string
 	DestStationNodeID string
+	// OrderID is customer-ordering's order of the packages. Optional: with it, a delivery-point flag is also
+	// looked for on the order's tracking view (the advisory); without it only the event tap can observe it.
+	OrderID string
 }
 
 // Options tunes one Deliver run.
@@ -43,10 +97,39 @@ type Options struct {
 	// (recipient not home); the packages are re-inducted onto a later wave and
 	// delivered by a second route: the redelivery.
 	FailFirstAttempt bool
+	// FailedAttempts makes the first N delivery attempts of every package FAILED (N = 0..MaxFailedAttempts),
+	// each followed by a re-induction onto a later wave and a new route; a delivery follows the last one.
+	// It wins over FailFirstAttempt (which is FailedAttempts = 1). With FlagAfterStrikes counted failures
+	// (FailureDetail NOT_HOME or ACCESS_PROBLEM) the delivery point is flagged and the run waits for the flag
+	// (see Transport.Tap and Parcel.OrderID).
+	FailedAttempts int
+	// FailureDetail is the outcomeDetail every FAILED attempt reports; empty means NOT_HOME.
+	FailureDetail string
+	// DeliveredDetail is the outcomeDetail of the DELIVERED attempt: empty (not reported) or SAFE_PLACE_USED.
+	DeliveredDetail string
 	// SkipVerify skips every read of shipping-and-tracking (journey exists
 	// before dispatch, OUT_FOR_DELIVERY before an attempt, DELIVERED at the
 	// end). The delivery is then judged by last-mile-delivery's answers only.
 	SkipVerify bool
+}
+
+// failures is how many attempts of every package are FAILED before the delivering one.
+func (o Options) failures() int {
+	if o.FailedAttempts != 0 {
+		return o.FailedAttempts
+	}
+	if o.FailFirstAttempt {
+		return 1
+	}
+	return 0
+}
+
+// failureDetail is the outcomeDetail of a FAILED attempt: NOT_HOME unless set.
+func (o Options) failureDetail() string {
+	if o.FailureDetail == "" {
+		return DetailNotHome
+	}
+	return o.FailureDetail
 }
 
 // Attempt is one recorded delivery attempt.
@@ -54,8 +137,10 @@ type Attempt struct {
 	RouteID        string
 	TrackingNumber string
 	Outcome        string
-	At             time.Time
-	FailureReason  string
+	// OutcomeDetail is what the driver reported (one of the closed list), "" when none.
+	OutcomeDetail string
+	At            time.Time
+	FailureReason string
 }
 
 // Delivery is the result of one Deliver run. WaveID and RouteID are those that
@@ -71,6 +156,11 @@ type Delivery struct {
 	// DeliveredAt is the time of the last DELIVERED attempt, set only when every
 	// package of the parcel was delivered.
 	DeliveredAt time.Time
+	// Flagged lists the packages the delivery-point flag was observed for (the tap saw DeliveryPointFlagged
+	// carrying the tracking number, or the order's tracking view showed its advisory), FlagReason the reason
+	// code it carried. Both are empty when no flag was expected or none was observed (then Problems says so).
+	Flagged    []string
+	FlagReason string
 	// Problems are the findings of the run: every step a service refused or that
 	// never happened within its bound. Empty means the run went as the contracts say.
 	Problems []string

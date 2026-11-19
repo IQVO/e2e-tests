@@ -54,6 +54,12 @@ type wireConfig struct {
 	Brokers     string
 	DeadLetters deadLetterCounter
 
+	// DeliveryPoint (-delivery-point) makes the first delivered order fail twice (NOT_HOME) so the
+	// delivery-point chain is exercised and DeliveryPointFlagged is observed (wire_deliverypoint.go). The
+	// event is read through Brokers (read only); FlagTap replaces that tap (a test's fake).
+	DeliveryPoint bool
+	FlagTap       transport.FlagTap
+
 	// Log is the run's progress line (stderr); ActorLog the actors' own chatter (nil unless -v).
 	Log      func(format string, args ...any)
 	ActorLog sim.LogFunc
@@ -110,6 +116,23 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 	nodes := &nodeBook{c: cfg.Client, vendorID: cfg.VendorID, networkSite: cfg.NetworkSite, prefixes: prefixes}
 	fl := floor.New(cfg.Client, nil, cfg.ActorLog, cfg.RunID, floorSettings(cfg))
 	tr := transport.New(cfg.Client, transport.SystemClock{}, cfg.ActorLog, transport.Settings{})
+	var point *pointJourney
+	releaseTap := func() {}
+	if cfg.DeliveryPoint {
+		point = newPointJourney(cfg.Log)
+		switch {
+		case cfg.FlagTap != nil:
+			tr.Tap = cfg.FlagTap
+		case cfg.Brokers != "":
+			tap, rel, err := newFlagTap(cfg.Brokers)
+			if err != nil {
+				return day.Phases{}, nil, fmt.Errorf("-delivery-point: -brokers: %w", err)
+			}
+			tr.Tap, releaseTap = tap, rel
+		default:
+			cfg.logf("delivery point: no -brokers, so the DeliveryPointFlagged event is not read; the flag is observed on the order's tracking view only")
+		}
+	}
 	lk := link.New(cfg.Client, linkSettings(cfg))
 	dead, releaseDead := cfg.DeadLetters, func() {}
 	if dead == nil {
@@ -123,7 +146,7 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 	watch := &sim.SuspendWatch{Log: cfg.ActorLog}
 	wctx, stopWatch := context.WithCancel(ctx)
 	go watch.Run(wctx)
-	stop := func() { stopWatch(); releaseDead() }
+	stop := func() { stopWatch(); releaseDead(); releaseTap() }
 
 	b := &building{
 		cfg: cfg, site: site, nodes: nodes, fl: fl, dead: dead,
@@ -137,7 +160,7 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 		Linker:    lk,
 		Floor:     floorAdapter{p: fl},
 		Shipper:   shipperAdapter{get: b.dock},
-		Carrier:   carrierAdapter{t: tr, route: nodes.route, opt: transport.Options{}},
+		Carrier:   carrierAdapter{t: tr, route: nodes.route, opt: transport.Options{}, point: point},
 		Restocker: restockAdapter{get: b.crew},
 		Evidence:  ev,
 
