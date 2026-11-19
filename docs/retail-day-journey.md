@@ -118,7 +118,7 @@ site's timezone, facility-layout zones and Staging slots for the same site, and 
 |---|---|
 | linehaul dispatcher | linehaul-transportation `POST /loads {departureId}`, `POST /loads/{id}/packages {trackingNumber}`, `.../closures`, `.../dispatches`, `.../receipts` |
 | station associate | last-mile-delivery `POST /waves`, `POST /waves/{id}/induction-closures`, `POST /waves/{id}/dispatches`, `POST /partners {stationNodeId, vanCapacity}`, `POST /routes {waveId, dspId, stops[]}` |
-| delivery driver | `POST /routes/{id}/starts`, `POST /routes/{id}/attempts {trackingNumber, outcome DELIVERED\|FAILED\|COLLECTED, at}` |
+| delivery driver | `POST /routes/{id}/starts`, `POST /routes/{id}/attempts {trackingNumber, outcome DELIVERED\|FAILED\|COLLECTED, outcomeDetail, at}`; `outcomeDetail` is the closed list `NOT_HOME`, `ACCESS_PROBLEM`, `OTHER` (FAILED) and `SAFE_PLACE_USED` (DELIVERED), omitted = not reported (see [the delivery-point chain](#the-delivery-point-chain-g67)) |
 | carrier | shipping-and-tracking `POST /journeys/{tn}/scans`, `POST /carrier-events` (only for CARRIER_HANDOFF areas; 786/787 run the network's own route) |
 
 - Linehaul has no time guard on close, dispatch or receive: a load can be opened, packed, closed and dispatched before
@@ -135,6 +135,39 @@ site's timezone, facility-layout zones and Staging slots for the same site, and 
 
 Order status: PLACED -> IN_FULFILLMENT (PO accepted) -> PARTIALLY_SHIPPED / SHIPPED -> PARTIALLY_DELIVERED /
 DELIVERED; CANCELLED, LOST, RETURNED on the matching events.
+
+### The delivery-point chain (G67)
+
+The driver client is what activates it: until an attempt carries `outcomeDetail`, last-mile-delivery tallies attempts as
+"other", never counts a strike and never publishes (its ADR `0014-delivery-point-profile`).
+
+```text
+driver  POST /routes/{id}/attempts FAILED + NOT_HOME | ACCESS_PROBLEM        (two VISITS = two routes, one stop key)
+  -> last-mile-delivery  DeliveryPointFlagged {stopKey, reason, failures, trackingNumbers, flaggedAt}   topic retailnetwork.last-mile-delivery.events
+  -> shipping-and-tracking  PackageDeliveryPointFlagged per package, by order id            (its ADR 0014-relay-the-delivery-point-flag-by-order-id)
+  -> customer-ordering  GET /orders/{id}/tracking: package.deliveryPointAdvisory {reason, flaggedAt}   (its ADR 0015; ends with the package)
+```
+
+What the simulator does about it (`internal/sim/transport`, `transport.Options{FailedAttempts, FailureDetail, DeliveredDetail}`):
+
+- **Two failed rounds, then the delivery.** A package that fails twice at one stop is flagged; a third failure would initiate
+  its return instead of a redelivery, so two is the most the actor asks for. Each failed round is a new wave and route
+  (a strike is one per route), so the order is delivered on its third route.
+- **It waits to SEE the flag**, before the delivering round: the `DeliveryPointFlagged` event on the topic (a read-only tap,
+  `transport.FlagTap`; nothing here writes or commits) and the advisory, with the reason the failed attempts reported, on the
+  order's tracking view. It does not require every package of the order: a strike keeps ONE tracking number per visit, so
+  the event names the first package of the visit only (finding F1 below). After the delivery it checks the advisory is gone.
+  A flag that does not come is a finding naming the missing leg (event, or relay to the tracking view), never a pass.
+- last-mile-delivery has **no REST read of the profile** (its ADR 0014 addendum: `GET /delivery-points/{stopKey}` is not built),
+  which is why the event and the tracking view are the two places to look.
+
+`cmd/retail-day -delivery-point` (default off) plays it: the FIRST delivered order fails twice (`NOT_HOME`), the rest are
+delivered as before. That order runs alone (a lock around the carrier phase): every simulated buyer has the same address
+("1 Simulation Way"), so the orders of one postal prefix are one delivery point, and a parallel DELIVERED attempt ends the
+point's episode and would clear the first strike of the flagged order (a false "no flag"). The event is read through `-brokers`
+(the same port-forward as the dead letters, read only); with `-brokers ""` only the advisory on the tracking view is observed and the
+log says so. The log line `delivery point: order <id> failed 2 times (NOT_HOME) and DeliveryPointFlagged was observed for [...]`
+is the evidence; a missing flag is a finding of that order's delivery and fails the day.
 
 ## 7. What the floor is not
 
@@ -162,6 +195,7 @@ existing behaviour to report, not to work around.
 | G10 | D | The listing -> SKU dictionary is GitOps (helm values) and listing ids are network-generated, so a reseed makes every PO `UNKNOWN_LISTING`. A run cannot create its own catalogue. | warehouse-infra |
 | G11 | F | `GET /orders/{id}` on the BFF shows checkout totals only when the cookie's checkoutId placed the order. | storefront-bff |
 | G12 | F | Cancel is possible only until the PO is accepted. | customer-ordering |
+| F1 | F | `DeliveryPointFlagged.trackingNumbers` names the packages "newly affected", but a strike holds ONE tracking number per visit (`internal/domain/deliverypoint/observe.go`: `addStrike`, `untold`), so when two packages of one order fail together on two routes only the first one of each visit is named: the second package never gets the flag, and its tracking view never shows the advisory. Read from the code, not observed on the cluster. | last-mile-delivery |
 
 ## Timing
 
@@ -203,7 +237,7 @@ network and the restock leg act. Nothing here has been run against the cluster.
 | evidence | composite: `collect.Collector` (with the linker's `ForPurchaseOrders`) answers Order and Shelf over published REST; `dlq.Counter` answers DeadLetters over Kafka, read only | the broker at `-brokers` (below) |
 
 Flags: `-seed`, `-shoppers` (>= 5), `-shelf`, `-parallel`, `-json`, `-allow-unverified`, `-brokers`, `-run-id`, `-fixtures`,
-`-network-data`, `-stow-bins`, `-v`; `-start-now` (play outside the release window: the PO wait lasts until the computed
+`-network-data`, `-stow-bins`, `-v`; `-delivery-point` (below, G67); `-start-now` (play outside the release window: the PO wait lasts until the computed
 release time, so `-link-timeout`, default 2h, must be longer than that; without it, or `-wait-for-window`, a run outside
 the window is refused); `-provision` (below).
 
