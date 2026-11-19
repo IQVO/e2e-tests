@@ -89,6 +89,7 @@ type world struct {
 	tracking *trackingFake
 	linehaul *linehaulFake
 	lastmile *lastMileFake
+	flags    *flagPipeline
 	nodes    map[string]fnode
 }
 
@@ -103,6 +104,7 @@ type fnode struct {
 func newWorld(t *testing.T) *world {
 	t.Helper()
 	w := &world{t: t, clock: NewManualClock(t0), idem: map[string]idemEntry{}, mux: http.NewServeMux(), nodes: map[string]fnode{}}
+	w.flags = newFlagPipeline(w)
 	w.ordering = newOrderingFake(w)
 	w.tracking = newTrackingFake(w)
 	w.linehaul = newLinehaulFake(w)

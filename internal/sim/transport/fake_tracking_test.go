@@ -37,6 +37,9 @@ type forder struct {
 	showAfter int // reads answered without packages before they appear
 	reads     int
 	groups    []fgroup
+	// followJourney makes a package's state the state of its journey instead of the fixed one it was
+	// registered with (a read model fed by PackageScanned): the delivery-point advisory ends with it.
+	followJourney bool
 }
 
 type orderingFake struct {
@@ -88,12 +91,21 @@ func newOrderingFake(w *world) *orderingFake {
 			return problem(404, "not-found", "unknown order")
 		}
 		ord.reads++
+		w.flags.tick() // the consumer of PackageDeliveryPointFlagged catches up by one request
 		groups := []map[string]any{}
 		for _, g := range ord.groups {
 			pk := []map[string]any{}
 			if ord.reads > ord.showAfter {
 				for _, p := range g.Pkgs {
-					pk = append(pk, map[string]any{"trackingNumber": p.TN, "destinationKind": "SHIP_TO", "state": p.State})
+					state := p.State
+					if j := w.tracking.journeys[p.TN]; j != nil && ord.followJourney {
+						state = j.state // the package state is the journey's, event-fed (PackageScanned)
+					}
+					pv := map[string]any{"trackingNumber": p.TN, "destinationKind": "SHIP_TO", "state": state}
+					if adv := w.flags.advisory(p.TN, state); adv != nil {
+						pv["deliveryPointAdvisory"] = adv
+					}
+					pk = append(pk, pv)
 				}
 			}
 			groups = append(groups, map[string]any{"groupNo": g.No, "promiseId": "p", "status": g.Status, "packages": pk})

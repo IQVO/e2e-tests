@@ -54,6 +54,7 @@ type fpartner struct {
 type fattempt struct {
 	TN      string
 	Outcome string
+	Detail  string
 	At      time.Time
 	Reason  string
 }
@@ -128,7 +129,11 @@ func (r *froute) view() map[string]any {
 	}
 	atts := []map[string]any{}
 	for _, a := range r.Attempts {
-		atts = append(atts, map[string]any{"routeId": r.ID, "trackingNumber": a.TN, "outcome": a.Outcome, "at": rfc(a.At)})
+		att := map[string]any{"routeId": r.ID, "trackingNumber": a.TN, "outcome": a.Outcome, "at": rfc(a.At)}
+		if a.Detail != "" {
+			att["outcomeDetail"] = a.Detail
+		}
+		atts = append(atts, att)
 	}
 	return map[string]any{"routeId": r.ID, "waveId": r.WaveID, "dspId": r.DSP, "stationNodeId": r.Station, "state": r.State, "stopCount": len(r.Stops), "stops": stops, "attempts": atts}
 }
@@ -500,7 +505,11 @@ func newLastMileFake(w *world) *lastMileFake {
 				return problem(409, "attempt-already-recorded", in.TrackingNumber)
 			}
 		}
-		rt.Attempts = append(rt.Attempts, fattempt{TN: in.TrackingNumber, Outcome: in.Outcome, At: in.At.UTC(), Reason: in.FailureReason})
+		rt.Attempts = append(rt.Attempts, fattempt{TN: in.TrackingNumber, Outcome: in.Outcome, Detail: in.OutcomeDetail, At: in.At.UTC(), Reason: in.FailureReason})
+		if in.Outcome != "COLLECTED" {
+			// updateProfile runs in the same unit of work as RecordAttempt (ADR 0014, item 6).
+			w.flags.attempt(l.stopKey(in.TrackingNumber), rt.ID, in.TrackingNumber, in.Outcome, in.OutcomeDetail, in.At.UTC())
+		}
 		switch in.Outcome {
 		case "DELIVERED", "COLLECTED":
 			w.scan(in.TrackingNumber, "DELIVERED", rt.Station, in.At)
@@ -520,7 +529,11 @@ func newLastMileFake(w *world) *lastMileFake {
 		if len(rt.Attempts) == total {
 			rt.State = "COMPLETED"
 		}
-		return created(map[string]any{"routeId": rt.ID, "trackingNumber": in.TrackingNumber, "outcome": in.Outcome, "at": rfc(in.At)})
+		out := map[string]any{"routeId": rt.ID, "trackingNumber": in.TrackingNumber, "outcome": in.Outcome, "at": rfc(in.At)}
+		if in.OutcomeDetail != "" {
+			out["outcomeDetail"] = in.OutcomeDetail
+		}
+		return created(out)
 	})
 	return l
 }

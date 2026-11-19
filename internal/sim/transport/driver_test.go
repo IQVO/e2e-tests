@@ -217,3 +217,114 @@ func toScans(in []fscan) []Scan {
 	}
 	return out
 }
+
+// outcomeDetail, the driver's report (last-mile-delivery apis/openapi.yaml: schema OutcomeDetail, enum
+// [NOT_HOME, ACCESS_PROBLEM, OTHER, SAFE_PLACE_USED]; FAILED accepts the first three, DELIVERED the last):
+// every accepted pairing is sent and stored as said; "" is omitted (a legacy client: not reported, not OTHER).
+func TestReportAttemptSendsEveryPairingTheContractAccepts(t *testing.T) {
+	for _, c := range []struct{ outcome, detail string }{
+		{OutcomeFailed, DetailNotHome}, {OutcomeFailed, DetailAccessProblem}, {OutcomeFailed, DetailOther},
+		{OutcomeDelivered, DetailSafePlaceUsed}, {OutcomeFailed, ""}, {OutcomeDelivered, ""},
+	} {
+		t.Run(c.outcome+"/"+c.detail, func(t *testing.T) {
+			w := newWorld(t)
+			_, rt := plannedRoute(t, w, true, tnA)
+			w.addWave(station, t0.Add(3*time.Hour), 50)
+			d := newDriver(w, NewTimeline())
+			ctx := context.Background()
+			if _, err := d.StartRoute(ctx, rt.ID); err != nil {
+				t.Fatal(err)
+			}
+			a, err := d.ReportAttempt(ctx, rt.ID, tnA, c.outcome, "", c.detail)
+			if err != nil || a.OutcomeDetail != c.detail || a.Outcome != c.outcome {
+				t.Fatalf("attempt = %+v, %v", a, err)
+			}
+			if got := rt.Attempts[0].Detail; got != c.detail {
+				t.Fatalf("the service stored outcomeDetail %q, the driver said %q", got, c.detail)
+			}
+			if (c.outcome == OutcomeFailed) != (a.FailureReason != "") {
+				t.Fatalf("failureReason %q for %s: required exactly when FAILED", a.FailureReason, c.outcome)
+			}
+			w.assertEveryPostKeyed()
+		})
+	}
+}
+
+// A pairing the contract refuses is never sent (it would be 422 validation-failed); the fake refuses it too,
+// so a driver that stopped checking would be caught by the service rule, not by the driver's own test.
+func TestReportAttemptRefusesAPairingTheContractRejectsBeforeAnyCall(t *testing.T) {
+	for _, c := range []struct{ outcome, detail string }{
+		{OutcomeDelivered, DetailNotHome}, {OutcomeDelivered, DetailAccessProblem}, {OutcomeDelivered, DetailOther},
+		{OutcomeFailed, DetailSafePlaceUsed}, {OutcomeCollected, DetailNotHome}, {OutcomeCollected, DetailSafePlaceUsed},
+		{OutcomeFailed, "BAD_DOG"}, {OutcomeFailed, "not_home"},
+	} {
+		t.Run(c.outcome+"/"+c.detail, func(t *testing.T) {
+			w := newWorld(t)
+			_, rt := plannedRoute(t, w, true, tnA)
+			d := newDriver(w, NewTimeline())
+			ctx := context.Background()
+			if _, err := d.StartRoute(ctx, rt.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.ReportAttempt(ctx, rt.ID, tnA, c.outcome, "", c.detail); err == nil || !strings.Contains(err.Error(), "outcomeDetail") {
+				t.Fatalf("err = %v, want a refusal naming outcomeDetail", err)
+			}
+			if n := w.countCalls(SvcLastMile, "POST /routes/"+rt.ID+"/attempts"); n != 0 {
+				t.Fatalf("%d attempt calls: the driver must refuse before sending", n)
+			}
+			// the contract itself: the same body, sent past the driver, is 422 validation-failed
+			body := map[string]any{"trackingNumber": tnA, "outcome": c.outcome, "outcomeDetail": c.detail, "at": w.now().Add(time.Minute).UTC()}
+			if c.outcome == OutcomeFailed {
+				body["failureReason"] = FailureReason
+			}
+			r := d.C.Call(ctx, SvcLastMile, "POST", "POST /routes/{routeId}/attempts", "/routes/"+rt.ID+"/attempts", body)
+			if r.Status != 422 || !strings.Contains(string(r.Body), "validation-failed") {
+				t.Fatalf("service answered %d %s, want 422 validation-failed", r.Status, r.Body)
+			}
+		})
+	}
+}
+
+// The closed list the driver sends is the contract's enum, spelled the same, and the legacy entry points keep
+// their behaviour: RecordAttempt says NOT_HOME on a FAILED attempt and nothing on the others.
+func TestTheDriversVocabularyIsTheContractsEnumAndLegacyCallsKeepTheirDetail(t *testing.T) {
+	if got, want := []string{DetailNotHome, DetailAccessProblem, DetailOther, DetailSafePlaceUsed}, []string{"NOT_HOME", "ACCESS_PROBLEM", "OTHER", "SAFE_PLACE_USED"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("vocabulary %v, want the contract's enum %v", got, want)
+	}
+	w := newWorld(t)
+	_, rt := plannedRoute(t, w, true, tnA, tnB)
+	w.addWave(station, t0.Add(3*time.Hour), 50)
+	d := newDriver(w, NewTimeline())
+	ctx := context.Background()
+	if _, err := d.StartRoute(ctx, rt.ID); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := d.RecordAttempt(ctx, rt.ID, tnA, OutcomeFailed, ""); err != nil || a.OutcomeDetail != DetailNotHome {
+		t.Fatalf("RecordAttempt FAILED = %+v, %v", a, err)
+	}
+	if a, err := d.RecordAttempt(ctx, rt.ID, tnB, OutcomeDelivered, ""); err != nil || a.OutcomeDetail != "" {
+		t.Fatalf("RecordAttempt DELIVERED = %+v, %v", a, err)
+	}
+	if got := attemptsOf(rt); !reflect.DeepEqual(got, []string{tnA + " FAILED NOT_HOME", tnB + " DELIVERED "}) {
+		t.Fatalf("stored %v", got)
+	}
+}
+
+func TestRunRouteDetailReportsTheDetailOnEveryAttemptAndRefusalsAreFindings(t *testing.T) {
+	w := newWorld(t)
+	_, rt := plannedRoute(t, w, true, tnA, tnB)
+	w.addWave(station, t0.Add(3*time.Hour), 50)
+	d := newDriver(w, NewTimeline())
+	ctx := context.Background()
+	if _, err := d.StartRoute(ctx, rt.ID); err != nil {
+		t.Fatal(err)
+	}
+	atts, problems := d.RunRouteDetail(ctx, rt.ID, []string{tnA, tnB}, OutcomeFailed, DetailAccessProblem)
+	if len(atts) != 2 || len(problems) != 0 || atts[0].OutcomeDetail != DetailAccessProblem || atts[1].OutcomeDetail != DetailAccessProblem {
+		t.Fatalf("attempts %+v problems %v", atts, problems)
+	}
+	atts, problems = d.RunRouteDetail(ctx, rt.ID, []string{tnA}, OutcomeDelivered, DetailNotHome)
+	if len(atts) != 0 || len(problems) != 1 || !strings.Contains(problems[0], tnA) || !strings.Contains(problems[0], "outcomeDetail") {
+		t.Fatalf("attempts %+v problems %v", atts, problems)
+	}
+}

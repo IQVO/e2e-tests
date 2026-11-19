@@ -100,6 +100,18 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 		return d
 	}
 
+	// options first: a refused option must cost no write
+	failures := o.failures()
+	if failures < 0 || failures > MaxFailedAttempts {
+		add("options: %d failed attempts asked, but the package can fail %d times at most (the third failure initiates its return instead of a redelivery)", failures, MaxFailedAttempts)
+		return d
+	}
+	detail := o.failureDetail()
+	if !DetailFits(OutcomeFailed, detail) || !DetailFits(OutcomeDelivered, o.DeliveredDetail) {
+		add("options: outcomeDetail %q on a failed and %q on a delivered attempt: not in the contract's closed list", detail, o.DeliveredDetail)
+		return d
+	}
+
 	if !o.SkipVerify {
 		for _, tn := range p.TrackingNumbers {
 			if _, err := t.Tracker.AwaitJourney(ctx, tn); err != nil {
@@ -131,16 +143,6 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 	}
 
 	wantDelivered := len(p.TrackingNumbers)
-	failures := o.failures()
-	if failures < 0 || failures > MaxFailedAttempts {
-		add("options: %d failed attempts asked, but the package can fail %d times at most (the third failure initiates its return instead of a redelivery)", failures, MaxFailedAttempts)
-		return d
-	}
-	detail := o.failureDetail()
-	if !DetailFits(OutcomeFailed, detail) || !DetailFits(OutcomeDelivered, o.DeliveredDetail) {
-		add("options: outcomeDetail %q on a failed and %q on a delivered attempt: not in the contract's closed list", detail, o.DeliveredDetail)
-		return d
-	}
 	flagExpected := !o.SkipVerify && Counted(detail) && failures >= FlagAfterStrikes
 	if flagExpected {
 		t.trackFlags(p.TrackingNumbers)
