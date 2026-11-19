@@ -149,16 +149,14 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 	}
 
 	// Each failed round re-inducts its packages onto a later wave; the last round delivers them.
-	tns, since, strikes := lr.Packed, lr.ArrivedAt, 0
+	tns, since, failedRounds := lr.Packed, lr.ArrivedAt, 0
 	for i := 0; i < failures; i++ {
 		tns = t.round(ctx, &d, node, tns, since, OutcomeFailed, detail, o)
 		if len(tns) == 0 {
 			break
 		}
 		since = latestAttempt(d.Attempts)
-		if Counted(detail) {
-			strikes++
-		}
+		failedRounds++
 		if !o.SkipVerify {
 			for _, tn := range tns {
 				if _, err := t.Tracker.AwaitState(ctx, tn, "AT_STATION"); err != nil {
@@ -167,7 +165,7 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 				}
 			}
 		}
-		if flagExpected && strikes == FlagAfterStrikes {
+		if flagExpected && failedRounds == FlagAfterStrikes {
 			t.awaitFlag(ctx, &d, p.OrderID, tns, FlagReason(detail))
 		}
 	}

@@ -188,6 +188,9 @@ func TestOtherIsNeverCountedSoNoFlagIsExpectedOrRaised(t *testing.T) {
 			t.Fatalf("attempt %+v", a)
 		}
 	}
+	if w.flags.tap.tracks != 0 {
+		t.Fatalf("%d packages tracked on the tap though OTHER raises no flag", w.flags.tap.tracks)
+	}
 }
 
 // Two failures that never reach the profile (a stop key `pkg:<tn>`: the label data had not arrived when the
@@ -361,5 +364,54 @@ func TestADeliveryAtTheStopEndsTheEpisode(t *testing.T) {
 	// a parcel of another order failing at the flagged point is told too, once
 	if ev := step("r6", "T9", OutcomeFailed, DetailNotHome); ev == nil || !reflect.DeepEqual(ev.TNs, []string{"T9"}) {
 		t.Fatalf("another order's parcel = %+v", ev)
+	}
+}
+
+func TestAPackageIsTrackedOnTheTapOnceHoweverOftenItIsRegistered(t *testing.T) {
+	w, tp, _ := flagWorld(t)
+	tp.trackFlags([]string{tnA, tnB})
+	tp.trackFlags([]string{tnB, tnA})
+	if w.flags.tap.tracks != 2 {
+		t.Fatalf("%d Track calls for 2 packages", w.flags.tap.tracks)
+	}
+}
+
+// The advisory is waited out only for packages that were DELIVERED: a flagged package that was not delivered
+// legitimately keeps it, and with nothing delivered there is nothing to read.
+func TestOnlyDeliveredPackagesAreWaitedOnToLoseTheAdvisory(t *testing.T) {
+	w, tp, _ := flagWorld(t)
+	w.flags.flags[tnA] = Advisory{Reason: DetailNotHome, FlaggedAt: t0}
+	w.tracking.journeys[tnA].state = "AT_STATION"
+	ctx := context.Background()
+
+	var d Delivery
+	tp.awaitAdvisoryEnded(ctx, &d, flagOrder, []string{tnA}, []string{tnB}) // tnA was not delivered
+	if len(d.Problems) != 0 {
+		t.Fatalf("problems for a package that was not delivered: %v", d.Problems)
+	}
+	if n := w.countCalls(SvcOrdering, "GET /orders/"+flagOrder+"/tracking"); n != 0 {
+		t.Fatalf("%d reads of the tracking view with no delivered flagged package", n)
+	}
+	tp.awaitAdvisoryEnded(ctx, &d, flagOrder, []string{tnA}, []string{tnA}) // delivered, yet the view still shows it
+	if len(d.Problems) != 1 || !strings.Contains(d.Problems[0], tnA) {
+		t.Fatalf("problems = %v", d.Problems)
+	}
+}
+
+func TestTheFlagReasonIsAccessProblemWhenAnyCountedFailureSaidSo(t *testing.T) {
+	for _, c := range []struct {
+		details []string
+		want    string
+	}{
+		{[]string{DetailNotHome, DetailNotHome}, DetailNotHome},
+		{[]string{DetailAccessProblem, DetailNotHome}, DetailAccessProblem},
+		{[]string{DetailNotHome, DetailAccessProblem}, DetailAccessProblem},
+		{[]string{DetailOther, DetailNotHome}, DetailNotHome},
+		{[]string{DetailOther, ""}, ""},
+		{nil, ""},
+	} {
+		if got := FlagReason(c.details...); got != c.want {
+			t.Errorf("FlagReason(%v) = %q, want %q", c.details, got, c.want)
+		}
 	}
 }

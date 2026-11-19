@@ -26,7 +26,9 @@ package transport
 //   - the induction cutoff is compared with the ARRIVAL time, never with the processing time.
 
 import (
+	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -472,6 +474,12 @@ func newLastMileFake(w *world) *lastMileFake {
 		}
 		if bad := strict(body, &in); bad != nil {
 			return *bad
+		}
+		// a PRESENT outcomeDetail must be one of the enum (an empty string is not "omitted": 422)
+		var raw map[string]json.RawMessage
+		_ = json.Unmarshal(body, &raw)
+		if _, present := raw["outcomeDetail"]; present && !slices.Contains([]string{"NOT_HOME", "ACCESS_PROBLEM", "OTHER", "SAFE_PLACE_USED"}, in.OutcomeDetail) {
+			return problem(422, "validation-failed", "outcomeDetail is not one of NOT_HOME, ACCESS_PROBLEM, OTHER, SAFE_PLACE_USED")
 		}
 		if in.At.IsZero() || (in.Outcome != "DELIVERED" && in.Outcome != "FAILED" && in.Outcome != "COLLECTED") {
 			return problem(422, "validation-failed", "outcome and at are required")
