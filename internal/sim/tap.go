@@ -167,6 +167,21 @@ func (t *EventTap) Total(typ string) int {
 	return n
 }
 
+// TotalOn is how many messages of the given short type the run produced on
+// the given topics only. The short type drops the producer's prefix, so two
+// contexts publishing the same name (workforce-management's and
+// wes-work-planning's ShiftPlanCommitted) count together in Total; the
+// producer's own topics tell them apart.
+func (t *EventTap) TotalOn(typ string, topics ...string) int {
+	t.Mu.Lock()
+	defer t.Mu.Unlock()
+	n := 0
+	for _, topic := range topics {
+		n += t.Counts[topic][typ]
+	}
+	return n
+}
+
 // Close stops every reader.
 func (t *EventTap) Close() {
 	for _, r := range t.Readers {

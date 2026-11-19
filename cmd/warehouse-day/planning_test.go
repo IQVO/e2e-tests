@@ -105,6 +105,46 @@ func requestsTo(f *fakeServices, method, path string) []map[string]any {
 	return out
 }
 
+// TestPlannerEventsAreCountedOnTheirProducersTopics: wes-work-planning's retiring
+// plan.ShiftPlanCommitted shares workforce-management's short type, so it must not satisfy the
+// requirement; warehouse-planning's two events are required on its topic, which the tap reads.
+func TestPlannerEventsAreCountedOnTheirProducersTopics(t *testing.T) {
+	tap := &eventTap{Counts: map[string]map[string]int{
+		"warehouse.work-planning.events": {"ShiftPlanCommitted": 1, "ChargeForecastReceived": 1},
+		"warehouse.wes.analytics":        {"ShiftPlanCommitted": 1},
+	}}
+	s := &sim{tap: tap, slotsImported: 1}
+	missing, required := s.missingEvents()
+	for _, want := range []string{
+		"ShiftPlanCommitted on warehouse.workforce.events|warehouse.workforce.analytics",
+		"WorkloadForecastReceived on " + planningEventsTopic,
+		"LabourPlanCommitted on " + planningEventsTopic,
+	} {
+		if !slices.Contains(missing, want) {
+			t.Errorf("missing %v does not report %q", missing, want)
+		}
+	}
+	if required != 28 || len(missing) != required {
+		t.Errorf("%d/%d missing, want all 28 required types missing on an empty day", len(missing), required)
+	}
+
+	tap.Counts["warehouse.workforce.analytics"] = map[string]int{"ShiftPlanCommitted": 1}
+	tap.Counts[planningEventsTopic] = map[string]int{"WorkloadForecastReceived": 1, "LabourPlanCommitted": 1}
+	missing, _ = s.missingEvents()
+	for _, m := range missing {
+		if strings.Contains(m, "ShiftPlanCommitted") || strings.Contains(m, "WorkloadForecastReceived") || strings.Contains(m, "LabourPlanCommitted") {
+			t.Errorf("%q reported missing although its producer published it", m)
+		}
+	}
+	for _, e := range plannerEvents {
+		for _, topic := range e.topics {
+			if !slices.Contains(tappedTopics, topic) {
+				t.Errorf("%s is counted on %s, which the tap does not read", e.typ, topic)
+			}
+		}
+	}
+}
+
 // TestPlanTheDayPlansThroughWarehousePlanning: the forecast and the labour plan are PUT on
 // warehouse-planning (heads left to be derived from the forecast, over a shift window that covers
 // every forecast bucket), the proposal comes from the published labour plan (no charge), the shift
