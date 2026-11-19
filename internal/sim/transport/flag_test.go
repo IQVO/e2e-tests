@@ -432,3 +432,17 @@ func TestATapThatCannotReadItsTopicSaysWhyInTheFinding(t *testing.T) {
 		t.Fatalf("problems = %q", d.Problems)
 	}
 }
+
+// The retail day's entry point: DeliverOrder reads the numbers from the order's tracking view and carries the
+// order id, so the advisory leg is read without the caller naming it.
+func TestDeliverOrderCarriesTheOrderIDSoTheAdvisoryIsRead(t *testing.T) {
+	w, tp, _ := flagWorld(t)
+	tp.Tap = nil // the REST leg alone
+	d := tp.DeliverOrder(context.Background(), flagOrder, 2, site, station, Options{FailedAttempts: 2})
+	if !d.OK() || !reflect.DeepEqual(d.Flagged, []string{tnA}) || d.FlagReason != DetailNotHome {
+		t.Fatalf("delivery = %+v", d)
+	}
+	if w.countCalls(SvcOrdering, "GET /orders/"+flagOrder+"/tracking") < 2 {
+		t.Fatal("the tracking view was not read for the advisory")
+	}
+}
