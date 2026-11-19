@@ -19,9 +19,16 @@ const (
 	// (product-master ADR 0001/0003); inventory-storage and the readers
 	// only keep local copies fed by its events.
 	svcProductMaster = "product-master"
+	// svcPlanning owns the planner's morning: the workload forecast and the
+	// labour plan (warehouse-planning ADR 0023; they left wes-work-planning's
+	// POST /paths/{pathId}/charge and /plan). Kong routes it at
+	// /api/warehouse-planning like every other service.
+	svcPlanning = "warehouse-planning"
 )
 
-var allServices = []string{svcFacility, svcProductMaster, svcInventory, svcWES, svcFulfillment, svcWorkforce, svcOrder, svcProcessPath, svcLabor}
+// allServices is every context the day calls: the health sweep checks each
+// one and the gateway mode routes each one.
+var allServices = []string{svcFacility, svcProductMaster, svcInventory, svcWES, svcFulfillment, svcWorkforce, svcOrder, svcProcessPath, svcLabor, svcPlanning}
 
 func newAPI(cfg config, stats *callStats) *api {
 	var base map[string]string
@@ -38,6 +45,8 @@ func newAPI(cfg config, stats *callStats) *api {
 		base[svcProcessPath] = envOr("PROCESS_PATH_BASE_URL", "http://localhost:8087")
 		base[svcLabor] = envOr("LABOR_BASE_URL", "http://localhost:8088")
 		base[svcProductMaster] = envOr("PRODUCT_MASTER_BASE_URL", "http://localhost:8090")
+		// env.sh: WAREHOUSE_PLANNING_HTTP_PORT=8100.
+		base[svcPlanning] = envOr("WAREHOUSE_PLANNING_BASE_URL", "http://localhost:8100")
 	}
 	return simlib.NewClient(base, stats)
 }
