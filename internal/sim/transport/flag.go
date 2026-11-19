@@ -81,7 +81,11 @@ func (t *Transport) awaitFlag(ctx context.Context, d *Delivery, orderID string, 
 			return len(seen) > 0, fmt.Sprintf("%s seen for %d of %d packages", EventDeliveryPointFlagged, len(seen), len(tns)), nil
 		})
 		if err != nil {
-			add("delivery point of %v: last-mile-delivery published no %s after two %s attempts (%s): %s", tns, EventDeliveryPointFlagged, reason, TopicLastMile, err)
+			why := ""
+			if te, ok := t.Tap.(interface{ Err() error }); ok && te.Err() != nil {
+				why = " (the tap could not read the topic: " + te.Err().Error() + ")" // not "published nothing": it could not look
+			}
+			add("delivery point of %v: last-mile-delivery published no %s after two %s attempts (%s): %s%s", tns, EventDeliveryPointFlagged, reason, TopicLastMile, err, why)
 		} else {
 			flagged = append(flagged, seen...)
 		}

@@ -214,6 +214,7 @@ type fakeTap struct {
 	tracked map[string]bool
 	seen    map[string]int
 	delayed []delayedEvent
+	err     error
 	tracks  int // Track calls: a second Track of one ref would count every event twice
 }
 
@@ -261,4 +262,11 @@ func (t *fakeTap) Seen(ref, typ string) int {
 		return 0
 	}
 	return t.seen[ref]
+}
+
+// Err is what a tap that cannot read its topic reports (the retail-day tap over a port-forwarded broker does).
+func (t *fakeTap) Err() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.err
 }

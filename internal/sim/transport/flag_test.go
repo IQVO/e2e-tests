@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -413,5 +414,21 @@ func TestTheFlagReasonIsAccessProblemWhenAnyCountedFailureSaidSo(t *testing.T) {
 		if got := FlagReason(c.details...); got != c.want {
 			t.Errorf("FlagReason(%v) = %q, want %q", c.details, got, c.want)
 		}
+	}
+}
+
+// A tap that could not read the topic says so in the finding: "published nothing" and "could not look" differ.
+func TestATapThatCannotReadItsTopicSaysWhyInTheFinding(t *testing.T) {
+	w, tp, p := flagWorld(t)
+	delete(w.lastmile.stopKeys, tnA)
+	delete(w.lastmile.stopKeys, tnB)
+	w.flags.tap.err = errors.New("dial tcp 127.0.0.1:9092: connect: connection refused")
+	d := tp.Deliver(context.Background(), p, Options{FailedAttempts: 2})
+	found := false
+	for _, pr := range d.Problems {
+		found = found || (strings.Contains(pr, "published no DeliveryPointFlagged") && strings.Contains(pr, "the tap could not read the topic: dial tcp 127.0.0.1:9092"))
+	}
+	if !found {
+		t.Fatalf("problems = %q", d.Problems)
 	}
 }
