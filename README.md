@@ -356,7 +356,8 @@ The day, hour by hour:
 |---|---|---|
 | 05:30 | control tower | facility-layout `POST /location-types` + `POST /location-imports` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}`; product-master `PUT /products/{sku}` (every SKU) + `PUT /products/{sku}/classification` (fragile SKUs; inventory-storage and the readers learn it from `warehouse.product-master.events`); process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule` (the sim's own site, `SIM1`); labor-performance `POST /standards` |
 | 05:30 | receiving | inventory-storage `POST /stock-receipts` + `POST /stowages` into registered bins (the ASN-driven path, inbound-receiving `POST /asns` → `/receipts` → `/receipts/{id}/lines` → `/receipts/{id}/closures`, whose Good lines inventory-storage books as staged stock, is covered by `@inbound-receiving` and is not part of this simulated day) |
-| 06:00 | supervisor | workforce-management `POST /associates/{id}/shift-starts`, `POST /shift-plans`, assignments; WES charge/plan; fulfillment station registration + `POST /stations/{id}/check-ins` |
+| 06:00 | planner | warehouse-planning `PUT /workload-forecasts/SIM1/PICK` (the CPT buckets) + `PUT /labour-plans/SIM1/{shiftId}/PICK` without `planned_heads` (derived from the forecast; `422 heads-exceed-stations` falls back to the staffed heads, a finding); workforce-management `POST /paths/PICK/plan-proposals` with `siteCode` + `shiftId`, no charge (polled while its copy of `LabourPlanCommitted` arrives; a timeout is a finding) |
+| 06:00 | supervisor | workforce-management `POST /associates/{id}/shift-starts`, `POST /shift-plans`, assignments; fulfillment station registration + `POST /stations/{id}/check-ins` |
 | 06:00-20:00 | customers | order-management `POST /orders` (`fulfillmentSiteId: SIM1`) on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
 | all day | pickers / flex | `POST /stations/{id}/task-claims` (PICK), `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `POST /reservations/{id}/pick-confirmations`, `POST /tasks/{id}/completions`, `POST /rebin/arrivals` |
 | all day | packers / SLAM | `POST /stations/{id}/task-claims` (PACK), `POST /tasks/{id}/package-seals`, `POST /packages/{id}/slam-runs` (weight mismatch injected), `GET /packages?orderRef=` -> LABELED / DIVERTED |
@@ -392,7 +393,8 @@ drops `fulfillmentSiteId` is a finding. What else the day writes, by site:
 | workforce-management start-shift (`siteCode`), shift plan, staffing gap (`buildingId`, `-building`, default SIM1) | SIM1 (the staffing-gap query stays unscoped: `buildingId` only) |
 | process-path-management `POST /process-paths` (PICK, PACK, SLAM, REBIN) | fleet-wide catalogue, no site in the API; only paths that are missing are created |
 | labor-performance `POST /standards` | fleet-wide per task type, no site in the API: revises the active PICK/PACK/SLAM standard |
-| wes-work-planning `POST /paths/pick/charge`, `/plan` | fleet-wide per WES pool, no site in the API (the pool the storefront's orders use too) |
+| warehouse-planning workload forecast (`PUT /workload-forecasts/{site_id}/PICK`) and labour plan (`PUT /labour-plans/{site_id}/{shiftId}/PICK`) | SIM1 (`-site`); the forecast is replaced on every run, the labour plan is run-scoped through the shift id |
+| workforce-management proposal from the labour plan (`siteCode`) | SIM1 (`-site`, the labour plan's `site_id`) |
 | fulfillment-execution `POST /cpt-miss-sweeps`, `/task-lease-expirations` | fleet-wide sweeps, no site in the API |
 
 Pin `E2E_CONSUMER_GROUP_SUFFIX` (e.g. `warehouse-day`) before `make up` when
