@@ -127,7 +127,7 @@ func allDigits(s string) bool {
 
 // loadSites reads the pilot sites from facility-layout: role, and every Active storage slot with
 // its zone's temperature class and hazmat rating and its volume and weight limits. Amnesty slots
-// (exceptions) are not stock locations and are left out.
+// (exceptions) and AS/RS logical locations (totes only) are not loose-stock locations and are left out.
 func loadSites(ctx context.Context, r *reader, codes []string) ([]Site, error) {
 	type siteRow struct {
 		SiteCode string `json:"siteCode"`
@@ -166,10 +166,11 @@ func loadSites(ctx context.Context, r *reader, codes []string) ([]Site, error) {
 			zone[z.ZoneID] = i
 		}
 		type locRow struct {
-			Code     string `json:"locationCode"`
-			ZoneID   string `json:"zoneId"`
-			Status   string `json:"status"`
-			Capacity struct {
+			Code         string `json:"locationCode"`
+			ZoneID       string `json:"zoneId"`
+			Status       string `json:"status"`
+			LocationType string `json:"locationType"`
+			Capacity     struct {
 				MaxWeightKg float64 `json:"maxWeightKg"`
 				MaxVolumeM3 float64 `json:"maxVolumeM3"`
 			} `json:"capacity"`
@@ -181,7 +182,7 @@ func loadSites(ctx context.Context, r *reader, codes []string) ([]Site, error) {
 		s := Site{Code: code, Role: role}
 		for _, l := range locs {
 			zi, ok := zone[l.ZoneID]
-			if !ok || l.Status != "Active" || zones[zi].ZoneCode == "AMN" || l.Capacity.MaxVolumeM3 <= 0 {
+			if !ok || !isStockSlot(l.Status, zones[zi].ZoneCode, l.LocationType, l.Capacity.MaxVolumeM3) {
 				continue
 			}
 			z := zones[zi]
@@ -192,4 +193,15 @@ func loadSites(ctx context.Context, r *reader, codes []string) ([]Site, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// automatedStorageType is facility-layout's well-known LocationType of an AS/RS logical location
+// (facility-layout ADR 0048). Its stock lives in totes (inventory-storage ADR 0054), never loose, so
+// it is never a seeding bin.
+const automatedStorageType = "AutomatedStorage"
+
+// isStockSlot reports whether a Storage-role slot may receive seeded loose stock: Active, not an
+// amnesty slot, not an AS/RS logical location, and with a volume limit.
+func isStockSlot(status, zoneCode, locationType string, maxVolumeM3 float64) bool {
+	return status == "Active" && zoneCode != "AMN" && locationType != automatedStorageType && maxVolumeM3 > 0
 }
