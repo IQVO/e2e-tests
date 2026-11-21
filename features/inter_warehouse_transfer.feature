@@ -36,7 +36,7 @@ Feature: Inter-warehouse transfer saga across real services
 
   Not covered, and why: a SHORT pick (picked quantity below the allocated
   quantity). fulfillment-execution's completion contract carries no picked
-  quantity (POST /tasks/{id}/complete takes only a stationId; the fact's
+  quantity (POST /tasks/{id}/completions takes only a stationId; the fact's
   quantity is the released quantity), so no real service can produce one
   today. NIP's own short-pick handling (ADR 0005) is proven in its repo.
 
@@ -117,3 +117,33 @@ Feature: Inter-warehouse transfer saga across real services
     And wes-work-planning has no work unit for the transfer
     And fulfillment-execution has no task for the transfer
     And destination site "E2E-DEST" scanning 5 units against the transfer's rejected line is quarantined by inventory-storage
+
+  # Was parked as @blocked @wip-known-defect: network-inventory-planning kept reservation_id
+  # on a CANCELLED transfer and its own CHECK refused it (ADR 0023 there, fixed in #111).
+  @e2e @inter-warehouse-transfer
+  Scenario: Cancelling an ALLOCATED transfer releases the origin hold and closes the saga
+    Given the harness injects facility-layout's SiteCapabilityChanged for site "E2E-ORIGIN" with transfer origin and destination enabled
+    And the harness injects facility-layout's SiteCapabilityChanged for site "E2E-DEST" with transfer origin and destination enabled
+    And the harness injects order-management's SiteSkuDemandChanged for site "E2E-DEST": 10 units of SKU "SKU-XFER-CNCL-<run>" due in 2 hours
+    And the harness injects order-management's SiteSkuDemandChanged for site "E2E-ORIGIN": 1 units of SKU "SKU-XFER-BASE-<run>" due in 2 hours
+    And warehouse-planning publishes a capacity plan for site "E2E-ORIGIN" of 1000 orders per hour covering the next 48 hours
+    And warehouse-planning publishes a capacity plan for site "E2E-DEST" of 1000 orders per hour covering the next 48 hours
+    And site "E2E-ORIGIN" holds 20 units of SKU "SKU-XFER-CNCL-<run>" stowed in bin "E2E-ORIGIN-BIN-CNCL-<run>" in inventory-storage
+
+    When I approve a transfer of 5 units of SKU "SKU-XFER-CNCL-<run>" from site "E2E-ORIGIN" to site "E2E-DEST" in network-inventory-planning
+    Then inventory-storage eventually publishes TransferStockAllocated for the transfer: 5 units at site "E2E-ORIGIN"
+    And network-inventory-planning eventually reports the transfer as ALLOCATED
+
+    # --- the operator cancels after allocation: RELEASING, not CANCELLED yet
+    When I cancel the transfer in network-inventory-planning with reason "e2e cancel-after-allocation"
+    Then network-inventory-planning eventually reports the transfer as RELEASING
+
+    # --- inventory-storage resolves the hold and the saga settles
+    And inventory-storage eventually publishes TransferStockAllocationReleased for the transfer with outcome RELEASED
+    And inventory-storage's reservation for the transfer is revoked
+    And network-inventory-planning eventually reports the transfer as CANCELLED
+
+    # NOT asserted here, on purpose: the pick work demand is released when the transfer becomes
+    # ALLOCATED (ADR 0005), i.e. BEFORE this cancel, and no ADR withdraws it (ADR 0022
+    # compensates the stock hold only). "No work unit / no task after cancel" is therefore a
+    # design decision still open (see the inbound/transfer evolution plan), not a settled contract.

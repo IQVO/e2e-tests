@@ -13,7 +13,7 @@ Feature: A missed CPT re-promises the order — the full ADR 0014 feedback loop
     3. WES releases the work -> WorkReleased -> fulfillment-execution (FE)
        consumes it and creates a Task with OrderRef = that same work-unit id
        and CPT = that same timestamp.
-    4. FE's Clock-driven sweep (POST /tasks/sweep-cpt-misses, ADR-0025)
+    4. FE's Clock-driven sweep (POST /cpt-miss-sweeps, ADR-0025)
        detects the task is still open past its CPT and publishes
        TaskCPTMissed onto warehouse.fulfillment.events via its transactional
        outbox.

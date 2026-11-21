@@ -13,12 +13,20 @@ This repo is a study-project companion to the bounded-context repos
 `wes-work-planning`, `fulfillment-execution`, `workforce-management`,
 `order-management`, `process-path-management`, `labor-performance`,
 `network-fulfillment`, `network-inventory-planning`, `warehouse-planning`,
-`inbound-receiving`, `slotting-optimization`)
+`inbound-receiving`, `slotting-optimization`, `dock-scheduling`,
+`yard-management`, `outbound-shipping`)
 plus the read-side decision-support agent `warehouse-ops-agent`, all siblings
 under the same `warehouse-systems/` workspace root — see `env.sh`'s
 `REPOS_ROOT` for the layout this harness assumes (it is overridable:
 `REPOS_ROOT=/path/to/repos`, so a git worktree of this repo can build the
 siblings).
+
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with,
+endorsed by or affiliated with any company, and it uses no company's code,
+data, logos or trademarks. All names, figures and examples are illustrative
+or synthetic.
 
 ## Services the harness runs
 
@@ -38,9 +46,17 @@ Ports and DSNs live in `env.sh` only; this table mirrors it.
 | network-fulfillment | `netfulfil` | 8089 | 5449 | — |
 | network-inventory-planning | `network-inventory-planning` | 8099 | 5451 | — |
 | warehouse-planning | `api` | 8100 | 5452 | — |
-| **inbound-receiving** | `api` | 8108 | 5453 | ASN / dock appointment / receipt (`/asns`, `/appointments`, `/receipts`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`), dock doors permissive; publishes `warehouse.inbound-receiving.events` |
+| **inbound-receiving** | `api` | 8108 | 5453 | ASN / receipt (`/asns`, `/receipts`) and a LOCAL COPY of dock-scheduling's appointments (`GET /appointments`, deprecated; its writes answer `410 appointment-moved`); known SKUs from product-master's `ProductRegistered` (`PRODUCT_MODE=kafka`), dock doors from facility-layout's Dock slots (`DOCK_DOOR_CONSUMER_GROUP`); six more per-run consumer groups; publishes `warehouse.inbound-receiving.events` |
 | **slotting-optimization** | `api` | 8109 | 5454 | forward-slot planner (`/slot-plans`, `/forward-slots`, `/sku-velocity`); three local copies, all `kafka` mode: product-master's classification and physical profile (`PRODUCT_MODE`), facility-layout's zones and slots (`LAYOUT_MODE`), order-management's `SiteSkuDemandChanged` (`DEMAND_MODE`, injected by the scenarios); publishes `warehouse.slotting-optimization.events` |
+| **dock-scheduling** | `api` | 8112 | 5457 | the door calendar (`/appointments`, `/sites/{siteId}/dock-calendar/*`, `/doors/{doorCode}/availability`); four event-fed copies (`YARD_`, `FACILITY_`, `ASN_`, `CPT_CONSUMER_GROUP`; the legacy importer group stays unset); relays its outbox in-process; publishes `warehouse.dock-scheduling.events` |
+| **yard-management** | `api` + `relay` | 8113 (relay health 8114) | 5458 | the yard: gate (`/visits`), trailers, moves, door work, `/sites/{siteId}/yard-board` and `/yard-policy`; three consumers (`DOCK_SCHEDULING_`, `FACILITY_`, `INBOUND_RECEIVING_CONSUMER_GROUP`); the API does NOT relay its outbox, the separate `relay` binary does (both run); publishes `warehouse.yard-management.events` |
+| **outbound-shipping** | `api` | 8115 | 5459 | outbound loads, packages and bills of lading (`/loads`, `/packages/{id}/stagings\|loadings`); six consumers (`FULFILLMENT_`, `DOCK_`, `YARD_`, `CPT_`, `LAYOUT_`, `ANALYTICS_CONSUMER_GROUP`); relays in-process; publishes `warehouse.outbound-shipping.events` |
 | warehouse-ops-agent | `agent` | 8096 | — | — |
+
+Every service runs with the real wiring (every consumer on, every
+`*_CONSUMER_GROUP` variable mandatory, no `*_MODE=permissive`); each service's
+environment is defined once, in `scripts/services.sh`, and shared by
+`scripts/03-up-services.sh` and the CI workflow.
 
 Every local copy uses a per-run consumer group derived from
 `E2E_CONSUMER_GROUP_SUFFIX` (never the cluster's group): that includes
@@ -48,14 +64,17 @@ inbound-receiving's product copy (`PRODUCT_CONSUMER_GROUP`),
 inventory-storage's consumer of inbound-receiving
 (`INBOUND_RECEIPT_CONSUMER_GROUP`, which does not exist when unset) and
 slotting-optimization's three copies (`DEMAND_CONSUMER_GROUP`,
-`PRODUCT_CONSUMER_GROUP`, `LAYOUT_CONSUMER_GROUP`, required in `kafka` mode).
+`PRODUCT_CONSUMER_GROUP`, `LAYOUT_CONSUMER_GROUP`, required in `kafka` mode),
+and the yard contexts' groups (dock-scheduling four, yard-management three,
+outbound-shipping six, inbound-receiving's five others), all in `env.sh`.
 `PRODUCT_CLASSIFICATION_MODE=http` no longer exists: the three readers
 refuse to boot with it.
 
 ## What's covered
 
-13 feature files (the inter-warehouse transfer feature has two scenarios, the
-inbound-receiving and slotting-optimization ones four each):
+22 feature files (the inter-warehouse transfer feature has three scenarios,
+the inbound-receiving one nine, the slotting-optimization one four,
+returns/exceptions three):
 
 - **`features/slotting_optimization.feature`** (`@slotting`) — the forward-slot
   planner, against slotting-optimization, facility-layout and product-master
@@ -78,22 +97,67 @@ inbound-receiving and slotting-optimization ones four each):
   `[now - lookback, now)`; the scenarios publish the same
   `SiteSkuDemandChanged` it would, as the transfer feature does.
 
+- **`features/yard_journey.feature`** (`@yard-journey`, three scenarios) — one
+  trailer's visit across facility-layout, inbound-receiving, dock-scheduling and
+  yard-management (plus outbound-shipping), which never call one another and
+  agree only over Kafka; the one place those contracts are exercised for real.
+  (1) An inbound visit with an appointment: the layout is registered in
+  facility-layout only, the ASN in inbound-receiving only, the appointment in
+  dock-scheduling (which starts `BOOKED`, then turns `CHECKED_IN` and
+  `COMPLETED` by yard events alone); the gate directs the trailer to the door
+  (`TO_DOOR`), it docks, the receipt is opened on the appointment and closed
+  and the door work completes by `ReceiptClosed` alone (no completion call),
+  the visit leaves and the yard board is empty; then it reads
+  `warehouse.yard-management.events` from the first offset on a fresh consumer
+  group and requires `VisitCheckedIn`, `TrailerDocked`, `DoorWorkCompleted` and
+  `TrailerDeparted` for THIS run's trailer (the regression guard for the
+  integration/analytics topic split). (2) A walk-in goes to the policy's holding
+  spot, an appointment-only site turns it away (and persists nothing), a seal
+  mismatch under `REJECT` is rejected with `SealExceptionRaised` and cancels
+  exactly the appointment it names (`TURNED_AWAY`). (3) Ship-confirm follows the
+  physical departure: the load is `CLOSED` with everything but the departure in
+  place and `SHIP_CONFIRMED` only after the check-out, with the yard's trailer
+  and seal in `ShipmentConfirmed`. Every site is run-scoped. Scenario 3 injects
+  two upstream facts (PackageManifested, CPTScheduleChanged; see the feature for
+  why the CPT schedule is not the real producer's).
+
 - **`features/inbound_receiving.feature`** (`@inbound-receiving`) — the inbound
   dock workflow and its handover, against inbound-receiving, product-master
-  and inventory-storage only: (1) an ASN for a product-master-registered SKU
+  and inventory-storage only (plus the dock chain for the appointment scenario): (1) an ASN for a product-master-registered SKU
   is received short (expects 50, 40 Good) and closes with the exact `Short`
   discrepancy, asserted on the REST read and on the `ReceiptClosed` event;
   (2) the **handover**: Good units reach inventory-storage as staged stock
   (exactly one `StockReceived` for the SKU on its analytics topic, because
-  staged stock has no REST read), usable stays 0 until `POST /stock/stow`
+  staged stock has no REST read), usable stays 0 until `POST /stowages`
   and is then the received quantity; (3) a dock appointment refuses an
   overlapping booking on the same door with `409 door-window-overlap`
   (while a window starting exactly when the first ends is accepted), checks
   in, and completes when the receipt opened from it closes; (4) a `Damaged`
-  line is recorded on the receipt and is NOT booked as staged stock. Door
-  codes are accepted without a facility-layout dock slot
-  (`DOCK_DOOR_MODE` permissive); SKU existence is enforced
+  line is recorded on the receipt and is NOT booked as staged stock. The
+  appointment steps drive dock-scheduling (booking) and yard-management (gate
+  check-in), because inbound-receiving's own `POST /appointments` answers `410`
+  since its ADR 0019; a receipt's door must be a facility-layout Dock slot
+  (the dock-door copy is always on); SKU existence is enforced
   (`PRODUCT_MODE=kafka`), so ASN registration waits for `ProductRegistered`.
+
+- **`features/inbound_journey.feature`** (`@inbound-journey`, two scenarios) —
+  the whole inbound dock chain through the real services, nothing injected:
+  facility-layout declares the Dock slot, dock-scheduling books the appointment,
+  yard-management checks the carrier in at the gate (exact `VisitCheckedIn`
+  arrival), docks the trailer and starts door work, inbound-receiving opens the
+  receipt against the appointment, counts and closes it (the yard completes the
+  unload on `ReceiptClosed` alone, while a check-out before that is refused
+  `409 trailer-not-released`), inventory-storage holds the sealed containers, an
+  RF stow of every container makes inbound-receiving publish the exact
+  `ReceiptStowCompleted` (ADR 0021: gate arrival, last stow, dock-to-stock
+  seconds), and the check-out releases the door and completes the appointment.
+  The second scenario is the negatives: a booking on an outbound-only door is
+  refused `422 door-flow-mismatch`, an outbound appointment never reaches
+  inbound-receiving's copy, a cancelled appointment cannot open a receipt
+  (`409 appointment-cancelled`), and a reschedule moves the door of the next
+  receipt (ADR 0020). Sites, doors, SKUs and ASNs are run-scoped (`INBJ<run>`,
+  `INBR<run>`), so it never touches the yard journey's `YJ*` sites; the two
+  journeys share one set of step definitions for the yard's REST calls.
 
 - **`features/inter_warehouse_transfer.feature`** — the whole
   inter-warehouse transfer saga across real service binaries and real Kafka:
@@ -160,7 +224,7 @@ inbound-receiving and slotting-optimization ones four each):
   into a real work unit via its existing `EnqueueWorkUnit` use case, using
   the deterministic id `{order_id}-line-{line_no}`. This is order-
   management's only public REST surface in v1 (`POST /orders`,
-  `GET /orders/{id}`, `POST /orders/{id}/retry-allocation`,
+  `GET /orders/{id}`, `POST /orders/{id}/allocation-retries`,
   `DELETE /orders/{id}`, `GET /healthz`) — there is no `/allocate` or
   `/release` endpoint anymore; release happens implicitly, choreographed
   over Kafka.
@@ -177,6 +241,22 @@ inbound-receiving and slotting-optimization ones four each):
   execution's CPT-miss sweep publishing `TaskCPTMissed`, and
   order-management's `RepromiseConsumer` (ADR 0018) re-running its promise
   policy and publishing `OrderRepromised` — with zero manual intervention.
+- **`features/returns_exceptions.feature`** (`@returns-exceptions`) — the
+  two returns/exceptions contexts end to end against returns-processing,
+  exception-management and inventory-storage: (1) a graded-A return line
+  restocks — the injected `OrderAllocated`/`PackageManifested` facts make the
+  line authorizable, the RMA authorization keeps refusing (404/409) until
+  BOTH local copies catch up, the grade-A inspection decides RESTOCK and
+  publishes `DispositionDecided` + `ReturnLineStaged`, which
+  inventory-storage's RETURN_LINE consumer books as staged stock (exactly one
+  `StockReceived`, usable 0) until a stow makes the units usable; (2) a
+  re-fired `TaskCPTMissed` (two different CloudEvents ids) folds into ONE
+  case at occurrence 2 and walks the operator lifecycle
+  (triage → assign → resolve, `ExceptionResolved` on the topic, second
+  resolve 409); (3) a correlated `OrderRepromised` (same order, injected)
+  auto-resolves the case with the full derived rule id
+  `...TaskCPTMissed->...OrderRepromised`, and a second repromise leaves
+  exactly one `ExceptionAutoResolved` on the topic.
 - **`features/soak_backlog_ramp.feature`** (`@soak`, excluded from the
   default run) — ramps injected backlog into both the PICK and PACK
   process paths over a sustained, configurable duration while a pool of
@@ -195,19 +275,36 @@ missing).
 
 ```bash
 cd e2e-tests
-bash scripts/02-up-infra.sh      # Postgres (14 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
-bash scripts/01-build.sh         # builds all 22 binaries (14 HTTP incl. product-master, inbound-receiving, slotting-optimization, network-inventory-planning, warehouse-planning + 7 MCP + ops-agent)
-bash scripts/03-up-services.sh   # starts them as background processes (product-master, inbound-receiving and slotting-optimization before inventory-storage; NIP last)
+bash scripts/02-up-infra.sh      # Postgres (19 instances, this repo) + shared Kafka; pre-creates every topic (cmd/ensure-topics) so a fresh broker cannot lose the first publish or leave a consumer group unassigned
+bash scripts/01-build.sh         # builds all 28 binaries (20 HTTP incl. product-master, inbound-receiving, slotting-optimization, network-inventory-planning, warehouse-planning, dock-scheduling, yard-management + its relay, outbound-shipping + 7 MCP + ops-agent)
+bash scripts/03-up-services.sh   # starts them as background processes (the env of each lives in scripts/services.sh; dock-scheduling, yard-management and its relay right after product-master, before inbound-receiving; slotting-optimization and returns before inventory-storage; NIP and exception-management late; outbound-shipping last)
 bash scripts/04-run-tests.sh     # runs the default godog suite (excludes @soak)
 GODOG_TAGS=@product-master bash scripts/04-run-tests.sh  # just the product-master scenario
 GODOG_TAGS=@inbound-receiving bash scripts/04-run-tests.sh  # just the inbound-receiving scenarios
 GODOG_TAGS=@slotting bash scripts/04-run-tests.sh  # just the slotting-optimization scenarios
+GODOG_TAGS=@returns-exceptions bash scripts/04-run-tests.sh  # just the returns/exceptions scenarios
+GODOG_TAGS=@inbound-journey bash scripts/04-run-tests.sh  # just the inbound journey (facility, inbound, dock-scheduling, yard, inventory-storage)
+GODOG_TAGS=@yard-journey bash scripts/04-run-tests.sh  # just the yard journey (facility, inbound, dock-scheduling, yard, outbound-shipping)
 bash scripts/06-run-soak.sh      # OPTIONAL: the long-running @soak backlog-ramp run (see below)
 bash scripts/05-down-services.sh # stops only what this harness started
 ```
 
 `env.sh` is the single source of truth for every port, DB URL, and MCP
-bearer key `scripts/*.sh` uses — edit ports there only.
+endpoint `scripts/*.sh` uses — edit ports there only. MCP is unauthenticated.
+
+## Configuration
+
+The harness binaries are driven by flags and Makefile variables; only two
+environment variables are read directly by `cmd/`:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `KAFKA_BROKERS` | `localhost:9092` | Broker list `cmd/ensure-topics` creates the contract topics on (comma-separated; the first entry is used) |
+| `STOREFRONT_NETWORK_DATA` | path relative to the repo root | `cmd/seed-storefront`: warehouse-infra retail-network data file (SKU -> catalogue title); the CHECK step fails before any write when a storefront SKU is missing from it |
+
+Sibling service base URLs are passed inline by `scripts/lib.sh` and the
+Makefile (the `make run` block above); no `cmd/` binary reads them from the
+environment.
 
 ## Sustained backlog-ramp soak (`features/soak_backlog_ramp.feature`, `@soak`)
 
@@ -227,7 +324,7 @@ here, which proves a single deterministic unit of work flows correctly.
 - **Observational, not assertive.** Once picker/packer throughput can't
   keep up with the ramp, `wes-work-planning`'s `/release` legitimately
   returns `409` (WIP limit reached / pool empty) and
-  `fulfillment-execution`'s `/claim-next` legitimately returns `409` (no
+  `fulfillment-execution`'s `/task-claims` legitimately returns `409` (no
   claimable task) — both are counted in the printed summary, not treated
   as failures. The scenario only fails on a hard connectivity/setup
   problem (it never managed to enqueue a single work unit for the whole
@@ -257,14 +354,15 @@ The day, hour by hour:
 
 | Sim time | Persona | APIs driven |
 |---|---|---|
-| 05:30 | control tower | facility-layout `POST /location-types` + `POST /locations/import` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}`; product-master `PUT /products/{sku}` (every SKU) + `PUT /products/{sku}/classification` (fragile SKUs; inventory-storage and the readers learn it from `warehouse.product-master.events`); process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule`; labor-performance `POST /standards` |
-| 05:30 | receiving | inventory-storage `POST /stock/receive` + `POST /stock/stow` into registered bins (the ASN-driven path, inbound-receiving `POST /asns` → `/receipts` → `/receipts/{id}/lines` → `/close`, whose Good lines inventory-storage books as staged stock, is covered by `@inbound-receiving` and is not part of this simulated day) |
-| 06:00 | supervisor | workforce-management start-shift, `POST /shift-plans`, assignments; WES charge/plan; fulfillment station registration + check-in |
-| 06:00-20:00 | customers | order-management `POST /orders` on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
-| all day | pickers / flex | `claim-next PICK`, `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `confirm-pick`, complete, `POST /rebin/arrivals` |
-| all day | packers / SLAM | `claim-next PACK`, `seal-package`, `POST /packages/{id}/slam` (weight mismatch injected), `GET /packages?orderRef=` -> LABELED / DIVERTED |
+| 05:30 | control tower | facility-layout `POST /location-types` + `POST /location-imports` (site/zone/aisle/slot hierarchy); inventory-storage `PUT /bins/{binId}`; product-master `PUT /products/{sku}` (every SKU) + `PUT /products/{sku}/classification` (fragile SKUs; inventory-storage and the readers learn it from `warehouse.product-master.events`); process-path-management `POST /process-paths` + `PUT /sites/{siteId}/cpt-schedule` (the sim's own site, `SIM1`); labor-performance `POST /standards` |
+| 05:30 | receiving | inventory-storage `POST /stock-receipts` + `POST /stowages` into registered bins (the ASN-driven path, inbound-receiving `POST /asns` → `/receipts` → `/receipts/{id}/lines` → `/receipts/{id}/closures`, whose Good lines inventory-storage books as staged stock, is covered by `@inbound-receiving` and is not part of this simulated day) |
+| 06:00 | planner | warehouse-planning `PUT /workload-forecasts/SIM1/PICK` (the CPT buckets) + `PUT /labour-plans/SIM1/{shiftId}/PICK` without `planned_heads` (derived from the forecast; `422 heads-exceed-stations` falls back to the staffed heads, a finding); workforce-management `POST /paths/PICK/plan-proposals` with `siteCode` + `shiftId`, no charge (polled while its copy of `LabourPlanCommitted` arrives; a timeout is a finding) |
+| 06:00 | supervisor | workforce-management `POST /associates/{id}/shift-starts`, `POST /shift-plans`, assignments; fulfillment station registration + `POST /stations/{id}/check-ins` |
+| 06:00-20:00 | customers | order-management `POST /orders` (`fulfillmentSiteId: SIM1`) on a daily demand curve: standard, partial-ok, held-then-released/cancelled, backorder (understocked SKU), injected mispick |
+| all day | pickers / flex | `POST /stations/{id}/task-claims` (PICK), `GET /work-units/{id}`, reservation + bin lookup, travel via facility-layout `/distance`, `POST /reservations/{id}/pick-confirmations`, `POST /tasks/{id}/completions`, `POST /rebin/arrivals` |
+| all day | packers / SLAM | `POST /stations/{id}/task-claims` (PACK), `POST /tasks/{id}/package-seals`, `POST /packages/{id}/slam-runs` (weight mismatch injected), `GET /packages?orderRef=` -> LABELED / DIVERTED |
 | hourly | supervisor | WES telemetry + rebalance, queue depths, staffing gaps, flex reassignment, breaks (lunch 11:30-12:30) |
-| 10:00, 13:00 | inventory control | cycle counts (one deliberate shortage), replenishment + `retry-allocation` for backorders |
+| 10:00, 13:00 | inventory control | cycle counts (one deliberate shortage), replenishment + `POST /orders/{id}/allocation-retries` for backorders |
 | 22:00+ | auditor | per-order trace across order-management, WES, inventory, fulfillment, packages, labor scorecards and Kafka; inventory conservation; DLQ count |
 
 The run prints an end-of-day report (hourly snapshots, per-associate
@@ -272,9 +370,187 @@ throughput, events per topic, per-order problems, PASS/FAIL checks) and writes
 `run/warehouse-day-<RUN_ID>.json`. Exit code is non-zero unless the warehouse
 worked end to end.
 
+**Its own site, isolated from the storefront.** The simulated building is a
+site of its own (`-site` / `DAY_SITE`, default `SIM1`). Every order carries it
+as `fulfillmentSiteId` (order-management ADR 0044) and the compressed UTC truck
+schedule is written to that site's CPT schedule (`-cpt-site` / `DAY_CPT_SITE`
+defaults to `-site`), so the storefront's fulfilment site `site-1` and the
+warehouse building `AUS3` that serves it (`siteId` and `warehouseSiteId` of
+`fixtures/storefront/fulfilment-site.json`) keep their schedules and their
+promises. Before its first write the simulator reads that fixture and exits 2
+when `-site` or `-cpt-site` is either of them (the message names the role),
+unless `-allow-live-site` is given on purpose; it also refuses a `-site` order-management would reject
+(uppercase letters and digits only). The orders are promised at SIM1 once
+order-management promises at the order's own site; until then they are
+promised against its `DEFAULT_SITE_ID` (read only), and a POST answer that
+drops `fulfillmentSiteId` is a finding. What else the day writes, by site:
+
+| Write | Site |
+|---|---|
+| facility-layout site/zone/aisle/slot map, fulfillment-execution stations (`locationCode` on the map) | SIM1 |
+| inventory-storage `PUT /bins/{binId}` | bin ids are SIM1 location codes; the API takes no site |
+| inventory-storage receive/stow, product-master products | run-scoped SKUs (`SKU-<run>-*`); the stock pool has no site |
+| workforce-management start-shift (`siteCode`), shift plan, staffing gap (`buildingId`, `-building`, default SIM1) | SIM1 (the staffing-gap query stays unscoped: `buildingId` only) |
+| process-path-management `POST /process-paths` (PICK, PACK, SLAM, REBIN) | fleet-wide catalogue, no site in the API; only paths that are missing are created |
+| labor-performance `POST /standards` | fleet-wide per task type, no site in the API: revises the active PICK/PACK/SLAM standard |
+| warehouse-planning workload forecast (`PUT /workload-forecasts/{site_id}/PICK`) and labour plan (`PUT /labour-plans/{site_id}/{shiftId}/PICK`) | SIM1 (`-site`); the forecast is replaced on every run, the labour plan is run-scoped through the shift id |
+| workforce-management proposal from the labour plan (`siteCode`) | SIM1 (`-site`, the labour plan's `site_id`) |
+| fulfillment-execution `POST /cpt-miss-sweeps`, `/task-lease-expirations` | fleet-wide sweeps, no site in the API |
+
 Pin `E2E_CONSUMER_GROUP_SUFFIX` (e.g. `warehouse-day`) before `make up` when
 running against a long-lived shared broker, so services resume their
 committed offsets across restarts instead of replaying the topic history.
+
+## Seller inbound, cross-org (`@seller-inbound`, live cluster)
+
+`features/seller_inbound.feature` + `seller_inbound_test.go`: a seller plans and ships
+SSCC-labelled mastercases to a vendor node, the vendor polls them and reports a short and a missing
+carton, the seller sees `CLOSED_WITH_DISCREPANCY` and node-performance exposes the inbound metrics.
+It runs against the **kind cluster through Kong** (not the local harness) and is self-contained: a
+fresh vendor, an `INBOUND_CROSS_DOCK` node with inbound limits, a catalogue item (each GTIN + CASE of
+12) and a seller per run, every GTIN/SSCC valid and unique. The fleet is not part of it: its ACL
+(network-fulfillment) runs in stub mode there, so the test plays the fleet's role through the Vendor API
+(`POST /vendor/inbound-receipts`).
+
+```sh
+P=http://localhost:8000/api
+SELLER_INBOUND_BASE_URL=$P/seller-inbound VENDOR_CONNECTIVITY_BASE_URL=$P/vendor-connectivity \
+NODE_TOPOLOGY_BASE_URL=$P/node-topology OFFER_AVAILABILITY_BASE_URL=$P/offer-availability \
+NODE_PERFORMANCE_BASE_URL=$P/node-performance GODOG_TAGS=@seller-inbound \
+  go test -v -run TestMain -timeout 15m .
+```
+
+| Env var | Default | Context |
+|---|---|---|
+| `SELLER_INBOUND_BASE_URL` | `http://localhost:8000/api/seller-inbound` | sellers, plans, shipments, cartons, labels |
+| `VENDOR_CONNECTIVITY_BASE_URL` | `http://localhost:8000/api/vendor-connectivity` | vendors, nodes, inbound poll and receipts |
+| `NODE_TOPOLOGY_BASE_URL` | `http://localhost:8000/api/node-topology` | node profile with `inbound` limits, activation |
+| `OFFER_AVAILABILITY_BASE_URL` | `http://localhost:8000/api/offer-availability` | catalogue item, pack levels, inventory feed |
+| `NODE_PERFORMANCE_BASE_URL` | `http://localhost:8000/api/node-performance` | `GET /scorecards/{nodeId}` |
+
+Tags: `@e2e @seller-inbound`. Every cross-context hop is Kafka, so the steps poll (up to 90 s) through real
+behaviour (plan accepted, first carton accepted, poll returns the shipment); only the "not yet learned"
+refusals are awaited, any other refusal fails at once. Requires the Kafka topic
+`retailnetwork.seller-inbound.events` to exist before vendor-connectivity starts (see the PR notes).
+
+## Phase 5 part A (`@phase5`, live cluster)
+
+`features/phase5_a.feature` + `phase5_a_test.go`: six small black-box scenarios over the Phase 5 capabilities,
+through Kong. Each creates its own run-scoped data; the shared-state limits are stated in the feature file.
+
+| Tag | Context | Proves |
+|---|---|---|
+| `@seller-scorecard` | seller-inbound | `GET /sellers/{id}/scorecard`: a shipment closed with a short and a missing carton gives `receiptAccuracyRate` = RECEIVED / reported, `discrepanciesByKind`, the documented `complianceTier`, and the seller still plans/confirms (informational); empty shape without NaN, 404, `invalid-window` 400. Reuses the `seller_inbound` steps for the shipment flow |
+| `@labor-standards` | labor-performance | `POST /standards` per handling unit: most-specific resolution with fallback, team lift only on CASE (`team-lift-requires-case-unit`), `unknown-handling-unit`, unit-less standard untouched. Restores the task-type-only PICK standard afterwards |
+| `@process-paths` | process-path-management | FULL_CASE / CROSS_DOCK / BREAK_CASE declared as in `catalogue/paths.json` (applied like `seed_catalogue.py`: 201 or 409), their definitions, selection by the declared criteria, invalid definitions refused |
+| `@pack-aware-estimate` | wes-work-planning + product-master | `POST /paths/{pathId}/charge` with `sku` + `pickUnit`: 36 eaches of a 12-per-case SKU are 3 handles with the case cube/weight; EACH is 36 handles; a plain bucket is unchanged |
+
+Not exercisable through the public REST (not faked): process-path *step lists* (a ProcessPath has no steps) and a
+"select the path for these criteria" endpoint (none exists; selection is asserted on the listing).
+
+```sh
+P=http://localhost:8000/api
+SELLER_INBOUND_BASE_URL=$P/seller-inbound VENDOR_CONNECTIVITY_BASE_URL=$P/vendor-connectivity \
+NODE_TOPOLOGY_BASE_URL=$P/node-topology OFFER_AVAILABILITY_BASE_URL=$P/offer-availability \
+NODE_PERFORMANCE_BASE_URL=$P/node-performance PRODUCT_MASTER_BASE_URL=$P/product-master \
+LABOR_PERFORMANCE_BASE_URL=$P/labor-performance PROCESS_PATH_BASE_URL=$P/process-path-management \
+WORK_PLANNING_BASE_URL=$P/wes-work-planning GODOG_TAGS=@phase5 \
+
+## Phase 5 part B: case-multiple transfers and ship-in-own-container (`@phase5`, live cluster)
+
+`features/phase5_b.feature` + `phase5_b_test.go`, black-box REST through Kong, no database touched
+(one injected Kafka fact in the approval scenarios, below). Valid GTIN-14s are computed per run (prefix `9502`), every id is run-scoped.
+
+- **network-inventory-planning ADR 0017**: with an ACTIVE CASE of 12 in product-master, a
+  proposal (`POST /v1/transfer-proposal-runs`) is rounded to the nearest whole case, a tie
+  up, at least one case, capped at what the origin supplies; `caseMultiple`, `cases`,
+  `requestedQtyEaches`, `roundedQtyEaches` and the signed `remainderEaches` are asserted exactly
+  (25 -> 24 +1, 18 -> 24 -6, 17 -> 12 +5, 1 -> 12 -11, 24 -> 24 0, supply 40 -> 36); a plain SKU
+  has no case fields; an origin below one case proposes nothing.
+- **fulfillment-execution ADR 0056**: a PACK task (`POST /tasks`, claimed by a station with a
+  private run-scoped capability) is sealed with `shipInOwnContainer` + `lineQuantity`:
+  exactly 12 -> 201 with `containerSource: CASE`, the case GTIN and its declared
+  dimensions/weight (also on `GET /packages/{id}`); 11, 13, 24 -> 422
+  `ship-in-own-container-quantity-mismatch`; SKU without CASE -> 422
+  `ship-in-own-container-no-case-level`; refusals seal nothing; no option = ordinary carton;
+  option without `lineQuantity` = 400.
+- **Approval, live (`POST /v1/transfer-approvals` + `GET /v1/transfers/{id}`)**: two RUN-SCOPED sites per
+  scenario (`P5O<run>` origin, `P5D<run>` destination; facility-layout site codes are uppercase
+  letters and digits) with FRESH facts: transfer capability through facility-layout REST, the capacity
+  plan through warehouse-planning REST (set `WAREHOUSE_PLANNING_BASE_URL`), the CASE of 12 through
+  product-master REST. The ONE injected fact is `SiteSkuDemandChanged` (order-management projects demand
+  to a single configured site, so no REST route states it for two arbitrary sites): the existing
+  `inter_warehouse_transfer` step publishes the CloudEvent to `warehouse.order-management.events` on the
+  kind broker (`KAFKA_BROKERS`, default `localhost:9092`). Asserted: 25 -> 24 (2 cases, +1) and 18 -> 24
+  (-6) on the approval AND on GET, the transfer quantity is the rounded eaches, a replay with the same
+  `Idempotency-Key` answers `replayed: true` for the same transfer, a plain SKU approves with no case
+  fields, an origin that can send 11 eaches (availability is NIP's `OriginHeadroom` = published capacity
+  over the window minus the origin's own in-window demand: 1 order/hour over a 12 h window, 1 unit of
+  origin demand) is refused 422 `below-one-case`. **ADR 0018 (per-site staleness)**: a third site holds a
+  demand fact stated 2 hours ago (the CloudEvent time is the watermark, limit 10 min) while the fresh pair
+  is approved; an origin that is that stale site, or a site with no facts, is refused 422
+  `facts-incomplete` naming it. After approval the real saga continues (inventory-storage does not know
+  the run-scoped sites, so the transfer ends `UNFULFILLABLE`); the assertions are on the case fields only.
+
+```sh
+P=http://localhost:8000/api
+PRODUCT_MASTER_BASE_URL=$P/product-master FACILITY_BASE_URL=$P/facility-layout \
+NETWORK_INVENTORY_PLANNING_BASE_URL=$P/network-inventory-planning \
+NIP_BASE_URL=$P/network-inventory-planning WAREHOUSE_PLANNING_BASE_URL=$P/warehouse-planning \
+FULFILLMENT_BASE_URL=$P/fulfillment-execution KAFKA_BROKERS=localhost:9092 GODOG_TAGS=@phase5 \
+  go test -count=1 -v -run TestMain -timeout 15m .
+```
+
+| Env var | Default | Context |
+|---|---|---|
+| `LABOR_PERFORMANCE_BASE_URL` | `http://localhost:8000/api/labor-performance` | `/standards` (the older `LABOR_BASE_URL` serves the local-harness scenarios) |
+| `PROCESS_PATH_BASE_URL` | `http://localhost:8000/api/process-path-management` here (the harness default is `:8087`) | `/process-paths` |
+| `WORK_PLANNING_BASE_URL` | `http://localhost:8000/api/wes-work-planning` | `POST /paths/{pathId}/charge` |
+| `PRODUCT_MASTER_BASE_URL` | the existing variable | pack levels with dims |
+| `NETWORK_INVENTORY_PLANNING_BASE_URL` | `NIP_BASE_URL` | NIP approval, GET transfer, proposals (the approval steps also use `NIP_BASE_URL` and `WAREHOUSE_PLANNING_BASE_URL`) |
+| `KAFKA_BROKERS` | `localhost:9092` | the kind broker the injected `SiteSkuDemandChanged` is published to |
+
+Plus the seller-inbound variables above. Tags: `@e2e @phase5` plus the one in the table.
+
+| `NETWORK_INVENTORY_PLANNING_BASE_URL` | `NIP_BASE_URL` (`http://localhost:8099`) | proposals, approval, transfers |
+| `FULFILLMENT_BASE_URL` | `http://localhost:8084` | tasks, stations, package-seals, packages |
+| `PRODUCT_MASTER_BASE_URL`, `FACILITY_BASE_URL` | as elsewhere | pack levels; site transfer capability |
+
+Both pack levels reach NIP and fulfillment-execution over Kafka into local views that have no REST
+read, so the "eventually" steps probe the behaviour (a proposal carrying `caseMultiple`; a refused
+own-container seal that no longer answers `no-case-level`).
+
+## Phase 5: case-pick faces and the CASE pick unit (`@phase5 @case-pick`, live cluster)
+
+`features/phase5_case_pick.feature` + `phase5_case_pick_test.go`: one black-box scenario for slotting-optimization
+ADR 0012, REST through Kong plus the injected demand and the `SlotPlanApproved` read, on a RUN-SCOPED site
+(`CP<run>`). The cluster's slotting-optimization must run with `CASE_PICK_ZONE_CODES=CPK` and `PACK_LEVEL_MODE=kafka`
+(it does in the kind cluster); facility-layout has no "behavioural class" field apart from the zone code, so the
+case-pick zone is a zone registered with `zoneCode: CPK` and the each-pick zone one with `zoneCode: FWD`; a slot's
+volume/weight limits are `capacityOverride` on `POST /locations`. facility-layout's placement rules allow only
+CartonFlow, Shelf and ToteWall in a FWD zone, so every slot is a `Shelf`.
+
+- Layout: two CPK faces (40 kg / 0.2 m3 = 8 cases by volume, 6 by weight; 100 kg / 0.1 m3 = 4 by volume, 15 by
+  weight) and two FWD faces. A case is 400x300x200 mm (0.024 m3), 6500 g, 12 eaches.
+- SKUs: `CASE` (demand lines 24 + 36, gcd 12) and `CASEB` (one line of 24) with a CASE level, `MIXED` (CASE level, lines
+  5 + 7, gcd 1) and `EACH` (no CASE level, lines 5 + 7).
+- Asserted on the generated Draft (POST and GET by id): `CASE` and `CASEB` are `pickUnit: CASE` on the CPK faces with
+  `casesCapacity` 6 and 4 (also recomputed as floor(min(volume, weight)) from the declared limits), `MIXED` and `EACH`
+  are EACH (absent or `EACH`, no `casesCapacity`) on FWD faces, nothing unassigned, one Assign move per SKU; after
+  approval `GET /forward-slots?siteId=` and the `SlotPlanApproved` event (`pick_unit`/`cases_capacity` on the CASE
+  assignments only) carry the same.
+- Slotting builds four local copies from Kafka (layout, product profiles, pack levels, demand) and only the demand one
+  is readable over REST, so the plan is drafted until it matches (up to 2 minutes), rejecting each incomplete Draft.
+
+```sh
+P=http://localhost:8000/api
+PRODUCT_MASTER_BASE_URL=$P/product-master FACILITY_BASE_URL=$P/facility-layout \
+SLOTTING_BASE_URL=$P/slotting-optimization KAFKA_BROKERS=localhost:9092 GODOG_TAGS=@case-pick \
+  go test -count=1 -v -run TestMain -timeout 10m .
+```
+
+No new environment variable: `SLOTTING_BASE_URL`, `FACILITY_BASE_URL`, `PRODUCT_MASTER_BASE_URL` and `KAFKA_BROKERS` are the
+existing ones (`SLOTTING_BASE_URL` defaults to `http://localhost:8109`, so through Kong it must be set as above).
 
 ## Real product catalogue (`cmd/seed-products`)
 
@@ -341,8 +617,8 @@ INVENTORY_STORAGE_BASE_URL=http://localhost:8000/api/inventory-storage \
   of their volume and weight limits, chaotic storage (no fixed product-to-bin mapping); a bin's
   capacity in units is the placed units divided by the fill factor. Groceries without dimensions use an
   assumed 1.5 L / 0.6 kg unit for the fill arithmetic only; nothing is written back to product-master.
-- **Stock:** `PUT /bins/{binId}` then `POST /stock/stow` (item scan + location scan). It does not call
-  `/stock/receive`: stow does not consume staged receipts, so receiving as well would only inflate the
+- **Stock:** `PUT /bins/{binId}` then `POST /stowages` (item scan + location scan). It does not call
+  `/stock-receipts`: stow does not consume staged receipts, so receiving as well would only inflate the
   staged quantity.
 - **Idempotent:** a bin already holding its planned units is skipped, `PUT /bins` converges, and every
   stow carries a deterministic `Idempotency-Key` (bin, SKU, quantity), so a retry or an interrupted run
@@ -350,6 +626,43 @@ INVENTORY_STORAGE_BASE_URL=http://localhost:8000/api/inventory-storage \
 - **Tests:** `go test ./cmd/seed-inventory/...` runs the planner rules and the whole stocking path
   against a contract fake of inventory-storage that enforces its invariants (capacity, hazmat zone,
   temperature class, DOT segregation, idempotency keys).
+
+## Storefront (`make provision-storefront`)
+
+Provisions everything a shopper needs to buy a product in the storefront
+(<http://storefront.localhost>) and see its delivery promise, on the kind cluster through Kong, and
+verifies it; a second run writes nothing. **The register of what is provisioned, by whom, why, and
+how to rerun or rebuild: [docs/storefront-provisioning.md](docs/storefront-provisioning.md).**
+
+```sh
+make provision-storefront-dry-run   # preflight + network plan + dictionary check + storefront plan, writes nothing
+make provision-storefront           # scripts/10-provision-storefront.sh: provisions, then verifies
+make provision-storefront-verify    # read-only verification
+```
+
+- **Order:** preflight (Kong, the sibling `../warehouse-infra` checkout, one read per layer, WMS
+  usable stock of the 81 storefront SKUs; the WMS seeders are NOT re-run) -> warehouse-infra's
+  `seed-retail-network.py` (network tier; waves are dated, so it runs every time) -> its
+  `--check-translation` of network-fulfillment's product dictionary -> `go run ./cmd/seed-storefront`.
+- **Two ids, one schedule:** the storefront's building is `site-1` for the network and the facility-layout
+  site `AUS3` for the warehouse (ADR 0001 D1); the WMS step defines the same CPT schedule under both
+  (`fixtures/storefront/fulfilment-site.json`), checks that `AUS3` exists in facility-layout and never
+  creates it, so `make provision-storefront` sends one new `PUT /sites/AUS3/cpt-schedule` on its first
+  run (not run live; it matters once network-fulfillment's site map is deployed).
+- **`cmd/seed-storefront`:** CHECK (fixture vs real data, SKU -> network title -> catalogue item,
+  fails before any write when one is missing) -> PLAN (pure diff, printed per kind) -> APPLY (only
+  the diffs: tax table, delivery charges, categories, prices, content create/revise/publish; every
+  POST under a deterministic `Idempotency-Key`) -> VERIFY (all products purchasable, a delivery quote
+  for prefix 787 through the BFF, a search hit per department). Content is derived from real data
+  only (title, real size and weight, handling tags, department); department, subcategory and price
+  are curated in `fixtures/storefront/catalogue.json`.
+- **Tests:** `go test ./cmd/seed-storefront/...` (also `make seed-tests`) seeds the whole fixture
+  twice against a contract fake of offer-availability, pricing, product-content, product-discovery,
+  the BFF, process-path-management (one CPT schedule per site) and facility-layout's site read, that
+  enforces their invariants (second run: zero writes), plus an interrupted run, a lost response, a
+  missing catalogue title, WITHDRAWN/RETIRED handling, the content rules, the `AUS3` schedule
+  (first run writes both ids, a hand edit is restored with one PUT, a missing facility-layout site
+  fails CHECK before any write).
 
 ## Service lifecycle notes
 
@@ -398,21 +711,59 @@ INVENTORY_STORAGE_BASE_URL=http://localhost:8000/api/inventory-storage \
   assertion from NIP's own table (default, `db`) to `GET /v1/transfers/{id}`
   once that endpoint is on NIP's develop.
 
+## Fleet REST API guideline (this harness is a pure consumer)
+
+Every provider follows the warehouse-docs REST guideline, and this repo follows it as a client:
+
+- **Routes name things, not actions.** Commands are transition nouns (`POST /orders/{id}/releases`,
+  `POST /stations/{id}/task-claims`, `POST /tasks/{id}/completions`) or collection-level job nouns
+  (`POST /stowages`, `POST /stock-receipts`, `POST /location-imports`, `POST /cpt-miss-sweeps`,
+  `POST /task-lease-expirations`). The old `:verb` / verb-segment routes no longer exist.
+- **Every POST and PATCH carries a fresh `Idempotency-Key`** (a retry of the same logical call reuses it).
+  The seeders derive a deterministic key per logical write; the Godog world, the soak driver and
+  `warehouse-day` mint a new random key per call. A `PUT` needs none.
+- **Replay and reuse.** A replayed answer carries `Idempotency-Replayed: true`; the same key with a
+  different request is `409` problem `idempotency-key-reused` (a client bug, never retried blindly).
+- **Lists are `{items, nextCursor}`.** One shared helper, `internal/paging` (`paging.All`, `paging.Decode`),
+  sends `limit` + `cursor` and follows `nextCursor` until it is absent; the Godog steps use
+  `world.getItems` and `warehouse-day` uses `listAll`. The retired `after` / `offset` parameters answer
+  `400 unknown-query-parameter`. Composite views (`/sites/{code}/layout`, the category tree) are not lists.
+
+The live-cluster suite can only pass once the whole REST cutover set is deployed together
+(warehouse-infra applies it as one set); until then only the unit tests (`make seed-tests`, `go test ./internal/...`)
+and the compile/vet/shell gates apply.
+
+## Tests
+
+- `make seed-tests` — `go test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/...`:
+  the seeders against contract fakes of their siblings that enforce the real
+  invariants (capacity, hazmat, DOT segregation, idempotency keys; a second
+  seed run writes nothing, an interrupted run and a lost response are covered).
+- `make harness-test` — unit tests for the agent harness hooks
+  (`scripts/harness/test_hook.py`); `make test-compile` compiles the suite.
+- `make scripts-sanity` — bash syntax check plus invariants over every
+  `scripts/*.sh`.
+- `make soak` — the sustained backlog-ramp soak (see above).
+
+In `.github/workflows/ci.yml` these run as the `build-and-vet`,
+`seed-products-tests`, `scripts-sanity` and `guide-lint` jobs; the godog
+suite itself is not a CI job (see CI below).
+
 ## CI
 
 `.github/workflows/ci.yml` runs `gofmt`, `go build`/`go vet`, a shell
 syntax check on every `scripts/*.sh`, and `docker compose config`
 validation. The full godog suite is NOT run in CI: it is a genuinely
-multi-repo black-box harness (it builds and runs binaries from fourteen
-sibling bounded-context repos, product-master, inbound-receiving and
-slotting-optimization included, plus
+multi-repo black-box harness (it builds and runs binaries from seventeen
+sibling bounded-context repos, product-master, inbound-receiving,
+slotting-optimization, dock-scheduling, yard-management and outbound-shipping included, plus
 `warehouse-ops-agent`, none of which are checked out in
 a single-repo GitHub Actions run) — it is run and verified locally as part
 of every change that touches it, the same pattern `e2s-tests`' equivalent
 harness follows.
 
 `.github/workflows/e2e-behaviour.yml` (weekly + manual dispatch) is the
-exception, with four jobs. The first checks out the 7 core repos
+exception, with seven jobs. The first checks out the 7 core repos
 (facility-layout, product-master, inventory-storage, wes-work-planning,
 fulfillment-execution, workforce-management, order-management), starts them
 against a throwaway Kafka and per-service Postgres, and runs
@@ -423,4 +774,69 @@ only product-master, inbound-receiving and inventory-storage (with its
 `INBOUND_RECEIPT_CONSUMER_GROUP`) and four pre-created topics. The fourth
 (`@slotting`) needs only facility-layout, product-master and
 slotting-optimization (all three consumers in `kafka` mode) and four
-pre-created topics.
+pre-created topics. The fifth (`@returns-exceptions`) needs only
+returns-processing, exception-management and inventory-storage (with its
+`RETURN_LINE_CONSUMER_GROUP`); the feature injects the upstream facts
+itself, so no order-management, fulfillment-execution or product-master
+checkout is needed. The sixth (`@inbound-journey`) needs facility-layout,
+product-master, dock-scheduling, yard-management (API and relay),
+inbound-receiving and inventory-storage. The seventh (`@yard-journey`) needs facility-layout,
+product-master, inbound-receiving, dock-scheduling, yard-management (API and its
+separate relay) and outbound-shipping, with every consumer group per-run and 16
+pre-created single-partition topics; the outbound leg injects
+PackageManifested and CPTScheduleChanged, so no fulfillment-execution or
+process-path-management checkout is needed. Every job starts its services
+through the `up_<service>` functions of `scripts/services.sh`, the same ones
+`scripts/03-up-services.sh` calls, and creates its topics with
+`cmd/ensure-topics`.
+
+### Order fulfillment site (`@order-site`)
+
+`features/phase5_order_site.feature` proves order-management ADR 0044 through the real
+`POST /orders` and the real `warehouse.order-management.events` topic: an order that names a
+`fulfillmentSiteId` projects its `SiteSkuDemandChanged` to THAT site (`order-site-v1`), an order
+that names none goes to the static site (`static-site-v1`), a malformed site is refused with
+`400 invalid-fulfillment-site-id`, and `GET /orders/{id}` returns the site.
+
+- Demand is emitted only for lines that **allocate** (order-management ADR 0035), so the scenario
+  first puts 10 loose units into a seeded forward bin (`ABE8`, the same helper as `@mastercase`).
+- No new environment variables: it uses the existing `ORDER_BASE_URL`, `INVENTORY_BASE_URL`,
+  `FACILITY_BASE_URL` and `KAFKA_BROKERS`.
+- If every plain order answers `422 line-ineligible-for-resolved-path`, order-management's path
+  cache (rebuilt from the process-path-management events topic on every start) has lost a path
+  definition, usually because the topic's retention expired it. Revising the path (PUT
+  `/process-paths/{id}` with a real change, then back) republishes it.
+
+### Running the whole suite against the kind cluster
+
+Every base URL has a per-service default (`localhost:81xx`) that only exists when each service runs
+standalone. Against the kind cluster set them all to the Kong routes, including the ones that are
+easy to forget: `RETURNS_BASE_URL=$P/returns-processing` (the returns scenarios otherwise fail on a
+refused connection to `localhost:8110`) and `INBOUND_BASE_URL`, `EXCEPTIONS_BASE_URL`,
+`SLOTTING_BASE_URL`, `NIP_BASE_URL`. `INVENTORY_DB_URL` and the other `*_DB_URL` defaults point at
+standalone containers, not at the cluster's databases; scenarios must reach the service through its
+REST API wherever it offers one (bins are registered with `PUT /bins/{binId}`), because a direct SQL
+write lands in a database the running service never reads.
+
+## Documentation
+
+The harness scenarios are documented in warehouse-docs (fleet-operations
+pages, the e2e section) and in the feature files themselves
+(<https://iqvo.github.io/warehouse-docs/>).
+
+## Architecture
+
+A Go/godog BDD harness over the fleet's real deployments: `cmd/warehouse-day`
+simulates an operating day, `cmd/seed-products`/`cmd/seed-inventory` seed real
+catalogues, `cmd/ensure-topics` provisions Kafka topics; features run against
+docker compose locally or the kind cluster live.
+
+## Local development / quality gate
+
+`make check-fast` (fmt + vet + guide-lint), `make check` adds the
+compose-config and scripts sanity gates; CI jobs: `build-and-vet`,
+`seed-products-tests`, `scripts-sanity`, `guide-lint`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

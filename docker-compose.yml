@@ -1,21 +1,4 @@
-####################################################################
-# e2e-tests/docker-compose.yml
-#
-# Postgres ONLY. Kafka is intentionally NOT declared here: a shared
-# broker already runs from ~/warehouse-systems/docker-compose.kafka.yml
-# (container "warehouse-kafka", host port 9092) and every service repo's
-# own README says to connect to it rather than spin up a second one.
-# scripts/02-up-infra.sh starts that compose file too if it isn't
-# already running.
-#
-# Each service gets its OWN Postgres instance, on its own host port,
-# using the SAME database name/user/password its own repo's
-# docker-compose.yml already uses (so DATABASE_URL construction is a
-# copy-paste of what each service expects). Ports are offset from the
-# services' own defaults (normally all 5432) to avoid colliding with a
-# developer's per-repo `docker compose up` left running from another
-# session.
-####################################################################
+# Nineteen dedicated Postgres databases. Kafka is ephemeral and managed outside Compose.
 name: warehouse-e2e
 
 services:
@@ -302,6 +285,110 @@ services:
       timeout: 3s
       retries: 20
 
+  # returns-processing (returns: RMA authorization, receipt, inspection,
+  # disposition). Own user/db name "returns_processing" on host port 5455
+  # (it ships no compose file). Migrations are embedded in its binary.
+  postgres-returns:
+    image: postgres:16
+    container_name: e2e-postgres-returns
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: returns_processing
+      POSTGRES_PASSWORD: returns_processing
+      POSTGRES_DB: returns_processing
+    ports:
+      - "5455:5432"
+    volumes:
+      - e2e_returns_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U returns_processing -d returns_processing"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # exception-management (exception cases from consumed facts). Own user/db
+  # name "exception_management" on host port 5456. Migrations are embedded
+  # in its binary.
+  postgres-exceptions:
+    image: postgres:16
+    container_name: e2e-postgres-exceptions
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: exception_management
+      POSTGRES_PASSWORD: exception_management
+      POSTGRES_DB: exception_management
+    ports:
+      - "5456:5432"
+    volumes:
+      - e2e_exceptions_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exception_management -d exception_management"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # dock-scheduling (door calendar: appointments, closures, local copies). Own
+  # user/db name "dock_scheduling" on host port 5457 (it ships no compose file).
+  # Migrations are embedded in its binary.
+  postgres-dock-scheduling:
+    image: postgres:16
+    container_name: e2e-postgres-dock-scheduling
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dock_scheduling
+      POSTGRES_PASSWORD: dock_scheduling
+      POSTGRES_DB: dock_scheduling
+    ports:
+      - "5457:5432"
+    volumes:
+      - e2e_dock_scheduling_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dock_scheduling -d dock_scheduling"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # yard-management (gate, trailers, moves, door work, yard policy). Own user/db
+  # name "yard_management" on host port 5458. Migrations are embedded in its
+  # binary (cmd/api; the separate cmd/relay does not migrate).
+  postgres-yard-management:
+    image: postgres:16
+    container_name: e2e-postgres-yard-management
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: yard_management
+      POSTGRES_PASSWORD: yard_management
+      POSTGRES_DB: yard_management
+    ports:
+      - "5458:5432"
+    volumes:
+      - e2e_yard_management_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yard_management -d yard_management"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # outbound-shipping (outbound loads, packages, bill of lading). Own user/db name
+  # "outbound_shipping" on host port 5459. Migrations are embedded in its binary.
+  postgres-outbound-shipping:
+    image: postgres:16
+    container_name: e2e-postgres-outbound-shipping
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: outbound_shipping
+      POSTGRES_PASSWORD: outbound_shipping
+      POSTGRES_DB: outbound_shipping
+    ports:
+      - "5459:5432"
+    volumes:
+      - e2e_outbound_shipping_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outbound_shipping -d outbound_shipping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   e2e_facility_pg_data:
   e2e_inventory_pg_data:
@@ -317,3 +404,8 @@ volumes:
   e2e_planning_pg_data:
   e2e_inbound_receiving_pg_data:
   e2e_slotting_pg_data:
+  e2e_returns_pg_data:
+  e2e_exceptions_pg_data:
+  e2e_dock_scheduling_pg_data:
+  e2e_yard_management_pg_data:
+  e2e_outbound_shipping_pg_data:

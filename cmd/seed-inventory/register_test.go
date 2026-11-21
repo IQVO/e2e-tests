@@ -86,7 +86,7 @@ func (f *fakeInventory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			b.capacity = body.Capacity
 			writeJSON(w, 200, map[string]any{"binId": id, "capacity": b.capacity})
 		}
-	case r.URL.Path == "/stock/stow" && r.Method == http.MethodPost:
+	case r.URL.Path == "/stowages" && r.Method == http.MethodPost:
 		key := r.Header.Get("Idempotency-Key")
 		if key == "" {
 			http.Error(w, "idempotency key required", http.StatusBadRequest)
@@ -94,7 +94,7 @@ func (f *fakeInventory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if st, seen := f.keys[key]; seen {
 			f.replays++
-			w.Header().Set("Idempotent-Replayed", "true")
+			w.Header().Set("Idempotency-Replayed", "true")
 			writeJSON(w, st, map[string]any{})
 			return
 		}
@@ -207,7 +207,7 @@ func TestAnInterruptedBinIsCompletedByTheIdempotencyKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := shared.Lines[0]
-	if _, err := c.do(ctx, http.MethodPost, "/stock/stow", map[string]any{"sku": first.SKU, "quantity": first.Qty, "binId": shared.Bin.ID},
+	if _, err := c.do(ctx, http.MethodPost, "/stowages", map[string]any{"sku": first.SKU, "quantity": first.Qty, "binId": shared.Bin.ID},
 		"seed-inventory-v1:"+shared.Bin.ID+":"+first.SKU+":"+itoa(first.Qty), nil, 201); err != nil {
 		t.Fatal(err)
 	}

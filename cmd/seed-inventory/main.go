@@ -10,7 +10,7 @@
 //     which bins (assortment by site role, size class and handling class; bins filled to
 //     80 % of their real volume and weight limits; hazmat in hazmat-rated zones, one SKU
 //     per bin; cold chain in chilled and frozen zones). It refuses to continue below -min-units;
-//  3. STOCK   PUT /bins/{binId} (capacity) and POST /stock/stow for every planned line, then
+//  3. STOCK   PUT /bins/{binId} (capacity) and POST /stowages for every planned line, then
 //     reads every bin back (GET /bins/{binId}) and a sample of SKUs (GET /inventory/{sku}/usable).
 //
 // Idempotent: a bin already holding its planned units is skipped, PUT /bins converges, and every

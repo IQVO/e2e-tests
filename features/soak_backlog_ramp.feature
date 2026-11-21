@@ -15,7 +15,7 @@ Feature: Sustained backlog-ramp soak across pickers and packers
   It is deliberately OBSERVATIONAL, not assertive on backlog/queue depth:
   once picker/packer throughput approaches the ramped injection rate,
   wes-work-planning's `/release` legitimately returns 409 (WIP limit
-  reached / pool empty) and fulfillment-execution's `/claim-next`
+  reached / pool empty) and fulfillment-execution's `/task-claims`
   legitimately returns 409 (no claimable task) — both are EXPECTED under
   ramping load, not failures. soak_test.go's runRamp prints a metrics
   summary at the end and only fails the scenario on a hard

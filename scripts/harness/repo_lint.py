@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""repo_lint: configuration sensors (harness v3). Stdlib only, so it runs on any CI runner.
+"""repo_lint: configuration sensors (harness v3+). Stdlib only, so it runs on any CI runner.
 
 Every check here exists because a real incident reached CI that a cheap static check would have caught
 before the PR was opened. Each finding says WHAT is wrong, WHY it matters and the exact FIX, so an agent
@@ -27,10 +27,37 @@ Checks
                       steps ran from the workspace root, where scripts/harness/red_issue.py does not exist; a
                       manual dispatch never ran those schedule-only steps, so nobody saw it)
 
+  R8 docs-pr          the docs workflow (docs.yml, or any workflow that deploys GitHub Pages) runs on `pull_request`
+                      (build only), and its Pages deploy job is gated off pull requests.
+                      (incident: docs built only on push to main in 9 repos; a broken sidebar id / link / MDX
+                      reached main and was found after the release, ecosystem gaps 2026-10, D25)
+  R9 chart-tests-ci   every chart test (`charts/<c>/tests/test_*.py`, `charts/<c>/tests/*.sh`) is run by a workflow:
+                      named in a `run:` step (path or glob), through a `make` target a workflow runs, or by another
+                      chart test that is.
+                      (incident: Service-selector and render tests existed in 5 repos and no CI job ran them, D25)
+  R10 configmap-mount every ConfigMap a chart template renders is referenced by a workload in that chart
+                      (`envFrom.configMapRef`, `configMapKeyRef`, or a `configMap` volume).
+                      (incident: 8 charts rendered `config.*` values into a ConfigMap no Deployment mounted, so
+                      every value silently did nothing, ecosystem gaps 2026-10, D14)
+  R11 coverage-scope  the coverage package set (`-coverpkg`) is defined ONLY in the Makefile `coverage` target and CI
+                      runs it: no workflow `run:` line may pass `-coverpkg` itself, and when the Makefile has a
+                      coverage gate some workflow must run `make coverage` (directly or through a target that has
+                      it as a prerequisite). In this template repository `ci.yml.template` counts as a workflow.
+                      (incident 16d: process-path-management and warehouse-ops-agent measured a different package
+                      set in CI than `make coverage`, so the local gate and the PR gate disagreed silently)
+  R12 harness-files   the agent harness entry points exist and cannot drift: CLAUDE.md and AGENTS.md both exist and
+                      one is a symlink to the other (two regular files drift apart), INCIDENTS.md and HARNESS.md
+                      exist, and the real guide carries a `harness-template: v<N>` marker. In this template repository
+                      (`.github/workflows/*.template` exists) it checks the template's own files, plus
+                      CLAUDE.md.template (the guide scripts/new-service.sh renders into every scaffold).
+                      (incident: new-service.sh only TOLD a human to write the guide; 14 scaffolded services never got
+                      a CLAUDE.md/AGENTS.md, and INCIDENTS.md, never template-managed, drifted into 8 variants)
+
 Usage: repo_lint.py [--root .] [--stale-owners claudioed,other]   exit 0 clean, 1 findings.
 Suppress one line with the text `repo-lint: ignore` on it (use sparingly, say why).
 """
 import argparse
+import fnmatch
 import glob
 import json
 import os
@@ -325,7 +352,7 @@ def check_owner_drift(root, owners):
 
 
 def check_placeholders(root):
-    if glob.glob(os.path.join(root, ".github", "workflows", "*.template")):
+    if is_template_repo(root):
         return  # the template repository itself ships placeholders by design
     rx = re.compile(r"(?<!\$)\{\{[A-Z][A-Z0-9_]{2,}\}\}")
     pats = [".github/**/*.yml", ".github/**/*.yaml", "Makefile", "Dockerfile", "charts/**/*", "docs/docusaurus.config.*",
@@ -343,6 +370,349 @@ def check_placeholders(root):
                     "replace it with the real value (see scripts/new-service.sh in warehouse-harness-template)")
 
 
+# ---- R8: docs built on pull requests --------------------------------------------------------------------
+def triggers(text):
+    """-> the text of the workflow's top-level `on:` block (inline value or indented mapping)."""
+    lines = text.splitlines()
+    for i, l in enumerate(lines):
+        m = re.match(r"""^(?:on|"on"|'on'|true):\s*(.*)$""", l)
+        if not m:
+            continue
+        block = [m.group(1)]
+        for l2 in lines[i + 1:]:
+            if re.match(r"^\S", l2):
+                break
+            block.append(l2)
+        return "\n".join(block)
+    return ""
+
+
+def is_docs_workflow(path, text):
+    return os.path.basename(path) in ("docs.yml", "docs.yaml") or "actions/deploy-pages" in text
+
+
+def check_docs_pr(root, path):
+    text = read(path)
+    if not is_docs_workflow(path, text):
+        return
+    rp = rel(root, path)
+    trig = re.sub(r"#.*", "", triggers(text))
+    if not re.search(r"\bpull_request\b(?!_target)", trig):
+        err("R8", rp, 0, "the docs workflow does not run on `pull_request`",
+            "the site is built only after merge (push to main), so a broken sidebar id, link or MDX page is found "
+            "after the release instead of in review",
+            "add a build-only `pull_request:` trigger with the same `paths:` as `push:`, and gate the Pages deploy "
+            "job with `if: github.event_name != 'pull_request'` (copy inventory-storage's docs.yml)")
+        return
+    for jid, (first, buf) in split_jobs(text).items():
+        body = "\n".join(buf)
+        if "actions/deploy-pages" not in body or "repo-lint: ignore" in body:
+            continue
+        cond = re.search(r"^    if:\s*(.+)$", body, re.M)
+        if not cond or not re.search(r"pull_request|refs/heads/|event_name\s*==\s*'(?:push|workflow_dispatch)'",
+                                     cond.group(1)):
+            err("R8", rp, first, f"job `{jid}` deploys GitHub Pages and also runs on pull requests",
+                "a pull request would try to publish the site (the github-pages environment rejects non-default "
+                "branches, so every docs PR goes red, or worse, publishes unreviewed content)",
+                f"add `if: github.event_name != 'pull_request'` to job `{jid}` (and to the upload-pages-artifact step)")
+
+
+# ---- R9: chart tests run in CI --------------------------------------------------------------------------
+CHART_REF_RX = re.compile(r"""(charts/[^\s"';|&()<>`]*tests/[^\s"';|&()<>`]*)""")
+
+
+def chart_tests(root):
+    out = []
+    for p in sorted(glob.glob(os.path.join(root, "charts", "*", "tests", "*"))):
+        n = os.path.basename(p)
+        if not os.path.isfile(p) or not (n.endswith(".sh") or (n.startswith("test_") and n.endswith(".py"))):
+            continue
+        if "repo-lint: ignore" in "\n".join(read(p).splitlines()[:5]):
+            continue
+        out.append(rel(root, p))
+    return out
+
+
+def uncommented(text):
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+
+def make_recipes(root):
+    """-> {target: (prerequisites, recipe text)} from the top-level Makefile (simple rules only)."""
+    rules, cur = {}, None
+    for l in read(os.path.join(root, "Makefile")).splitlines():
+        m = re.match(r"^([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*)\s*:(?!=)\s*([^#;]*)", l)
+        if m and not l.startswith("\t"):
+            names = m.group(1).split()
+            for n in names:
+                rules.setdefault(n, [[], []])[0].extend(m.group(2).split())
+            cur = names
+            continue
+        if l.startswith("\t") and cur:
+            for n in cur:
+                rules[n][1].append(l)
+        elif l.strip() and not l.startswith("\t"):
+            cur = None
+    return {k: (v[0], "\n".join(v[1])) for k, v in rules.items()}
+
+
+def make_targets_run_by(ci_text, recipes):
+    """-> [target] for every make target a workflow runs (and their prerequisites, transitively), in visit order."""
+    todo = []
+    for m in re.finditer(r"\bmake[ \t]+((?:-[A-Za-z][ \t]+\S+[ \t]+|[A-Za-z0-9_.-]+[ \t]*)+)", ci_text):
+        todo += [t for t in m.group(1).split() if not t.startswith("-") and "=" not in t]
+    seen, out = set(), []
+    while todo:
+        t = todo.pop()
+        if t in seen or t not in recipes:
+            continue
+        seen.add(t)
+        todo += recipes[t][0]
+        out.append(t)
+    return out
+
+
+def make_text_run_by(ci_text, recipes):
+    """Recipe text of every make target a workflow runs (and their prerequisites, transitively)."""
+    return "\n".join(recipes[t][1] for t in make_targets_run_by(ci_text, recipes))
+
+
+def covered_by(text, test, root):
+    if test in text:
+        return True
+    for ref in CHART_REF_RX.findall(text):
+        if "${{" not in ref and fnmatch.fnmatch(test, ref):
+            return True
+    return False
+
+
+def check_chart_tests(root):
+    tests = chart_tests(root)
+    if not tests:
+        return
+    ci_text = "\n".join(uncommented(read(w)) for w in workflows(root))
+    reach = ci_text + "\n" + make_text_run_by(ci_text, make_recipes(root))
+    run = {t for t in tests if covered_by(reach, t, root)}
+    changed = True
+    while changed:  # a test run by an already-covered test (render_test.sh -> render-assertions.sh) is covered
+        changed = False
+        for t in tests:
+            if t in run:
+                continue
+            for r in list(run):
+                body = uncommented(read(os.path.join(root, r)))
+                if t in body or re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(os.path.basename(t)) + r"\b", body):
+                    run.add(t)
+                    changed = True
+                    break
+    for t in tests:
+        if t not in run:
+            err("R9", t, 0, "chart test is not run by any workflow",
+                "a chart test that CI never runs proves nothing: a broken Service selector or an unmounted ConfigMap "
+                "is found after the release (or in the cluster) instead of in review",
+                "run it in a `chart-tests` job on every push and PR (copy facility-layout's or inventory-storage's "
+                "`chart-tests` job; install PyYAML hash-pinned with `pip install --require-hashes -r "
+                ".github/requirements/chart-tests.txt` so a selector test cannot pass by printing SKIP), or put "
+                "`repo-lint: ignore <why>` in the first lines of the test if it needs something CI cannot provide")
+
+
+# ---- R10: chart ConfigMaps are mounted ------------------------------------------------------------------
+WORKLOAD_RX = re.compile(r"^kind:\s*(Deployment|StatefulSet|DaemonSet|Job|CronJob)\b", re.M)
+CM_REF_RX = re.compile(
+    r"(?<![A-Za-z])(?:configMapRef|configMapKeyRef|configMap):[ \t]*"
+    r"(?:\{[ \t]*name:[ \t]*(.+?)[ \t]*\}[ \t]*$|\n(?:[ \t]*(?!name:)\S.*\n){0,3}?[ \t]*name:[ \t]*(.+))", re.M)
+
+
+def yaml_docs(text):
+    return re.split(r"(?m)^---\s*$", text)
+
+
+def norm(expr):
+    e = expr.strip().strip("\"'")
+    e = re.sub(r"\{\{-?\s*", "{{ ", e)
+    e = re.sub(r"\s*-?\}\}", " }}", e)
+    return re.sub(r"\s+", " ", e)
+
+
+def configmaps(root, tpl):
+    """-> [(chart-relative path, line, name expression)] for every ConfigMap document in one template."""
+    text = read(tpl)
+    out, offset = [], 0
+    for doc in yaml_docs(text):
+        km = re.search(r"^kind:\s*ConfigMap\b.*$", doc, re.M)
+        if km and "repo-lint: ignore" not in km.group(0):
+            nm = re.search(r"^metadata:\s*\n(?:[ \t]+.*\n)*?  name:\s*(.+)$", doc, re.M)
+            if nm:
+                line = offset + doc[:km.start()].count("\n") + 1
+                out.append((rel(root, tpl), line, norm(nm.group(1))))
+        offset += doc.count("\n") + 1
+    return out
+
+
+def cm_referenced(name, refs):
+    """A reference matches the same literal name, or the same include helper with the same literal suffix
+    (`{{ include "x.fullname" . }}-path-catalogue` == `printf "%s-path-catalogue" (include "x.fullname" .)`)."""
+    if name in refs:
+        return True
+    m = re.match(r'^\{\{ include "([^"]+)" \S+ \}\}(.*)$', name)
+    if not m:
+        return False
+    helper, suffix = m.group(1), m.group(2)
+    if not suffix:
+        return False  # the bare fullname must be referenced exactly, or a suffixed reference would satisfy it
+    return any(f'"{helper}"' in r and (f"%s{suffix}" in r or r.endswith(suffix)) for r in refs)
+
+
+def check_configmaps_mounted(root):
+    for chart in sorted(glob.glob(os.path.join(root, "charts", "*"))):
+        tpls = sorted(glob.glob(os.path.join(chart, "templates", "**", "*.yaml"), recursive=True))
+        refs = set()
+        for t in tpls:
+            for doc in yaml_docs(read(t)):
+                if WORKLOAD_RX.search(doc):
+                    refs |= {norm(a or b) for a, b in CM_REF_RX.findall(doc)}
+        for t in tpls:
+            for rp, line, name in configmaps(root, t):
+                if not cm_referenced(name, refs):
+                    err("R10", rp, line, f"ConfigMap `{name}` is not referenced by any Deployment/workload in this chart",
+                        "values rendered into it (`config.*`) never reach a process: the chart looks configurable and "
+                        "silently is not",
+                        "mount it where the binary reads those keys: `envFrom: [{configMapRef: {name: <same name>}}]` "
+                        "on the Deployment (explicit `env:` still wins), or a `configMap` volume for files; delete keys "
+                        "no binary reads; add a render test asserting the mount. A ConfigMap consumed outside the chart's "
+                        "workloads (e.g. a Grafana sidecar) takes `# repo-lint: ignore <why>` on its `kind:` line")
+
+
+# ---- R11: the coverage scope has one source of truth (the Makefile) -------------------------------------
+COVERPKG_RX = re.compile(r"(?:^|\s)-coverpkg[=\s]")
+
+
+def coverage_workflows(root):
+    """Workflows that define a service's CI. In the template repository ci.yml.template IS the service CI."""
+    out = workflows(root)
+    out += sorted(glob.glob(os.path.join(root, ".github", "workflows", "*.y*ml.template")))
+    return out
+
+
+def makefile_line(root, target):
+    for i, l in enumerate(read(os.path.join(root, "Makefile")).splitlines(), 1):
+        if re.match(rf"^(?:[A-Za-z0-9_.-]+\s+)*{re.escape(target)}(?:\s+[A-Za-z0-9_.-]+)*\s*:(?!=)", l):
+            return i
+    return 0
+
+
+def check_coverage_scope(root):
+    """R11: the Makefile `coverage` target owns the coverage package set; CI runs it instead of copying it."""
+    wfs = coverage_workflows(root)
+    for w in wfs:
+        rp = rel(root, w)
+        for i, l in enumerate(read(w).splitlines(), 1):
+            if l.lstrip().startswith("#") or "repo-lint: ignore" in l:
+                continue
+            if COVERPKG_RX.search(l):
+                err("R11", rp, i, "a workflow step defines its own coverage package set (`-coverpkg`)",
+                    "the Makefile `coverage` target is the single source of the coverage scope; a second copy here "
+                    "drifts (incident 16d: CI and `make coverage` measured different package sets, so the local and "
+                    "PR gates disagreed without anyone noticing)",
+                    "replace the coverage test + gate steps with `run: make coverage` and change the scope or the "
+                    "threshold only in the Makefile")
+    recipes = make_recipes(root)
+    if not wfs or "coverage" not in recipes or "-coverpkg" not in recipes["coverage"][1]:
+        return  # no workflow to compare, or no scoped coverage gate to protect
+    ci_text = "\n".join(uncommented(read(w)) for w in wfs)
+    if "coverage" in make_targets_run_by(ci_text, recipes):
+        return
+    err("R11", "Makefile", makefile_line(root, "coverage"),
+        "the Makefile defines a coverage gate (`coverage` target with `-coverpkg`) but no workflow runs it",
+        "the gate then runs only on laptops, or CI re-implements it with its own package set and drifts (incident 16d)",
+        "run the gate in CI with a `run: make coverage` step in the unit-test job (or a `make` target that has "
+        "`coverage` as a prerequisite)")
+
+
+# ---- R12: the harness entry points exist, the two guide names are one file, the guide is versioned ---------
+MARKER_RX = re.compile(r"harness-template:\s*v\d+\b")
+GUIDE_FIX = ("keep ONE real guide: `CLAUDE.md` as a regular file and `ln -s CLAUDE.md AGENTS.md` (git mode 120000; "
+             "the reverse direction, CLAUDE.md -> AGENTS.md, is also accepted)")
+
+
+def is_template_repo(root):
+    return bool(glob.glob(os.path.join(root, ".github", "workflows", "*.template")))
+
+
+def check_harness_files(root):
+    """R12: CLAUDE.md + AGENTS.md (one a symlink to the other), INCIDENTS.md, HARNESS.md, a version marker."""
+    template = is_template_repo(root)
+    for name, why, fix in (
+            ("INCIDENTS.md",
+             "the incident protocol (fix + guard + fleet rollout + a row) has nowhere to land, and agents cannot read "
+             "which failures the sensors were written for",
+             "copy the fleet log byte-identical from warehouse-harness-template's INCIDENTS.md (`python3 "
+             "tools/migrate_v4.py --repo <this repo>` in the template does it); add new rows THERE first"),
+            ("HARNESS.md",
+             "nothing tells an agent which sensors this repo runs, at which lifecycle point, and why",
+             "start from warehouse-harness-template's HARNESS.md and make every sensor row describe what THIS repo "
+             "really runs (its CI job names and Makefile targets)")):
+        if not os.path.isfile(os.path.join(root, name)):
+            err("R12", name, 0, f"{name} is missing", why, fix)
+    claude, agents = os.path.join(root, "CLAUDE.md"), os.path.join(root, "AGENTS.md")
+    missing = [n for n, p in (("CLAUDE.md", claude), ("AGENTS.md", agents)) if not os.path.lexists(p)]
+    for n in missing:
+        other = os.path.join(root, "AGENTS.md" if n == "CLAUDE.md" else "CLAUDE.md")
+        if n == "AGENTS.md" and os.path.isfile(other):
+            fix = "`ln -s CLAUDE.md AGENTS.md` (git mode 120000)"
+        elif n == "CLAUDE.md" and os.path.isfile(other):
+            fix = "`git mv AGENTS.md CLAUDE.md && ln -s CLAUDE.md AGENTS.md` (or `ln -s AGENTS.md CLAUDE.md`)"
+        else:
+            fix = ("write CLAUDE.md (model it on warehouse-harness-template's CLAUDE.md.template or product-master's "
+                   "CLAUDE.md: identity, hard rules, commands, where things are written down, `harness-template: v4`), "
+                   "then " + GUIDE_FIX)
+        err("R12", n, 0, f"{n} is missing",
+            f"Claude Code reads CLAUDE.md and Codex/OpenCode read AGENTS.md: a session in a runtime that looks for "
+            f"{n} starts with no repo map, no hard rules and no commands (scripts/new-service.sh used to leave the "
+            "guide to a human, and 14 services never got one)", fix)
+    guide = None
+    if not missing:
+        c_link, a_link = os.path.islink(claude), os.path.islink(agents)
+        if c_link and a_link:
+            err("R12", "CLAUDE.md", 0, "CLAUDE.md and AGENTS.md are both symlinks, so there is no real guide file",
+                "a symlink pair resolves to nothing (or loops): every runtime starts without a guide",
+                GUIDE_FIX)
+        elif not c_link and not a_link:
+            err("R12", "AGENTS.md", 0, "CLAUDE.md and AGENTS.md are two separate regular files",
+                "two copies of the guide drift apart: Claude Code and Codex/OpenCode sessions then follow different "
+                "rules in the same repo", "merge any content unique to AGENTS.md into CLAUDE.md, then " + GUIDE_FIX)
+        else:
+            link, real = (agents, claude) if a_link else (claude, agents)
+            if os.path.realpath(link) != os.path.realpath(real) or not os.path.isfile(real):
+                err("R12", os.path.basename(link), 0,
+                    f"{os.path.basename(link)} is a symlink to `{os.readlink(link)}`, not to {os.path.basename(real)}",
+                    "the two runtimes read different (or no) guides", GUIDE_FIX)
+            else:
+                guide = real
+    elif len(missing) == 1:
+        present = agents if missing[0] == "CLAUDE.md" else claude
+        if os.path.isfile(present):
+            guide = present
+    if guide and not MARKER_RX.search(read(guide)):
+        err("R12", os.path.basename(guide), 0, "the guide has no `harness-template: v<N>` marker",
+            "a fleet audit (scripts/harness-audit.py) cannot tell which harness version this repo is on, so a repo "
+            "that is behind the template is never noticed",
+            "add the line `harness-template: v4` to the guide (`python3 tools/migrate_v4.py --repo <this repo>` in "
+            "warehouse-harness-template writes it)")
+    if not template:
+        return
+    tpl = os.path.join(root, "CLAUDE.md.template")
+    if not os.path.isfile(tpl):
+        err("R12", "CLAUDE.md.template", 0, "the template ships no CLAUDE.md.template",
+            "scripts/new-service.sh renders every new service's CLAUDE.md (and its AGENTS.md symlink) from it; without "
+            "it a scaffold starts with no guide, which is how 14 services ended up without one",
+            "restore CLAUDE.md.template (git log --follow CLAUDE.md.template) and keep scripts/scaffold-selftest.sh green")
+    elif not MARKER_RX.search(read(tpl)):
+        err("R12", "CLAUDE.md.template", 0, "CLAUDE.md.template has no `harness-template: v<N>` marker",
+            "every scaffold would start unversioned and invisible to the fleet audit",
+            "add the line `harness-template: v4` to CLAUDE.md.template")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=".")
@@ -352,9 +722,14 @@ def main():
     owners = [o for o in a.stale_owners.split(",") if o]
     for w in workflows(root):
         check_workflow(root, w)
+        check_docs_pr(root, w)
     check_dependabot(root)
     check_owner_drift(root, owners)
     check_placeholders(root)
+    check_chart_tests(root)
+    check_configmaps_mounted(root)
+    check_coverage_scope(root)
+    check_harness_files(root)
     for e in errors:
         print(e)
     print(f"repo-lint: {len(errors)} error(s)")

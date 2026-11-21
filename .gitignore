@@ -3,3 +3,8 @@ run/
 logs/
 bin/
 .claude/settings.local.json
+
+# Generated run diagnostics and language caches.
+artifacts/
+__pycache__/
+*.pyc

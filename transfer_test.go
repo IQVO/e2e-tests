@@ -287,13 +287,20 @@ func (w *world) injectSiteCapability(site string) error {
 // due_at must fall inside the capacity plan's window. The harness therefore
 // states the facts directly.
 func (w *world) injectSiteDemand(site string, units int, sku string, hours int) error {
+	return w.injectSiteDemandAt(site, units, sku, hours, time.Now())
+}
+
+// injectSiteDemandAt is injectSiteDemand with an explicit event time: NIP
+// stores the CloudEvent time as the fact's as_of watermark, so a past time
+// states a fact that is already stale (used to prove per-site staleness).
+func (w *world) injectSiteDemandAt(site string, units int, sku string, hours int, at time.Time) error {
 	site, sku = w.rs(site), w.rs(sku)
 	due := time.Now().UTC().Add(time.Duration(hours) * time.Hour)
 	return publishInjectedCloudEvent(topicOrderEvents,
 		"/warehouse/order-management",
 		"com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged",
 		"urn:warehouse:order-management:events:SiteSkuDemandChanged:v1",
-		fmt.Sprintf("ORD-E2E-%s-%s", w.rs("<run>"), site), time.Now(), map[string]any{
+		fmt.Sprintf("ORD-E2E-%s-%s", w.rs("<run>"), site), at, map[string]any{
 			"source_order_id":    fmt.Sprintf("ORD-E2E-%s-%s", w.rs("<run>"), site),
 			"line_no":            1,
 			"site_id":            site,
@@ -312,8 +319,11 @@ func (w *world) injectSiteDemand(site string, units int, sku string, hours int) 
 // outbox relay emits CapacityPlanPublished onto Kafka for NIP to ingest.
 func (w *world) planningPublishesCapacityPlan(site string, ratePerHour, hours int) error {
 	site = w.rs(site)
-	start := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
-	end := time.Now().UTC().Add(time.Duration(hours) * time.Hour).Truncate(time.Second)
+	// ONE clock reading, so the window is exactly hours+1 long and the plan's
+	// capacity over it (rate x window hours) is an exact integer.
+	now := time.Now().UTC()
+	start := now.Add(-1 * time.Hour).Truncate(time.Second)
+	end := now.Add(time.Duration(hours) * time.Hour).Truncate(time.Second)
 	const pathID = "e2e-transfer-path"
 
 	if err := w.expectOK2xx(w.doJSON(http.MethodPost, warehousePlanningBaseURL+"/process-paths", map[string]any{
@@ -339,7 +349,7 @@ func (w *world) planningPublishesCapacityPlan(site string, ratePerHour, hours in
 	if planID == "" {
 		return fmt.Errorf("capacity plan response has no id: %s", w.last.body)
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/capacity-plans/%s/publish", warehousePlanningBaseURL, planID), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/capacity-plans/%s/publications", warehousePlanningBaseURL, planID), nil)); err != nil {
 		return fmt.Errorf("publish capacity plan %s: %w", planID, err)
 	}
 	return nil
@@ -417,7 +427,7 @@ func (w *world) approveTransfer(qty int, sku, origin, dest string) error {
 	// refused (422 facts-incomplete) and nothing is persisted, so retrying is
 	// exactly what an operator would do.
 	err := eventually(func() error {
-		if err := w.doJSON(http.MethodPost, nipBaseURL+"/v1/transfers:approve", body); err != nil {
+		if err := w.doJSON(http.MethodPost, nipBaseURL+"/v1/transfer-approvals", body); err != nil {
 			return err
 		}
 		if w.last.status != http.StatusOK {
@@ -437,8 +447,11 @@ func (w *world) approveTransfer(qty int, sku, origin, dest string) error {
 	if got["state"] != "ALLOCATING" {
 		return fmt.Errorf("approved transfer state = %v, want ALLOCATING (body: %s)", got["state"], w.last.body)
 	}
-	if got["replayed"] != false {
-		return fmt.Errorf("approval unexpectedly reported replayed=%v", got["replayed"])
+	// network-inventory-planning reports a replayed Idempotency-Key with the
+	// Idempotency-Replayed response header (the body carries no such field
+	// any more); a first approval must not carry it.
+	if replayed := w.last.header.Get("Idempotency-Replayed"); replayed == "true" {
+		return fmt.Errorf("approval unexpectedly reported Idempotency-Replayed=%s", replayed)
 	}
 	st.pickDemand = st.id + ":pick"
 	st.dispatchDemand = st.id + ":dispatch"
@@ -625,12 +638,9 @@ func (w *world) wesEnqueuesLegAsWorkUnit(leg string) error {
 		return err
 	}
 	return eventually(func() error {
-		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand), nil); err != nil {
+		units, err := w.getItems(fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand))
+		if err != nil {
 			return err
-		}
-		var units []map[string]any
-		if err := json.Unmarshal(w.last.body, &units); err != nil {
-			return fmt.Errorf("decode work units for %s: %w (body %s)", demand, err, w.last.body)
 		}
 		if len(units) != 1 {
 			return fmt.Errorf("want exactly 1 work unit for reference %q, got %d", demand, len(units))
@@ -648,15 +658,12 @@ func (w *world) wesHasNoWorkUnitForTransfer() error {
 		return err
 	}
 	for _, demand := range []string{st.pickDemand, st.dispatchDemand} {
-		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand), nil); err != nil {
+		units, err := w.getItems(fmt.Sprintf("%s/work-units?reference=%s", wesBaseURL, demand))
+		if err != nil {
 			return err
 		}
-		var units []map[string]any
-		if err := json.Unmarshal(w.last.body, &units); err != nil {
-			return fmt.Errorf("decode work units for %s: %w (body %s)", demand, err, w.last.body)
-		}
 		if len(units) != 0 {
-			return fmt.Errorf("wes-work-planning has work for rejected transfer reference %q: %s", demand, w.last.body)
+			return fmt.Errorf("wes-work-planning has work for rejected transfer reference %q: %v", demand, units)
 		}
 	}
 	return nil
@@ -668,15 +675,12 @@ func (w *world) fulfillmentHasNoTaskForTransfer() error {
 		return err
 	}
 	for _, demand := range []string{st.pickDemand, st.dispatchDemand} {
-		if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, demand), nil); err != nil {
+		tasks, err := w.getItems(fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, demand))
+		if err != nil {
 			return err
 		}
-		var tasks []map[string]any
-		if err := json.Unmarshal(w.last.body, &tasks); err != nil {
-			return fmt.Errorf("decode tasks for %s: %w (body %s)", demand, err, w.last.body)
-		}
 		if len(tasks) != 0 {
-			return fmt.Errorf("fulfillment-execution has a task for rejected transfer reference %q: %s", demand, w.last.body)
+			return fmt.Errorf("fulfillment-execution has a task for rejected transfer reference %q: %v", demand, tasks)
 		}
 	}
 	return nil
@@ -748,7 +752,7 @@ func (w *world) destinationStows(qty int, bin string) error {
 		return err
 	}
 	bin = w.rs(bin)
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/transfers/%s/stow", inventoryBaseURL, st.lineID), map[string]any{
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/transfers/%s/stowages", inventoryBaseURL, st.lineID), map[string]any{
 		"bins": []map[string]any{{"binId": bin, "quantity": qty}},
 	})); err != nil {
 		return err
@@ -784,6 +788,80 @@ func (w *world) destinationScanOfRejectedLineIsQuarantined(site string, qty int)
 // registration
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Cancel-after-allocation (ADR 0022)
+// ---------------------------------------------------------------------
+
+// cancelTransfer posts the operator cancel: an ALLOCATED transfer must
+// answer 202 with state RELEASING (the compensation is in flight, not
+// done).
+func (w *world) cancelTransfer(reason string) error {
+	st, err := w.xf()
+	if err != nil {
+		return err
+	}
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/v1/transfers/%s/cancellation", nipBaseURL, st.id), map[string]any{"reason": reason}); err != nil {
+		return err
+	}
+	if w.last.status != http.StatusAccepted {
+		return fmt.Errorf("cancel answered %d (body: %s), want 202", w.last.status, w.last.body)
+	}
+	if got := w.last.json()["state"]; got != "RELEASING" {
+		return fmt.Errorf("cancel response state = %v, want RELEASING (body: %s)", got, w.last.body)
+	}
+	return nil
+}
+
+// inventoryPublishesReleased asserts the TransferStockAllocationReleased
+// fact with its outcome on the inventory topic.
+func (w *world) inventoryPublishesReleased(outcome string) error {
+	st, err := w.xf()
+	if err != nil {
+		return err
+	}
+	p, err := expectKafkaEvent(topicInventoryEvents,
+		"com.warehouse.wms.inventory-storage.reservation.TransferStockAllocationReleased",
+		func(p map[string]any) bool { return p["transfer_id"] == st.id }, "transfer "+st.id)
+	if err != nil {
+		return err
+	}
+	if p["outcome"] != outcome || p["transfer_line_id"] != st.lineID {
+		return fmt.Errorf("TransferStockAllocationReleased = %v, want outcome %s for line %s", p, outcome, st.lineID)
+	}
+	return nil
+}
+
+// inventoryReservationIsRevoked proves the compensation's physical effect
+// in inventory-storage itself: the transfer's origin reservation (demand
+// ref "transfer:<id>:<line>") is no longer holding stock.
+func (w *world) inventoryReservationIsRevoked() error {
+	st, err := w.xf()
+	if err != nil {
+		return err
+	}
+	db, err := dbOpen(inventoryDBURL, inventoryDBPassword)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return eventually(func() error {
+		var status string
+		err := db.QueryRowContext(context.Background(),
+			`SELECT status FROM reservations WHERE demand_ref = $1`,
+			"transfer:"+st.id+":"+st.lineID).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("no reservation for transfer %s in inventory-storage", st.id)
+		}
+		if err != nil {
+			return err
+		}
+		if status != "REVOKED" {
+			return fmt.Errorf("transfer %s reservation status = %s, want REVOKED", st.id, status)
+		}
+		return nil
+	})
+}
+
 func registerTransferSteps(sc *godog.ScenarioContext, w *world) {
 	// The suite shares ONE world across scenarios (see InitializeScenario),
 	// so the saga correlation is reset explicitly before each scenario.
@@ -808,6 +886,10 @@ func registerTransferSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^inventory-storage eventually publishes TransferStockAllocationRejected for the transfer with reason ([A-Z_]+)$`, w.inventoryPublishesRejected)
 	sc.Step(`^network-inventory-planning eventually releases the (pick|dispatch) demand of (\d+) units on path "([^"]*)" at site "([^"]*)"$`, w.nipReleasesDemand)
 	sc.Step(`^network-inventory-planning has released no work demand for the transfer$`, w.nipReleasesNoDemand)
+
+	sc.Step(`^I cancel the transfer in network-inventory-planning with reason "([^\"]*)"$`, w.cancelTransfer)
+	sc.Step(`^inventory-storage eventually publishes TransferStockAllocationReleased for the transfer with outcome ([A-Z_]+)$`, w.inventoryPublishesReleased)
+	sc.Step(`^inventory-storage's reservation for the transfer is revoked$`, w.inventoryReservationIsRevoked)
 	sc.Step(`^fulfillment-execution eventually publishes (TransferPicked|TransferDispatched) for the transfer with quantity (\d+)$`, w.fulfillmentPublishesFact)
 	sc.Step(`^inventory-storage eventually publishes (TransferReceiptStaged|TransferStockStowed) for the transfer$`, w.inventoryPublishesDestinationFact)
 

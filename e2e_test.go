@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -137,10 +138,34 @@ type world struct {
 	// inb is the inbound-receiving correlation (receipt and appointment ids
 	// by run-scoped ASN number). See inbound_test.go.
 	inb *inboundState
+	// mc is the mastercase correlation (GTINs, SSCCs, bins), see mastercase_test.go.
+	mc *mastercaseState
+	// lbl is the GS1-label/advice correlation (pallet SSCCs, the one
+	// sscc-assignment key and SSCC per ASN, the last scanned label). See
+	// labels_test.go.
+	lbl *labelsState
+
+	// si is the seller-inbound cross-org correlation. See seller_inbound_test.go.
+	si *siState
 
 	// slot is the slotting-optimization correlation (plans, injected demand
 	// and placement guards by run-scoped site). See slotting_test.go.
 	slot *slottingState
+
+	// ret is the returns-processing correlation (RMA, receipt, disposition
+	// of scenario 1). See returns_test.go.
+	ret *returnsState
+
+	// exc is the exception-management correlation (the case under test in
+	// scenarios 2 and 3). See returns_test.go.
+	exc *exceptionsState
+
+	// yard is the yard-journey correlation (appointment, visit, trailer and move
+	// ids by run-scoped label). See yard_journey_test.go.
+	yard *yardJourneyState
+
+	// pathListing is every item of the last process-paths listing (all pages), see listPaths.
+	pathListing []map[string]any
 }
 
 func newWorld() *world {
@@ -174,10 +199,12 @@ func (w *world) doJSON(method, url string, body any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if method == http.MethodPost {
+	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
 		// Creating POSTs require an Idempotency-Key (facility-layout ADR-0019 and the fleet
-		// idempotency middleware). This client never re-sends a request, so a fresh key per
-		// call is the honest equivalent of a device minting one per logical action.
+		// idempotency middleware), and the two returns/exceptions contexts demand it on
+		// their policy-declaring PUTs too. This client never re-sends a request, so a fresh
+		// key per call is the honest equivalent of a device minting one per logical action;
+		// services whose PUTs are not creating simply ignore the header.
 		req.Header.Set("Idempotency-Key", newIdempotencyKey())
 	}
 	resp, err := w.client.Do(req)
@@ -352,7 +379,7 @@ func (w *world) resolveSlot(code string) string {
 
 func (w *world) decommissionLocationSlot(locationCode string) error {
 	return w.expectOK2xx(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/locations/%s/decommission", facilityBaseURL, w.resolveSlot(locationCode)), nil))
+		fmt.Sprintf("%s/locations/%s/decommissionings", facilityBaseURL, w.resolveSlot(locationCode)), nil))
 }
 
 // ---------------------------------------------------------------------
@@ -569,7 +596,7 @@ func (w *world) physicalProfileReadFor(sku string) error {
 // pass on an unrelated 409, which would silently hide a broken cache.
 func (w *world) stowIsRejected(qty int, sku, binID string) error {
 	binID = w.resolveSlot(binID)
-	if err := w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/stow", map[string]any{
+	if err := w.doJSON(http.MethodPost, inventoryBaseURL+"/stowages", map[string]any{
 		"sku": sku, "quantity": qty, "binId": binID,
 	}); err != nil {
 		return err
@@ -595,7 +622,7 @@ func (w *world) stowEventuallySucceeds(qty int, sku, binID string) error {
 	deadline := time.Now().Add(eventualWaitTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		lastErr = w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/stow",
+		lastErr = w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stowages",
 			map[string]any{"sku": sku, "quantity": qty, "binId": binID}))
 		if lastErr == nil {
 			return nil
@@ -630,22 +657,25 @@ func (w *world) stowEventuallyRejected(qty int, sku, binID string) error {
 // every consumer of this service — including this e2e harness — seeds
 // bins the same way its own unit/integration tests do: a direct insert.
 func (w *world) binExists(binID string, capacity int) error {
-	binID = w.rs(binID)
-	binID = w.resolveSlot(binID)
-	db, err := dbOpen(inventoryDBURL, inventoryDBPassword)
-	if err != nil {
+	binID = w.resolveSlot(w.rs(binID))
+	// Through inventory-storage's own registerBin (PUT /bins/{binId}, ADR 0025),
+	// not a direct INSERT: a direct insert only reaches the database named by
+	// INVENTORY_DB_URL, which on the kind cluster is NOT the database the
+	// running service reads (its default points at a standalone container), so
+	// the later stow answered 404 bin-not-found. PUT is idempotent: an existing
+	// bin of the same capacity is left untouched, a different one is resized.
+	if err := w.doJSON(http.MethodPut, inventoryBaseURL+"/bins/"+url.PathEscape(binID), map[string]any{"capacity": capacity}); err != nil {
 		return err
 	}
-	defer db.Close()
-	_, err = db.ExecContext(context.Background(),
-		`INSERT INTO bins (id, capacity, occupied) VALUES ($1, $2, 0)
-		 ON CONFLICT (id) DO NOTHING`, binID, capacity)
-	return err
+	if w.last.status != http.StatusOK && w.last.status != http.StatusCreated {
+		return fmt.Errorf("register bin %s: status %d, body=%s", binID, w.last.status, w.last.body)
+	}
+	return nil
 }
 
 func (w *world) receiveStock(qty int, sku string) error {
 	sku = w.rs(sku)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/receive", map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock-receipts", map[string]any{
 		"sku": sku, "quantity": qty,
 	}))
 }
@@ -653,7 +683,7 @@ func (w *world) receiveStock(qty int, sku string) error {
 func (w *world) stowStock(qty int, sku, binID string) error {
 	sku = w.rs(sku)
 	binID = w.rs(binID)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stock/stow", map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, inventoryBaseURL+"/stowages", map[string]any{
 		"sku": sku, "quantity": qty, "binId": binID,
 	}))
 }
@@ -685,7 +715,7 @@ func (w *world) usableInventoryIs(sku string, want int) error {
 
 func (w *world) startAssociateShift(associateID, certification string) error {
 	associateID = w.rs(associateID)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/associates/%s/start-shift", workforceBaseURL, associateID), map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/associates/%s/shift-starts", workforceBaseURL, associateID), map[string]any{
 		"certifications": []string{certification},
 	}))
 }
@@ -791,7 +821,7 @@ func (w *world) enqueueWorkUnit(workUnitID string, hoursFromNow int, reference, 
 }
 
 func (w *world) releaseWorkFor(pathID string) error {
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/paths/%s/release", wesBaseURL, pathID), nil))
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/paths/%s/work-releases", wesBaseURL, pathID), nil))
 }
 
 // releaseWorkEventuallyReleasesOrderLine is releaseWorkFor targeted at the
@@ -864,7 +894,7 @@ func (w *world) wesEventuallyObservesLaborPlan(pathID string, plannedHeads int) 
 func (w *world) wesEventuallyReportsCompleted(workUnitID string) error {
 	workUnitID = w.rs(workUnitID)
 	return eventually(func() error {
-		if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/work-units/%s/complete", wesBaseURL, workUnitID), nil); err != nil {
+		if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/work-units/%s/completions", wesBaseURL, workUnitID), nil); err != nil {
 			return err
 		}
 		// 409 = already completed (by the Kafka-driven TaskCompleted
@@ -883,18 +913,18 @@ func (w *world) wesEventuallyReportsCompleted(workUnitID string) error {
 	})
 }
 
-// wesRebalanceRecommendationIs asserts GET /paths/{pathId}/rebalance's
+// wesRebalanceRecommendationIs asserts POST /paths/{pathId}/rebalance-decisions's
 // action field, the same tool wes-work-planning's own get_rebalance_
 // recommendation MCP tool wraps (see its internal/adapters/inbound/mcp
 // /tools.go) — checked here over plain REST so this step needs no MCP
 // client of its own, while still proving the exact signal warehouse-ops-
 // agent's outbound MCP client will read moments later in the scenario.
 func (w *world) wesRebalanceRecommendationIs(pathID, action string) error {
-	if err := w.doJSON(http.MethodGet, fmt.Sprintf("%s/paths/%s/rebalance", wesBaseURL, pathID), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/paths/%s/rebalance-decisions", wesBaseURL, pathID), nil); err != nil {
 		return err
 	}
-	if w.last.status != http.StatusOK {
-		return fmt.Errorf("GET rebalance: status %d, body=%s", w.last.status, w.last.body)
+	if w.last.status != http.StatusCreated {
+		return fmt.Errorf("POST rebalance-decisions: status %d, body=%s", w.last.status, w.last.body)
 	}
 	got := w.last.json()
 	if got["action"] != action {
@@ -933,7 +963,7 @@ func (w *world) registerStation(stationID, capabilities string) error {
 func (w *world) checkInStation(associateID, stationID string) error {
 	associateID = w.rs(associateID)
 	stationID = w.rs(stationID)
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/stations/%s/check-in", fulfillmentBaseURL, stationID), map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/stations/%s/check-ins", fulfillmentBaseURL, stationID), map[string]any{
 		"occupantId": associateID,
 	}))
 }
@@ -954,16 +984,9 @@ func (w *world) checkInStation(associateID, stationID string) error {
 func (w *world) fulfillmentEventuallyCreatesTaskFor(orderRef string) error {
 	orderRef = w.rs(orderRef)
 	return eventually(func() error {
-		if err := w.doJSON(http.MethodGet,
-			fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, orderRef), nil); err != nil {
+		tasks, err := w.getItems(fmt.Sprintf("%s/tasks?orderRef=%s", fulfillmentBaseURL, orderRef))
+		if err != nil {
 			return err
-		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("status %d (body=%s)", w.last.status, w.last.body)
-		}
-		var tasks []map[string]any
-		if err := json.Unmarshal(w.last.body, &tasks); err != nil {
-			return fmt.Errorf("decode tasks for %s: %w (body=%s)", orderRef, err, w.last.body)
 		}
 		if len(tasks) == 0 {
 			return fmt.Errorf("no task yet for orderRef %q", orderRef)
@@ -994,7 +1017,7 @@ func (w *world) fulfillmentEventuallyCreatesTaskFor(orderRef string) error {
 func (w *world) claimNextTask(stationID, taskType string) error {
 	stationID = w.rs(stationID)
 	return w.expectOK2xx(w.doJSON(http.MethodPost,
-		fmt.Sprintf("%s/stations/%s/claim-next", fulfillmentBaseURL, stationID),
+		fmt.Sprintf("%s/stations/%s/task-claims", fulfillmentBaseURL, stationID),
 		map[string]any{"taskType": taskType}))
 }
 
@@ -1006,7 +1029,7 @@ func (w *world) claimNextTaskForOrder(stationID, taskType, orderRef string) erro
 	orderRef = w.rs(orderRef)
 	return eventually(func() error {
 		if err := w.expectOK2xx(w.doJSON(http.MethodPost,
-			fmt.Sprintf("%s/stations/%s/claim-next", fulfillmentBaseURL, stationID),
+			fmt.Sprintf("%s/stations/%s/task-claims", fulfillmentBaseURL, stationID),
 			map[string]any{"taskType": taskType})); err != nil {
 			return err
 		}
@@ -1034,7 +1057,7 @@ func (w *world) completeClaimedTask(stationID string) error {
 	if w.claimedTaskID == "" {
 		return fmt.Errorf("no task has been claimed yet this scenario")
 	}
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/complete", fulfillmentBaseURL, w.claimedTaskID), map[string]any{
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/tasks/%s/completions", fulfillmentBaseURL, w.claimedTaskID), map[string]any{
 		"stationId": stationID,
 	}))
 }
@@ -1047,7 +1070,7 @@ func (w *world) completeClaimedTask(stationID string) error {
 // internal/application/usecases/claim_next.go). Same direct-seed pattern
 // this harness already uses for inventory-storage bins (see binExists) —
 // there is no "force-expire one task's lease" HTTP endpoint; only the bulk
-// POST /tasks/expire-leases sweep, which also FREES the task (status back
+// POST /task-lease-expirations sweep, which also FREES the task (status back
 // to Pending) rather than leaving it Claimed-but-expired, which is
 // precisely the "stuck" state diagnose_stuck_tasks is meant to catch.
 func (w *world) claimedTaskLeaseForcedExpired() error {
@@ -1137,14 +1160,14 @@ func (w *world) theTaskForOrderLineHasCPTForcedIntoThePast(lineNo int) error {
 	return nil
 }
 
-// triggerFulfillmentCPTMissedSweep calls POST /tasks/sweep-cpt-misses (no
+// triggerFulfillmentCPTMissedSweep calls POST /cpt-miss-sweeps (no
 // request body — see PostSweepCPTMisses), fulfillment-execution's
 // Clock-driven sweep (ADR-0025) that detects every still-open task whose
 // CPT is now in the past and publishes TaskCPTMissed for each via its own
 // transactional outbox (the outbox relay runs automatically in-process —
 // no separate trigger needed for the Kafka hop itself).
 func (w *world) triggerFulfillmentCPTMissedSweep() error {
-	return w.expectOK2xx(w.doJSON(http.MethodPost, fulfillmentBaseURL+"/tasks/sweep-cpt-misses", nil))
+	return w.expectOK2xx(w.doJSON(http.MethodPost, fulfillmentBaseURL+"/cpt-miss-sweeps", nil))
 }
 
 // fulfillmentReportsAtLeastOneCPTMiss asserts the sweep's own response
@@ -1311,7 +1334,7 @@ func (w *world) dailyBriefListsOpenExceptionForPath(pathID, siteCode string) err
 // order-management steps (choreographed-release redesign)
 //
 // order-management's only public REST surface in v1: POST /orders,
-// GET /orders/{id}, POST /orders/{id}/retry-allocation, DELETE
+// GET /orders/{id}, POST /orders/{id}/allocation-retries, DELETE
 // /orders/{id}, GET /healthz. There is no /allocate or /release endpoint
 // — placing an order that can be immediately, fully allocated triggers
 // allocation (synchronous HTTP to inventory-storage, unchanged) AND
@@ -1535,10 +1558,7 @@ func (w *world) laborEventuallyReportsScorecard(associateID string, minTasks int
 // on this service's OWN read model after each write — proving the
 // write side and the resulting state transition work against a real,
 // independently running process, not just its own unit/integration
-// tests. (No sibling context in this harness runs with
-// PATH_CATALOGUE_SOURCE=kafka today — see 03-up-services.sh's own
-// comment — so a cross-service consumption proof is a separate,
-// future scenario once one does.)
+// tests. Live consumer propagation has its own scenario.
 // ---------------------------------------------------------------------
 
 // networkFulfillmentIsHealthy is a separate Background step (rather than
@@ -1659,17 +1679,17 @@ func (w *world) rs(id string) string {
 		return id
 	}
 	if w.runSuffix == "" {
-		w.runSuffix = fmt.Sprintf("%d", time.Now().UnixNano()%100000000)
+		w.runSuffix = envOrDefault("E2E_RUN_ID", fmt.Sprintf("%d", time.Now().UnixNano()))
 	}
 	return strings.ReplaceAll(id, "<run>", w.runSuffix)
 }
 
 // resolvePathID is rs with a process-path-shaped default for the bare token.
 func (w *world) resolvePathID(pathID string) string {
-	if !strings.Contains(pathID, "<run>") {
-		return pathID
+	if pathID == "<run>" {
+		pathID = "E2E-PROCESS-PATH-<run>"
 	}
-	return w.rs("E2E-PROCESS-PATH-<run>")
+	return w.rs(pathID)
 }
 
 // processPathCycleTimeP95 is the operator-declared p95 cycle time the scenarios
@@ -1714,7 +1734,7 @@ func (w *world) pathResponseMatchPrefixIs(want string) error {
 	return nil
 }
 
-func (w *world) revisePath(pathID, matchPrefix, capabilities string) error {
+func (w *world) revisePath(pathID, matchPrefix, capabilities, cycleTimeP95 string) error {
 	pathID = w.resolvePathID(pathID)
 	return w.expectOK2xx(w.doJSON(http.MethodPut, fmt.Sprintf("%s/process-paths/%s", processPathBaseURL, pathID), map[string]any{
 		"matchPrefix": matchPrefix, "requiredCapabilities": strings.Split(capabilities, ","),
@@ -1735,7 +1755,9 @@ func (w *world) listPaths(all bool) error {
 	if all {
 		url += "?all=true"
 	}
-	return w.doJSON(http.MethodGet, url, nil)
+	items, err := w.getItems(url)
+	w.pathListing = items
+	return err
 }
 
 func (w *world) activeListingIncludes(pathID string) error {
@@ -1763,22 +1785,15 @@ func (w *world) fullListingIncludes(pathID string) error {
 }
 
 func (w *world) listingContains(pathID string, want bool) error {
-	if w.last.status != http.StatusOK {
-		return fmt.Errorf("GET process-paths: status %d (body=%s)", w.last.status, w.last.body)
-	}
-	var items []map[string]any
-	if err := json.Unmarshal(w.last.body, &items); err != nil {
-		return fmt.Errorf("decoding process-paths list: %w (body=%s)", err, w.last.body)
-	}
 	found := false
-	for _, item := range items {
+	for _, item := range w.pathListing {
 		if item["pathId"] == pathID {
 			found = true
 			break
 		}
 	}
 	if found != want {
-		return fmt.Errorf("process-paths listing contains %q = %v, want %v (full body: %s)", pathID, found, want, w.last.body)
+		return fmt.Errorf("process-paths listing contains %q = %v, want %v (all pages: %v)", pathID, found, want, w.pathListing)
 	}
 	return nil
 }
@@ -1844,7 +1859,17 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	w := newWorld()
 	registerTransferSteps(sc, w)
 	registerInboundSteps(sc, w)
+	registerMastercaseSteps(sc, w)
+	registerLabelSteps(sc, w)
+	registerDockChainSteps(sc, w)
+	registerSellerInboundSteps(sc, w)
+	registerPhase5ASteps(sc, w)
+	registerReturnsSteps(sc, w)
 	registerSlottingSteps(sc, w)
+	registerYardJourneySteps(sc, w)
+	registerPhase5BSteps(sc, w)
+	registerPhase5CasePickSteps(sc, w)
+	registerPhase5OrderSiteSteps(sc, w)
 	sc.Before(func(ctx context.Context, s *godog.Scenario) (context.Context, error) {
 		w = newWorld()
 		return ctx, nil
@@ -1942,11 +1967,11 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^labor-performance eventually reports a scorecard for associate "([^"]*)" with at least (\d+) tasks? scored$`, w.laborEventuallyReportsScorecard)
 
 	// process-path-management
-	sc.Step(`^I define process path "([^"]*)" with match prefix "([^"]*)" and required capabilities "([^"]*)" in process-path-management$`, w.definePath)
+	sc.Step(`^I define process path "([^"]*)" with match prefix "([^"]*)" and required capabilities "([^"]*)" and cycle time P95 "([^"]*)" in process-path-management$`, w.definePath)
 	sc.Step(`^I get process path "([^"]*)" from process-path-management$`, w.getPath)
 	sc.Step(`^process path "([^"]*)" in process-path-management has status "([^"]*)"$`, w.pathStatusIs)
 	sc.Step(`^the process path response match prefix is "([^"]*)"$`, w.pathResponseMatchPrefixIs)
-	sc.Step(`^I revise process path "([^"]*)" to match prefix "([^"]*)" and required capabilities "([^"]*)" in process-path-management$`, w.revisePath)
+	sc.Step(`^I revise process path "([^"]*)" to match prefix "([^"]*)" and required capabilities "([^"]*)" and cycle time P95 "([^"]*)" in process-path-management$`, w.revisePath)
 	sc.Step(`^I deactivate process path "([^"]*)" in process-path-management$`, w.deactivatePath)
 	sc.Step(`^process-path-management's active process path listing includes "([^"]*)"$`, w.activeListingIncludes)
 	sc.Step(`^process-path-management's active process path listing does not include "([^"]*)"$`, w.activeListingDoesNotInclude)
@@ -1965,14 +1990,19 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the soak run summary is printed$`, w.soakSummaryIsPrinted)
 }
 
+func defaultGodogTags() string { return "~@soak && ~@blocked && ~@setup" }
+
 func TestMain(m *testing.M) {
+	if os.Getenv("E2E_UNIT_ONLY") == "1" {
+		os.Exit(m.Run())
+	}
 	// @soak (features/soak_backlog_ramp.feature) is a long, ramping
 	// load run — potentially an hour — and must never run as part of an
 	// ordinary `go test`/scripts/04-run-tests.sh invocation. Excluded by
 	// default; scripts/06-run-soak.sh sets GODOG_TAGS=@soak to run ONLY
 	// that scenario. godog's Tags expression: "~@soak" means "not
 	// tagged @soak".
-	tags := envOrDefault("GODOG_TAGS", "~@soak")
+	tags := envOrDefault("GODOG_TAGS", defaultGodogTags())
 
 	suite := godog.TestSuite{
 		Name:                "e2e",

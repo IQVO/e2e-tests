@@ -17,7 +17,7 @@ Feature: process-path-management is the fleet's declared process-path catalogue 
   @e2e @process-path-management
   Scenario: Defining, revising, and deactivating a process path is reflected in its own read model
     # --- define: a brand-new path, rejecting a duplicate id ---
-    When I define process path "<run>" with match prefix "e2e-pp" and required capabilities "pick" in process-path-management
+    When I define process path "<run>" with match prefix "e2e-pp" and required capabilities "pick" and cycle time P95 "90s" in process-path-management
     Then the response status is 201
     And process path "<run>" in process-path-management has status "ACTIVE"
 
@@ -30,7 +30,7 @@ Feature: process-path-management is the fleet's declared process-path catalogue 
     Then process-path-management's active process path listing includes "<run>"
 
     # --- revise: matchPrefix/requiredCapabilities change, pathId/direct do not ---
-    When I revise process path "<run>" to match prefix "e2e-pp-revised" and required capabilities "pick,hazmat" in process-path-management
+    When I revise process path "<run>" to match prefix "e2e-pp-revised" and required capabilities "pick,hazmat" and cycle time P95 "120s" in process-path-management
     Then the response status is 200
     And the process path response match prefix is "e2e-pp-revised"
 

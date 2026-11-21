@@ -9,6 +9,16 @@ source "${SCRIPT_DIR}/../env.sh"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}" "${RUN_DIR}/pids"
 
+# Preparation is explicit; reading env.sh never generates or rotates an identity.
+if [[ -f "${RUN_DIR}/e2e-run-id" ]]; then
+  persisted_run_id="$(cat "${RUN_DIR}/e2e-run-id")"
+  if [[ -n "${E2E_RUN_ID:-}" && "${E2E_RUN_ID}" != "${persisted_run_id}" ]]; then
+    echo "E2E_RUN_ID differs from the prepared fleet; run 00-prepare-run.sh --new after stopping services" >&2
+    exit 1
+  fi
+  export E2E_RUN_ID="${persisted_run_id}"
+fi
+
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 ok()   { printf '\033[1;32m  OK\033[0m   %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m  FAIL\033[0m %s\n' "$*" >&2; }

@@ -9,7 +9,7 @@
 #   PLAN   deterministic assortment by site role, size class and handling class; bins filled to
 #          80 % of their real volume and weight limits; hazmat in hazmat-rated zones one SKU per
 #          bin; cold chain in chilled / frozen zones. Fails below SEED_MIN_UNITS.
-#   STOCK  inventory-storage PUT /bins/{binId} + POST /stock/stow, then reads every bin back
+#   STOCK  inventory-storage PUT /bins/{binId} + POST /stowages, then reads every bin back
 #          (GET /bins/{binId}) and a sample of SKUs (GET /inventory/{sku}/usable).
 #
 # Idempotent: a bin already holding its planned units is skipped, PUT /bins converges, and every

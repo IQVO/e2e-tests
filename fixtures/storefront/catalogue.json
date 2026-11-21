@@ -1,0 +1,577 @@
+{
+  "_comment": "Storefront merchandising for the e2e provisioning (cmd/seed-storefront). Products are REAL products of fixtures/products/fulfilment-products.json (sku, dimensions, weight, handling: see that fixture's README and licence credits); the retail-network catalogue item (neutral title, dimensions) is created by warehouse-infra scripts/seed-retail-network.py from scripts/data/retail-network-seed.json, which carries the same skus. CURATED here, not sourced: department, subcategory and list price (no open dataset carries retail prices).",
+  "currency": "USD",
+  "taxBands": [
+    {
+      "postalPrefixFrom": "786",
+      "postalPrefixTo": "787",
+      "rateBasisPoints": 825,
+      "_source": "Texas state sales tax 6.25% + 2% local (Austin / Travis and Williamson counties) = 8.25%, the real combined rate of the deliverable prefixes"
+    }
+  ],
+  "deliveryCharges": [
+    {
+      "tier": "SAME_DAY",
+      "chargeMinor": 1499
+    },
+    {
+      "tier": "NEXT_DAY",
+      "chargeMinor": 1299
+    },
+    {
+      "tier": "TWO_DAY",
+      "chargeMinor": 799
+    },
+    {
+      "tier": "STANDARD",
+      "chargeMinor": 599,
+      "freeOverMinor": 3500
+    }
+  ],
+  "deliverablePostalPrefixes": [
+    "786",
+    "787"
+  ],
+  "departments": [
+    {
+      "slug": "kitchen-dining",
+      "name": "Kitchen & Dining"
+    },
+    {
+      "slug": "home-decor",
+      "name": "Home Decor"
+    },
+    {
+      "slug": "storage-organization",
+      "name": "Storage & Organization"
+    },
+    {
+      "slug": "bed-bath",
+      "name": "Bed & Bath"
+    },
+    {
+      "slug": "office-products",
+      "name": "Office Products"
+    },
+    {
+      "slug": "electronics",
+      "name": "Electronics"
+    },
+    {
+      "slug": "tools-home-improvement",
+      "name": "Tools & Home Improvement"
+    },
+    {
+      "slug": "patio-garden",
+      "name": "Patio, Lawn & Garden"
+    },
+    {
+      "slug": "sports-fitness",
+      "name": "Sports & Fitness"
+    },
+    {
+      "slug": "pet-supplies",
+      "name": "Pet Supplies"
+    },
+    {
+      "slug": "jewelry",
+      "name": "Jewelry"
+    },
+    {
+      "slug": "clothing-shoes-bags",
+      "name": "Clothing, Shoes & Bags"
+    },
+    {
+      "slug": "luggage-travel",
+      "name": "Luggage & Travel"
+    }
+  ],
+  "products": [
+    {
+      "sku": "ABO-B07GWVHX45",
+      "department": "kitchen-dining",
+      "subcategory": "Food Storage",
+      "listPriceMinor": 1499
+    },
+    {
+      "sku": "ABO-B085T18FGM",
+      "department": "kitchen-dining",
+      "subcategory": "Dinnerware",
+      "listPriceMinor": 5999
+    },
+    {
+      "sku": "ABO-B084ZGRDM5",
+      "department": "kitchen-dining",
+      "subcategory": "Coffee & Tea",
+      "listPriceMinor": 2999
+    },
+    {
+      "sku": "WANDS-3020",
+      "department": "kitchen-dining",
+      "subcategory": "Bakeware",
+      "listPriceMinor": 2499
+    },
+    {
+      "sku": "WANDS-36444",
+      "department": "kitchen-dining",
+      "subcategory": "Bakeware",
+      "listPriceMinor": 999
+    },
+    {
+      "sku": "WANDS-22323",
+      "department": "kitchen-dining",
+      "subcategory": "Kitchen Utensils & Gadgets",
+      "listPriceMinor": 1999
+    },
+    {
+      "sku": "WANDS-35821",
+      "department": "kitchen-dining",
+      "subcategory": "Kitchen Utensils & Gadgets",
+      "listPriceMinor": 3499
+    },
+    {
+      "sku": "ABO-B075HWDSV2",
+      "department": "kitchen-dining",
+      "subcategory": "Drinkware & Bar",
+      "listPriceMinor": 1699
+    },
+    {
+      "sku": "ABO-B07J596C1M",
+      "department": "kitchen-dining",
+      "subcategory": "Drinkware & Bar",
+      "listPriceMinor": 1299
+    },
+    {
+      "sku": "ABO-B0744KF1XY",
+      "department": "home-decor",
+      "subcategory": "Candles & Holders",
+      "listPriceMinor": 999
+    },
+    {
+      "sku": "WANDS-20923",
+      "department": "home-decor",
+      "subcategory": "Candles & Holders",
+      "listPriceMinor": 1499
+    },
+    {
+      "sku": "ABO-B08GKXQ7MS",
+      "department": "home-decor",
+      "subcategory": "Clocks",
+      "listPriceMinor": 2299
+    },
+    {
+      "sku": "WANDS-29166",
+      "department": "home-decor",
+      "subcategory": "Artificial Plants & Flowers",
+      "listPriceMinor": 3499
+    },
+    {
+      "sku": "ABO-B07B8VJBCL",
+      "department": "home-decor",
+      "subcategory": "Vases",
+      "listPriceMinor": 2799
+    },
+    {
+      "sku": "WANDS-18200",
+      "department": "home-decor",
+      "subcategory": "Lighting",
+      "listPriceMinor": 1999
+    },
+    {
+      "sku": "WANDS-12530",
+      "department": "storage-organization",
+      "subcategory": "Closet Storage",
+      "listPriceMinor": 1799
+    },
+    {
+      "sku": "WANDS-12528",
+      "department": "storage-organization",
+      "subcategory": "Closet Storage",
+      "listPriceMinor": 1999
+    },
+    {
+      "sku": "WANDS-19784",
+      "department": "storage-organization",
+      "subcategory": "Jewelry Organizers",
+      "listPriceMinor": 2199
+    },
+    {
+      "sku": "WANDS-21484",
+      "department": "storage-organization",
+      "subcategory": "Baskets & Bins",
+      "listPriceMinor": 3299
+    },
+    {
+      "sku": "WANDS-31810",
+      "department": "storage-organization",
+      "subcategory": "Baskets & Bins",
+      "listPriceMinor": 1299
+    },
+    {
+      "sku": "WANDS-36647",
+      "department": "storage-organization",
+      "subcategory": "Desk Organization",
+      "listPriceMinor": 1599
+    },
+    {
+      "sku": "WANDS-33343",
+      "department": "bed-bath",
+      "subcategory": "Bath Accessories",
+      "listPriceMinor": 1399
+    },
+    {
+      "sku": "WANDS-39584",
+      "department": "bed-bath",
+      "subcategory": "Bath Accessories",
+      "listPriceMinor": 1899
+    },
+    {
+      "sku": "WANDS-26728",
+      "department": "bed-bath",
+      "subcategory": "Bath Accessories",
+      "listPriceMinor": 1199
+    },
+    {
+      "sku": "WANDS-21521",
+      "department": "bed-bath",
+      "subcategory": "Bath Accessories",
+      "listPriceMinor": 1699
+    },
+    {
+      "sku": "WANDS-1050",
+      "department": "bed-bath",
+      "subcategory": "Shower Curtains & Hooks",
+      "listPriceMinor": 899
+    },
+    {
+      "sku": "WANDS-26614",
+      "department": "bed-bath",
+      "subcategory": "Towel & Robe Hooks",
+      "listPriceMinor": 1299
+    },
+    {
+      "sku": "ABO-B079X87CY1",
+      "department": "office-products",
+      "subcategory": "Paper & Notes",
+      "listPriceMinor": 799
+    },
+    {
+      "sku": "ABO-B08823VD1M",
+      "department": "office-products",
+      "subcategory": "Writing Instruments",
+      "listPriceMinor": 949
+    },
+    {
+      "sku": "ABO-B07X5CQ4GQ",
+      "department": "office-products",
+      "subcategory": "Filing",
+      "listPriceMinor": 1499
+    },
+    {
+      "sku": "ABO-B07SQYV4BT",
+      "department": "office-products",
+      "subcategory": "Filing",
+      "listPriceMinor": 1799
+    },
+    {
+      "sku": "ABO-B0739X3GPT",
+      "department": "office-products",
+      "subcategory": "Writing Instruments",
+      "listPriceMinor": 899
+    },
+    {
+      "sku": "ABO-B073P1YLMJ",
+      "department": "office-products",
+      "subcategory": "Presentation Boards",
+      "listPriceMinor": 2499
+    },
+    {
+      "sku": "ABO-B07QLKL97P",
+      "department": "office-products",
+      "subcategory": "Paper & Notes",
+      "listPriceMinor": 1299
+    },
+    {
+      "sku": "ABO-B07G28NF3L",
+      "department": "electronics",
+      "subcategory": "Computer Accessories",
+      "listPriceMinor": 2999
+    },
+    {
+      "sku": "ABO-B08D6ZBZTB",
+      "department": "electronics",
+      "subcategory": "Computer Accessories",
+      "listPriceMinor": 1999
+    },
+    {
+      "sku": "ABO-B004HYFOZQ",
+      "department": "electronics",
+      "subcategory": "Computer Accessories",
+      "listPriceMinor": 2199
+    },
+    {
+      "sku": "ABO-B003M0NT1M",
+      "department": "electronics",
+      "subcategory": "Computer Accessories",
+      "listPriceMinor": 2499
+    },
+    {
+      "sku": "ABO-B00NH13UFQ",
+      "department": "electronics",
+      "subcategory": "Cables & Adapters",
+      "listPriceMinor": 699
+    },
+    {
+      "sku": "ABO-B07WMJ276V",
+      "department": "electronics",
+      "subcategory": "Cables & Adapters",
+      "listPriceMinor": 1099
+    },
+    {
+      "sku": "ABO-B07KSB1MLX",
+      "department": "electronics",
+      "subcategory": "Home Audio",
+      "listPriceMinor": 1599
+    },
+    {
+      "sku": "ABO-B00DUGZFA6",
+      "department": "electronics",
+      "subcategory": "Laptop Bags & Sleeves",
+      "listPriceMinor": 1799
+    },
+    {
+      "sku": "ABO-B081DDZ21V",
+      "department": "tools-home-improvement",
+      "subcategory": "Hand Tools",
+      "listPriceMinor": 899
+    },
+    {
+      "sku": "ABO-B07TWFDN96",
+      "department": "tools-home-improvement",
+      "subcategory": "Hand Tools",
+      "listPriceMinor": 1499
+    },
+    {
+      "sku": "ABO-B07GDQLQQZ",
+      "department": "tools-home-improvement",
+      "subcategory": "Door Hardware",
+      "listPriceMinor": 1899
+    },
+    {
+      "sku": "WANDS-6775",
+      "department": "tools-home-improvement",
+      "subcategory": "Door Hardware",
+      "listPriceMinor": 2999
+    },
+    {
+      "sku": "ABO-B07T2C3QNZ",
+      "department": "tools-home-improvement",
+      "subcategory": "Locks & Security",
+      "listPriceMinor": 1299
+    },
+    {
+      "sku": "WANDS-18537",
+      "department": "tools-home-improvement",
+      "subcategory": "Locks & Security",
+      "listPriceMinor": 2499
+    },
+    {
+      "sku": "ABO-B07ZL1TDV2",
+      "department": "tools-home-improvement",
+      "subcategory": "Tie-Downs",
+      "listPriceMinor": 1199
+    },
+    {
+      "sku": "WANDS-36733",
+      "department": "patio-garden",
+      "subcategory": "Weather Instruments",
+      "listPriceMinor": 1999
+    },
+    {
+      "sku": "WANDS-36755",
+      "department": "patio-garden",
+      "subcategory": "Weather Instruments",
+      "listPriceMinor": 3999
+    },
+    {
+      "sku": "WANDS-26783",
+      "department": "patio-garden",
+      "subcategory": "Garden Decor",
+      "listPriceMinor": 2999
+    },
+    {
+      "sku": "WANDS-17961",
+      "department": "patio-garden",
+      "subcategory": "Garden Decor",
+      "listPriceMinor": 3499
+    },
+    {
+      "sku": "WANDS-28748",
+      "department": "patio-garden",
+      "subcategory": "Greenhouse & Planting",
+      "listPriceMinor": 5999
+    },
+    {
+      "sku": "WANDS-15779",
+      "department": "patio-garden",
+      "subcategory": "Mailboxes",
+      "listPriceMinor": 2499
+    },
+    {
+      "sku": "ABO-B017C8O684",
+      "department": "sports-fitness",
+      "subcategory": "Yoga",
+      "listPriceMinor": 2199
+    },
+    {
+      "sku": "ABO-B01FN7XAYW",
+      "department": "sports-fitness",
+      "subcategory": "Exercise Bands",
+      "listPriceMinor": 1499
+    },
+    {
+      "sku": "ABO-B07PBX6XV3",
+      "department": "sports-fitness",
+      "subcategory": "Exercise Bands",
+      "listPriceMinor": 999
+    },
+    {
+      "sku": "ABO-B07BH1J713",
+      "department": "sports-fitness",
+      "subcategory": "Recovery",
+      "listPriceMinor": 1399
+    },
+    {
+      "sku": "ABO-B07L3X92BS",
+      "department": "sports-fitness",
+      "subcategory": "Strength Training",
+      "listPriceMinor": 1299
+    },
+    {
+      "sku": "ABO-B0747KN9FQ",
+      "department": "sports-fitness",
+      "subcategory": "Strength Training",
+      "listPriceMinor": 6499
+    },
+    {
+      "sku": "WANDS-27454",
+      "department": "pet-supplies",
+      "subcategory": "Bowls & Feeders",
+      "listPriceMinor": 2299
+    },
+    {
+      "sku": "WANDS-27448",
+      "department": "pet-supplies",
+      "subcategory": "Bowls & Feeders",
+      "listPriceMinor": 1199
+    },
+    {
+      "sku": "WANDS-6025",
+      "department": "pet-supplies",
+      "subcategory": "Bowls & Feeders",
+      "listPriceMinor": 1799
+    },
+    {
+      "sku": "WANDS-30693",
+      "department": "pet-supplies",
+      "subcategory": "Birds",
+      "listPriceMinor": 5499
+    },
+    {
+      "sku": "WANDS-30322",
+      "department": "pet-supplies",
+      "subcategory": "Birds",
+      "listPriceMinor": 2699
+    },
+    {
+      "sku": "ABO-B00UL18HT4",
+      "department": "jewelry",
+      "subcategory": "Necklaces",
+      "listPriceMinor": 3999
+    },
+    {
+      "sku": "ABO-B003YDYYFM",
+      "department": "jewelry",
+      "subcategory": "Necklaces",
+      "listPriceMinor": 8999
+    },
+    {
+      "sku": "ABO-B00E1GYAOQ",
+      "department": "jewelry",
+      "subcategory": "Earrings",
+      "listPriceMinor": 1999
+    },
+    {
+      "sku": "ABO-B00D87M8YS",
+      "department": "jewelry",
+      "subcategory": "Bracelets",
+      "listPriceMinor": 2499
+    },
+    {
+      "sku": "ABO-B0753LWVWH",
+      "department": "jewelry",
+      "subcategory": "Rings",
+      "listPriceMinor": 4999
+    },
+    {
+      "sku": "ABO-B081HN2KC9",
+      "department": "clothing-shoes-bags",
+      "subcategory": "Handbags",
+      "listPriceMinor": 3499
+    },
+    {
+      "sku": "ABO-B07X9SSSGJ",
+      "department": "clothing-shoes-bags",
+      "subcategory": "Handbags",
+      "listPriceMinor": 3699
+    },
+    {
+      "sku": "ABO-B07XDZ8XBD",
+      "department": "clothing-shoes-bags",
+      "subcategory": "Handbags",
+      "listPriceMinor": 2799
+    },
+    {
+      "sku": "ABO-B08CKRTTZ8",
+      "department": "clothing-shoes-bags",
+      "subcategory": "Shoes",
+      "listPriceMinor": 1499
+    },
+    {
+      "sku": "ABO-B014VBGKFW",
+      "department": "luggage-travel",
+      "subcategory": "Travel Accessories",
+      "listPriceMinor": 2499
+    },
+    {
+      "sku": "ABO-B014VBINRA",
+      "department": "luggage-travel",
+      "subcategory": "Travel Accessories",
+      "listPriceMinor": 2299
+    },
+    {
+      "sku": "ABO-B07FNJXDKT",
+      "department": "luggage-travel",
+      "subcategory": "Suitcases",
+      "listPriceMinor": 8999
+    },
+    {
+      "sku": "ABO-B07RVY85TV",
+      "department": "luggage-travel",
+      "subcategory": "Garment Bags",
+      "listPriceMinor": 3999
+    },
+    {
+      "sku": "ABO-B07FF2PS43",
+      "department": "luggage-travel",
+      "subcategory": "Backpacks",
+      "listPriceMinor": 4499
+    },
+    {
+      "sku": "ABO-B07BHFTJGM",
+      "department": "luggage-travel",
+      "subcategory": "Umbrellas",
+      "listPriceMinor": 1999
+    }
+  ]
+}

@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,33 +13,11 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	kafkago "github.com/segmentio/kafka-go"
 )
 
 // ---------------------------------------------------------------------
 // Kafka event tap
 // ---------------------------------------------------------------------
-
-// eventTap reads every warehouse integration topic from the offsets they
-// were at when the day started (no consumer group — it never moves a
-// service's offsets) and indexes what the day produced. Accepts the
-// CloudEvents 1.0 structured envelope ("type"), CloudEvents binary mode
-// ("ce_type" header) and the legacy flat envelope ("event_type"), so it
-// audits whichever envelope the deployed images speak.
-type eventTap struct {
-	mu     sync.Mutex
-	counts map[string]map[string]int // topic -> short type -> n
-	byRef  map[string]map[string]int // correlation id -> short type -> n
-	refs   []string
-	dlq    map[string]int // dead-lettered messages that belong to this run
-	// dlqLegacy counts dead-lettered messages unrelated to this run (legacy
-	// history replayed by a new consumer group on a shared broker).
-	dlqLegacy map[string]int
-	runID     string
-	readers   []*kafkago.Reader
-	errs      []string
-}
 
 var tappedTopics = []string{
 	"warehouse.facility.events",
@@ -53,6 +29,9 @@ var tappedTopics = []string{
 	"warehouse.order-management.events",
 	"warehouse.workforce.events",
 	"warehouse.labor-performance.events",
+	// The planner's morning (warehouse-planning ADR 0023):
+	// WorkloadForecastReceived and LabourPlanCommitted.
+	planningEventsTopic,
 	// Analytics topics: most domain facts (StockReceived, TaskClaimed,
 	// PackageSealed, AssociateShiftStarted, ...) are published ONLY on a
 	// context's analytics stream, never on its integration topic (see each
@@ -65,135 +44,6 @@ var tappedTopics = []string{
 	"warehouse.wes.analytics",
 	"warehouse.order-management.analytics",
 	"warehouse.process-path-management.analytics",
-}
-
-func startTap(ctx context.Context, brokers []string, runID string) (*eventTap, error) {
-	t := &eventTap{counts: map[string]map[string]int{}, byRef: map[string]map[string]int{}, dlq: map[string]int{}, dlqLegacy: map[string]int{}, runID: runID}
-	conn, err := ipv4Dialer().DialContext(ctx, "tcp", brokers[0])
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	all, err := conn.ReadPartitions()
-	if err != nil {
-		return nil, err
-	}
-	want := map[string]bool{}
-	for _, tp := range tappedTopics {
-		want[tp] = true
-	}
-	n := 0
-	for _, p := range all {
-		if !want[p.Topic] && !strings.HasSuffix(p.Topic, ".dlq") {
-			continue
-		}
-		r := kafkago.NewReader(kafkago.ReaderConfig{
-			Brokers: brokers, Topic: p.Topic, Partition: p.ID, MinBytes: 1, MaxBytes: 10 << 20, MaxWait: 500 * time.Millisecond,
-			Dialer: ipv4Dialer(),
-		})
-		if err := r.SetOffset(kafkago.LastOffset); err != nil {
-			return nil, err
-		}
-		t.readers = append(t.readers, r)
-		n++
-		go t.consume(ctx, r, p.Topic)
-	}
-	logf("event-tap", "tapping %d partitions across %d integration + analytics topics and their DLQs", n, len(tappedTopics))
-	return t, nil
-}
-
-func (t *eventTap) track(ref string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.refs = append(t.refs, ref)
-}
-
-func shortType(s string) string {
-	if i := strings.LastIndex(s, "."); i >= 0 {
-		return s[i+1:]
-	}
-	return s
-}
-
-func (t *eventTap) consume(ctx context.Context, r *kafkago.Reader, topic string) {
-	for {
-		m, err := r.ReadMessage(ctx)
-		if err != nil {
-			if ctx.Err() == nil && !errors.Is(err, context.Canceled) {
-				t.mu.Lock()
-				t.errs = append(t.errs, fmt.Sprintf("%s: %v", topic, err))
-				t.mu.Unlock()
-			}
-			return
-		}
-		var env struct {
-			Type      string `json:"type"`
-			EventType string `json:"event_type"`
-		}
-		_ = json.Unmarshal(m.Value, &env)
-		typ := env.Type
-		if typ == "" {
-			typ = env.EventType
-		}
-		for _, h := range m.Headers {
-			if typ == "" && (h.Key == "ce_type" || h.Key == "ce-type") {
-				typ = string(h.Value)
-			}
-		}
-		typ = shortType(typ)
-		if typ == "" {
-			typ = "?"
-		}
-		raw := string(m.Value)
-		t.mu.Lock()
-		if strings.HasSuffix(topic, ".dlq") {
-			// A shared, long-lived broker dead-letters legacy (pre-CloudEvents)
-			// messages whenever a consumer group replays history. Those are
-			// not today's failures; count them separately and fail the day
-			// only on dead-lettered messages that mention this run.
-			if t.runID != "" && strings.Contains(raw, t.runID) {
-				t.dlq[topic]++
-			} else {
-				t.dlqLegacy[topic]++
-			}
-		} else {
-			if t.counts[topic] == nil {
-				t.counts[topic] = map[string]int{}
-			}
-			t.counts[topic][typ]++
-			for _, ref := range t.refs {
-				if strings.Contains(raw, ref) {
-					if t.byRef[ref] == nil {
-						t.byRef[ref] = map[string]int{}
-					}
-					t.byRef[ref][typ]++
-				}
-			}
-		}
-		t.mu.Unlock()
-	}
-}
-
-func (t *eventTap) seen(ref, typ string) int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.byRef[ref][typ]
-}
-
-func (t *eventTap) total(typ string) int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	n := 0
-	for _, byType := range t.counts {
-		n += byType[typ]
-	}
-	return n
-}
-
-func (t *eventTap) close() {
-	for _, r := range t.readers {
-		_ = r.Close()
-	}
 }
 
 // ---------------------------------------------------------------------
@@ -217,7 +67,7 @@ func (s *sim) run(ctx context.Context) bool {
 			s.finding("Kafka event tap unavailable (%v) — event audit skipped", err)
 		} else {
 			s.tap = tap
-			defer tap.close()
+			defer tap.Close()
 		}
 	}
 
@@ -242,7 +92,7 @@ func (s *sim) run(ctx context.Context) bool {
 	theClock.Store(s.clock)
 	s.planOrders()
 	if s.tap != nil {
-		s.tap.track(cfg.runID)
+		s.tap.Track(cfg.runID)
 	}
 	for _, step := range []func(context.Context) error{s.publishCPTSchedule, s.planTheDay} {
 		if err := step(ctx); err != nil {
@@ -264,7 +114,7 @@ func (s *sim) run(ctx context.Context) bool {
 
 	floorCtx, stopFloor := context.WithCancel(ctx)
 	defer stopFloor()
-	go s.suspend.run(floorCtx)
+	go s.suspend.Run(floorCtx)
 	var floor, office sync.WaitGroup
 	for _, a := range s.associates {
 		floor.Add(1)
@@ -288,7 +138,7 @@ func (s *sim) run(ctx context.Context) bool {
 				for id := range s.byID {
 					if !seen[id] {
 						seen[id] = true
-						s.tap.track(id)
+						s.tap.Track(id)
 					}
 				}
 				s.mu.Unlock()
@@ -416,7 +266,7 @@ func (s *sim) audit(ctx context.Context) bool {
 	}
 	add("SLAM caught every mispick", diverted == mispicks, "%d diverted, %d mispicks injected", diverted, mispicks)
 	add("per-order cross-context consistency", broken == 0, "%d of %d orders have at least one inconsistency (see orders[].problems)", broken, placed)
-	add("no server errors", s.stats.count5xx() == 0, "%d transport errors / 5xx responses over %d routes", s.stats.count5xx(), len(s.stats.lines()))
+	add("no server errors", s.stats.Count5xx() == 0, "%d transport errors / 5xx responses over %d routes", s.stats.Count5xx(), len(s.stats.Lines()))
 
 	// inventory conservation: usable == received - picked (- unlocated)
 	var invDetail []string
@@ -438,8 +288,8 @@ func (s *sim) audit(ctx context.Context) bool {
 		var u struct {
 			Usable int `json:"usable"`
 		}
-		r := s.api.call(ctx, svcInventory, http.MethodGet, "/inventory/{sku}/usable", "/inventory/"+url.PathEscape(s.sku(sd.key))+"/usable", nil)
-		_ = r.decode(&u)
+		r := s.api.Call(ctx, svcInventory, http.MethodGet, "/inventory/{sku}/usable", "/inventory/"+url.PathEscape(s.sku(sd.key))+"/usable", nil)
+		_ = r.Decode(&u)
 		if u.Usable != want {
 			invOK = false
 			invDetail = append(invDetail, fmt.Sprintf("%s usable %d want %d", sd.key, u.Usable, want))
@@ -456,37 +306,20 @@ func (s *sim) audit(ctx context.Context) bool {
 
 	// events
 	if s.tap != nil {
-		required := []string{
-			"StockReceived", "ItemStowed", "StockReserved", "StockPicked", "CycleCountCompleted", "DiscrepancyDetected",
-			"OrderAllocated", "WorkUnitCreated", "WorkReleased", "TaskCreated", "TaskClaimed", "TaskCompleted",
-			"PackageSealed", "LabelApplied", "PackageManifested", "PackageDiverted", "WeightDiscrepancyDetected",
-			"AssociateShiftStarted", "LaborAssigned", "AssociateBreakStarted", "AssociateBreakEnded", "AssociateShiftEnded",
-			"ShiftPlanCommitted", "TaskPerformanceRecorded", "CPTScheduleChanged", "LocationSlotRegistered",
-		}
-		if s.slotsImported == 0 {
-			// The site was already mapped on an earlier day: no slot is new,
-			// so facility-layout correctly registers (and publishes) nothing.
-			required = removeString(required, "LocationSlotRegistered")
-		}
-		var missing []string
-		for _, ty := range required {
-			if s.tap.total(ty) == 0 {
-				missing = append(missing, ty)
-			}
-		}
-		add("integration events published", len(missing) == 0, "%d/%d required event types observed on Kafka; missing: %v", len(required)-len(missing), len(required), missing)
-		s.tap.mu.Lock()
+		missing, required := s.missingEvents()
+		add("integration events published", len(missing) == 0, "%d/%d required event types observed on Kafka; missing: %v", required-len(missing), required, missing)
+		s.tap.Mu.Lock()
 		dlq := 0
-		for _, n := range s.tap.dlq {
+		for _, n := range s.tap.Dlq {
 			dlq += n
 		}
 		legacy := 0
-		for _, n := range s.tap.dlqLegacy {
+		for _, n := range s.tap.DlqLegacy {
 			legacy += n
 		}
-		dlqDetail := fmt.Sprintf("%v (plus %d legacy/unrelated messages dead-lettered by consumer replay)", s.tap.dlq, legacy)
-		tapErrs := append([]string(nil), s.tap.errs...)
-		s.tap.mu.Unlock()
+		dlqDetail := fmt.Sprintf("%v (plus %d legacy/unrelated messages dead-lettered by consumer replay)", s.tap.Dlq, legacy)
+		tapErrs := append([]string(nil), s.tap.Errs...)
+		s.tap.Mu.Unlock()
 		add("no dead-lettered events", dlq == 0, "%d messages dead-lettered during the day %s", dlq, dlqDetail)
 		if len(tapErrs) > 0 {
 			add("event tap healthy", false, "%v", tapErrs)
@@ -498,7 +331,7 @@ func (s *sim) audit(ctx context.Context) bool {
 	suspended := len(s.findingsDuringSuspend)
 	s.mu.Unlock()
 	detail := fmt.Sprintf("%d findings (see findings[])", len(findings))
-	if w := s.suspend.snapshot(); len(w) > 0 {
+	if w := s.suspend.Snapshot(); len(w) > 0 {
 		detail += fmt.Sprintf("; %d more raised during %d host suspension(s), not counted (see findingsDuringSuspend[])", suspended, len(w))
 	}
 	add("no operational findings", len(findings) == 0, "%s", detail)
@@ -547,13 +380,11 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	}
 
 	// wes-work-planning: one work unit per line, all Completed
-	var wus []struct {
+	type workUnit struct {
 		ID    string `json:"id"`
 		State string `json:"state"`
 	}
-	if r := s.api.call(ctx, svcWES, http.MethodGet, "/work-units?reference", "/work-units?reference="+url.QueryEscape(o.id), nil); r.ok() {
-		_ = r.decode(&wus)
-	}
+	wus, _ := listAll[workUnit](ctx, s.api, svcWES, "/work-units?reference", "/work-units?reference="+url.QueryEscape(o.id))
 	states := map[string]int{}
 	for _, w := range wus {
 		states[w.State]++
@@ -580,11 +411,8 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	// fulfillment-execution: PICK task per line COMPLETED, one PACK task
 	pickDone := 0
 	for i := range o.lines {
-		var ts []task
 		ref := fmt.Sprintf("%s-line-%d", o.id, i+1)
-		if r := s.api.call(ctx, svcFulfillment, http.MethodGet, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(ref), nil); r.ok() {
-			_ = r.decode(&ts)
-		}
+		ts, _ := listAll[task](ctx, s.api, svcFulfillment, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(ref))
 		for _, t := range ts {
 			if t.Type == "PICK" && t.Status == "COMPLETED" {
 				pickDone++
@@ -596,10 +424,7 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	if pickDone != len(o.lines) {
 		prob("PICK tasks completed %d/%d", pickDone, len(o.lines))
 	}
-	var packs []task
-	if r := s.api.call(ctx, svcFulfillment, http.MethodGet, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(o.id), nil); r.ok() {
-		_ = r.decode(&packs)
-	}
+	packs, _ := listAll[task](ctx, s.api, svcFulfillment, "/tasks?orderRef", "/tasks?orderRef="+url.QueryEscape(o.id))
 	packStates := []string{}
 	for _, t := range packs {
 		if t.Type == "PACK" {
@@ -611,10 +436,8 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 		prob("PACK tasks for order: %v, want exactly one COMPLETED", packStates)
 	}
 
-	var pk []pkg
-	r := s.api.call(ctx, svcFulfillment, http.MethodGet, "/packages?orderRef", "/packages?orderRef="+url.QueryEscape(o.id), nil)
-	if r.ok() {
-		_ = r.decode(&pk)
+	pk, r := listAll[pkg](ctx, s.api, svcFulfillment, "/packages?orderRef", "/packages?orderRef="+url.QueryEscape(o.id))
+	if r.OK() {
 		wantPkg := "LABELED"
 		if o.kind == kindMispickInjct {
 			wantPkg = "DIVERTED"
@@ -636,23 +459,72 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	if s.tap != nil {
 		ev := []string{}
 		for _, ty := range []string{"OrderAllocated", "WorkUnitCreated", "WorkReleased", "PackageManifested", "PackageDiverted", "OrderRepromised", "TaskCPTMissed"} {
-			if n := s.tap.seen(o.id, ty); n > 0 {
+			if n := s.tap.Seen(o.id, ty); n > 0 {
 				ev = append(ev, fmt.Sprintf("%s×%d", ty, n))
 			}
 		}
 		a.Events = strings.Join(ev, " ")
-		if s.tap.seen(o.id, "WorkReleased") < len(o.lines) {
-			prob("WorkReleased seen %d times for %d lines", s.tap.seen(o.id, "WorkReleased"), len(o.lines))
+		if s.tap.Seen(o.id, "WorkReleased") < len(o.lines) {
+			prob("WorkReleased seen %d times for %d lines", s.tap.Seen(o.id, "WorkReleased"), len(o.lines))
 		}
 		final := "PackageManifested"
 		if o.kind == kindMispickInjct {
 			final = "PackageDiverted"
 		}
-		if final == "PackageManifested" && s.tap.seen(o.id, final) == 0 {
+		if final == "PackageManifested" && s.tap.Seen(o.id, final) == 0 {
 			prob("no PackageManifested event for the order")
 		}
 	}
 	return a
+}
+
+// planningEventsTopic is warehouse-planning's integration topic: the
+// planner's WorkloadForecastReceived and LabourPlanCommitted.
+const planningEventsTopic = "warehouse.warehouse-planning.events"
+
+// plannerEvents are the planner's required event types, each counted on its
+// producer's topics only. The tap keys on the SHORT type (the last dotted
+// segment of the CloudEvents type), summed over every tapped topic, and
+// wes-work-planning publishes its own
+// com.warehouse.wes.work-planning.plan.ShiftPlanCommitted (retiring with
+// POST /paths/{pathId}/plan, its ADR 0049) on warehouse.work-planning.events
+// and warehouse.wes.analytics: counted fleet-wide it would stand in for
+// workforce-management's ShiftPlanCommitted.
+var plannerEvents = []struct {
+	typ    string
+	topics []string
+}{
+	{"WorkloadForecastReceived", []string{planningEventsTopic}},
+	{"LabourPlanCommitted", []string{planningEventsTopic}},
+	{"ShiftPlanCommitted", []string{"warehouse.workforce.events", "warehouse.workforce.analytics"}},
+}
+
+// missingEvents lists the required event types the tap did not observe and
+// says how many types are required.
+func (s *sim) missingEvents() (missing []string, required int) {
+	types := []string{
+		"StockReceived", "ItemStowed", "StockReserved", "StockPicked", "CycleCountCompleted", "DiscrepancyDetected",
+		"OrderAllocated", "WorkUnitCreated", "WorkReleased", "TaskCreated", "TaskClaimed", "TaskCompleted",
+		"PackageSealed", "LabelApplied", "PackageManifested", "PackageDiverted", "WeightDiscrepancyDetected",
+		"AssociateShiftStarted", "LaborAssigned", "AssociateBreakStarted", "AssociateBreakEnded", "AssociateShiftEnded",
+		"TaskPerformanceRecorded", "CPTScheduleChanged", "LocationSlotRegistered",
+	}
+	if s.slotsImported == 0 {
+		// The site was already mapped on an earlier day: no slot is new,
+		// so facility-layout correctly registers (and publishes) nothing.
+		types = removeString(types, "LocationSlotRegistered")
+	}
+	for _, ty := range types {
+		if s.tap.Total(ty) == 0 {
+			missing = append(missing, ty)
+		}
+	}
+	for _, e := range plannerEvents {
+		if s.tap.TotalOn(e.typ, e.topics...) == 0 {
+			missing = append(missing, e.typ+" on "+strings.Join(e.topics, "|"))
+		}
+	}
+	return missing, len(types) + len(plannerEvents)
 }
 
 func (s *sim) auditLabor(ctx context.Context) (bool, string) {
@@ -667,9 +539,9 @@ func (s *sim) auditLabor(ctx context.Context) (bool, string) {
 			var sc struct {
 				TaskCount int `json:"taskCount"`
 			}
-			r := s.api.call(ctx, svcLabor, http.MethodGet, "/associates/{id}/scorecard", "/associates/"+url.PathEscape(a.id)+"/scorecard", nil)
-			if !r.ok() || r.decode(&sc) != nil || sc.TaskCount == 0 {
-				missing = append(missing, fmt.Sprintf("%s(%d)", a.id, r.status))
+			r := s.api.Call(ctx, svcLabor, http.MethodGet, "/associates/{id}/scorecard", "/associates/"+url.PathEscape(a.id)+"/scorecard", nil)
+			if !r.OK() || r.Decode(&sc) != nil || sc.TaskCount == 0 {
+				missing = append(missing, fmt.Sprintf("%s(%d)", a.id, r.Status))
 			}
 		}
 		if len(missing) == 0 || time.Now().After(deadline) {
@@ -720,21 +592,21 @@ func (s *sim) printSummary(checks []check, audits []orderAudit, cycle []float64,
 	}
 	if s.tap != nil {
 		fmt.Println("\nKafka events produced today (topic: type×n):")
-		s.tap.mu.Lock()
-		topics := make([]string, 0, len(s.tap.counts))
-		for t := range s.tap.counts {
+		s.tap.Mu.Lock()
+		topics := make([]string, 0, len(s.tap.Counts))
+		for t := range s.tap.Counts {
 			topics = append(topics, t)
 		}
 		sort.Strings(topics)
 		for _, t := range topics {
 			var parts []string
-			for ty, n := range s.tap.counts[t] {
+			for ty, n := range s.tap.Counts[t] {
 				parts = append(parts, ty+"×"+strconv.Itoa(n))
 			}
 			sort.Strings(parts)
 			fmt.Printf("  %-42s %s\n", t, strings.Join(parts, " "))
 		}
-		s.tap.mu.Unlock()
+		s.tap.Mu.Unlock()
 	}
 	broken := 0
 	for _, a := range audits {
@@ -778,13 +650,13 @@ func (s *sim) writeReportFull(pass bool, checks []check, audits []orderAudit, fi
 			"day": s.cfg.day.String(), "orders": s.cfg.orders, "pickers": s.cfg.pickers, "packers": s.cfg.packers,
 			"rebin": s.cfg.rebinners, "slam": s.cfg.slammers, "flex": s.cfg.flex, "seed": s.cfg.seed,
 		},
-		"checks": checks, "orders": audits, "findings": findings, "findingsDuringSuspend": s.findingsDuringSuspend, "suspensions": s.suspend.snapshot(), "snapshots": s.snapshots, "routes": s.stats.lines(),
+		"checks": checks, "orders": audits, "findings": findings, "findingsDuringSuspend": s.findingsDuringSuspend, "suspensions": s.suspend.Snapshot(), "snapshots": s.snapshots, "routes": s.stats.Lines(),
 	}
 	if s.tap != nil {
-		s.tap.mu.Lock()
-		rep["events"], rep["dlq"], rep["dlqLegacy"] = s.tap.counts, s.tap.dlq, s.tap.dlqLegacy
+		s.tap.Mu.Lock()
+		rep["events"], rep["dlq"], rep["dlqLegacy"] = s.tap.Counts, s.tap.Dlq, s.tap.DlqLegacy
 		b, _ := json.MarshalIndent(rep, "", "  ")
-		s.tap.mu.Unlock()
+		s.tap.Mu.Unlock()
 		s.saveReport(b)
 		return
 	}
@@ -800,19 +672,6 @@ func (s *sim) saveReport(b []byte) {
 	if err := os.WriteFile(p, b, 0o644); err == nil {
 		abs, _ := filepath.Abs(p)
 		fmt.Printf("report: %s\n", abs)
-	}
-}
-
-// ipv4Dialer forces tcp4. The kind broker's EXTERNAL listener is published
-// on 127.0.0.1 only, and advertises "localhost:9092"; Go resolves that to
-// [::1] first, so every partition reader failed with "connection refused".
-func ipv4Dialer() *kafkago.Dialer {
-	nd := &net.Dialer{Timeout: 10 * time.Second}
-	return &kafkago.Dialer{
-		Timeout: 10 * time.Second,
-		DialFunc: func(ctx context.Context, _ string, addr string) (net.Conn, error) {
-			return nd.DialContext(ctx, "tcp4", addr)
-		},
 	}
 }
 

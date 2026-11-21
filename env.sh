@@ -82,6 +82,21 @@ INBOUND_REPO="${REPOS_ROOT}/inbound-receiving"
 # product and layout copies. Its demand copy is fed by SiteSkuDemandChanged
 # facts the scenarios publish themselves (see features/slotting_optimization.feature).
 SLOTTING_REPO="${REPOS_ROOT}/slotting-optimization"
+# returns-processing (WMS-tier returns context: RMA authorization, receipt,
+# inspection, disposition; its ADR 0001-0004). Consumes product-master's
+# ProductClassified, order-management's OrderAllocated and
+# fulfillment-execution's PackageManifested into local copies; publishes
+# warehouse.returns-processing.events, whose ReturnLineStaged
+# inventory-storage books as staged stock (its ADR 0044). Started before
+# inventory-storage so the topic exists when its RETURN_LINE consumer
+# subscribes.
+RETURNS_REPO="${REPOS_ROOT}/returns-processing"
+# exception-management (WES-tier exception context: one case per consumed
+# exception fact, operator lifecycle, declarative auto-resolve; its ADR
+# 0001/0002). Consumes the six pinned source topics; publishes
+# warehouse.exception-management.events. Started LAST: it watches facts from
+# nearly every other context.
+EXCEPTIONS_REPO="${REPOS_ROOT}/exception-management"
 # network-inventory-planning (NIP): plans and drives the inter-warehouse
 # transfer saga (approve -> allocate at origin -> pick -> dispatch ->
 # destination receipt). Started AFTER every service it exchanges events
@@ -94,10 +109,25 @@ NIP_REPO="${REPOS_ROOT}/network-inventory-planning"
 # features/inter_warehouse_transfer.feature's header for which of the three
 # this harness can produce from a real service and which it must inject).
 WAREHOUSE_PLANNING_REPO="${REPOS_ROOT}/warehouse-planning"
+# dock-scheduling (WMS-tier door calendar: every booked window on every dock
+# door, inbound and outbound; its ADR 0001/0002). Door and ASN knowledge are
+# event-fed copies (facility-layout, inbound-receiving, process-path-management);
+# it learns arrivals and door release ONLY from yard-management's events.
+# cmd/api relays its outbox inline, so it needs no separate relay process.
+DOCK_SCHEDULING_REPO="${REPOS_ROOT}/dock-scheduling"
+# yard-management (WMS-tier yard: gate, trailers, moves, door work; its ADR
+# 0001/0002). Locations, appointments, ASNs and receipts are event-fed copies of
+# facility-layout, dock-scheduling and inbound-receiving. cmd/api serves REST and
+# the three consumers; the outbox is relayed by the SEPARATE cmd/relay binary,
+# which must run too or nothing reaches Kafka.
+YARD_REPO="${REPOS_ROOT}/yard-management"
+# outbound-shipping (WMS-tier outbound loads, ship-confirm follows the physical
+# departure; its ADR 0001/0002). cmd/api relays its outbox in-process.
+OUTBOUND_SHIPPING_REPO="${REPOS_ROOT}/outbound-shipping"
 
 BIN_DIR="${WORKSPACE_ROOT}/bin"
 LOG_DIR="${WORKSPACE_ROOT}/logs"
-RUN_DIR="${WORKSPACE_ROOT}/run"
+RUN_DIR="${RUN_DIR:-${WORKSPACE_ROOT}/run}"
 
 # ---- HTTP ports (offset from each repo's own default :8080 so all
 #      five can run side by side on one machine) -------------------
@@ -132,6 +162,18 @@ WAREHOUSE_PLANNING_HTTP_PORT=8100
 INBOUND_HTTP_PORT=8108
 # slotting-optimization -- the next free slot after inbound-receiving's :8108.
 SLOTTING_HTTP_PORT=8109
+# returns-processing / exception-management -- the next free slots after
+# slotting-optimization's :8109.
+RETURNS_HTTP_PORT=8110
+EXCEPTIONS_HTTP_PORT=8111
+# dock-scheduling / yard-management / outbound-shipping -- the next free slots
+# after exception-management's :8111. yard-management's separate outbox relay
+# serves its /healthz on YARD_RELAY_HEALTH_PORT (its own default :8081 would
+# collide with facility-layout).
+DOCK_SCHEDULING_HTTP_PORT=8112
+YARD_HTTP_PORT=8113
+YARD_RELAY_HEALTH_PORT=8114
+OUTBOUND_SHIPPING_HTTP_PORT=8115
 
 FACILITY_BASE_URL="http://localhost:${FACILITY_HTTP_PORT}"
 INVENTORY_BASE_URL="http://localhost:${INVENTORY_HTTP_PORT}"
@@ -147,6 +189,12 @@ NIP_BASE_URL="http://localhost:${NIP_HTTP_PORT}"
 WAREHOUSE_PLANNING_BASE_URL="http://localhost:${WAREHOUSE_PLANNING_HTTP_PORT}"
 INBOUND_BASE_URL="http://localhost:${INBOUND_HTTP_PORT}"
 SLOTTING_BASE_URL="http://localhost:${SLOTTING_HTTP_PORT}"
+RETURNS_BASE_URL="http://localhost:${RETURNS_HTTP_PORT}"
+EXCEPTIONS_BASE_URL="http://localhost:${EXCEPTIONS_HTTP_PORT}"
+DOCK_SCHEDULING_BASE_URL="http://localhost:${DOCK_SCHEDULING_HTTP_PORT}"
+YARD_BASE_URL="http://localhost:${YARD_HTTP_PORT}"
+YARD_RELAY_BASE_URL="http://localhost:${YARD_RELAY_HEALTH_PORT}"
+OUTBOUND_SHIPPING_BASE_URL="http://localhost:${OUTBOUND_SHIPPING_HTTP_PORT}"
 
 # ---- MCP ports (each context's Streamable-HTTP MCP server, cmd/mcp,
 #      alongside its HTTP service above) ----------------------------
@@ -175,21 +223,11 @@ WORKFORCE_MCP_URL="http://localhost:${WORKFORCE_MCP_PORT}/mcp"
 LABOR_MCP_URL="http://localhost:${LABOR_MCP_PORT}/mcp"
 ORDER_MCP_URL="http://localhost:${ORDER_MCP_PORT}/mcp"
 
-# Fixed test-only bearer read keys, one per context's own MCP server —
-# same static-bearer-key scheme every context uses in prod (ADR-0008),
-# just a throwaway value for this local harness.
-FACILITY_MCP_READ_KEY="e2e-facility-mcp-read-key"
-INVENTORY_MCP_READ_KEY="e2e-inventory-mcp-read-key"
-WES_MCP_READ_KEY="e2e-wes-mcp-read-key"
-FULFILLMENT_MCP_READ_KEY="e2e-fulfillment-mcp-read-key"
-WORKFORCE_MCP_READ_KEY="e2e-workforce-mcp-read-key"
-LABOR_MCP_READ_KEY="e2e-labor-mcp-read-key"
-ORDER_MCP_READ_KEY="e2e-order-mcp-read-key"
+# MCP servers expose unauthenticated Streamable HTTP on the local harness.
 
 # ---- warehouse-ops-agent (the agentic decision-support layer, T5) --
 OPS_AGENT_HTTP_PORT=8096
 OPS_AGENT_BASE_URL="http://localhost:${OPS_AGENT_HTTP_PORT}"
-OPS_AGENT_MCP_READ_KEY="e2e-ops-agent-mcp-read-key"
 
 # ---- Analytics *-reports ports (each context's separate read-only reports
 #      binary -- cmd/<svc>-reports, backed by its own analytical Postgres,
@@ -283,6 +321,21 @@ INBOUND_DB_URL="postgres://inbound_receiving@localhost:5453/inbound_receiving?ss
 # It ships no docker-compose of its own; user/db "slotting" follow the
 # fleet's <context> naming. Migrations are embedded.
 SLOTTING_DB_URL="postgres://slotting@localhost:5454/slotting?sslmode=disable"
+# returns-processing -- next free slot after slotting's :5454. It ships no
+# docker-compose of its own; user/db "returns_processing" follow the fleet's
+# <context> naming. Migrations are embedded in its binary.
+RETURNS_DB_URL="postgres://returns_processing@localhost:5455/returns_processing?sslmode=disable"
+# exception-management -- next free slot after returns-processing's :5455.
+# Same shape: no compose of its own, user/db "exception_management",
+# migrations embedded.
+EXCEPTIONS_DB_URL="postgres://exception_management@localhost:5456/exception_management?sslmode=disable"
+# dock-scheduling / yard-management / outbound-shipping -- the next free slots
+# after exception-management's :5456. None ships a docker-compose of its own;
+# user/db follow the fleet's <context> naming and migrations are embedded in the
+# binaries.
+DOCK_SCHEDULING_DB_URL="postgres://dock_scheduling@localhost:5457/dock_scheduling?sslmode=disable"
+YARD_DB_URL="postgres://yard_management@localhost:5458/yard_management?sslmode=disable"
+OUTBOUND_SHIPPING_DB_URL="postgres://outbound_shipping@localhost:5459/outbound_shipping?sslmode=disable"
 
 # ---- Kafka: single broker platform-wide, owned by the warehouse-infra
 #      kind cluster and exposed to the host at localhost:9092 via a
@@ -336,13 +389,68 @@ ORDER_CLASSIFICATION_CONSUMER_GROUP="order-management-product-classification-${E
 
 # inbound-receiving <-> inventory-storage handover. inbound-receiving keeps a
 # local copy of product-master's ProductRegistered (PRODUCT_MODE=kafka +
-# PRODUCT_CONSUMER_GROUP; its dock-door copy stays PERMISSIVE here, so no
-# DOCK_DOOR_CONSUMER_GROUP). inventory-storage's consumer of
+# PRODUCT_CONSUMER_GROUP; its dock-door copy is fed by facility-layout's dock
+# slots through DOCK_DOOR_CONSUMER_GROUP, below). inventory-storage's consumer of
 # ReceiptLineReceived (its ADR 0037) does not exist unless
 # INBOUND_RECEIPT_CONSUMER_GROUP is set. Both are per-run groups, never the
 # live cluster's: a first start under a new group reads from the first offset.
 INBOUND_PRODUCT_CONSUMER_GROUP="inbound-receiving-product-${E2E_CONSUMER_GROUP_SUFFIX}"
 INVENTORY_INBOUND_RECEIPT_CONSUMER_GROUP="inventory-storage-inbound-receipt-${E2E_CONSUMER_GROUP_SUFFIX}"
+# inventory-storage's two always-on WMS-tier handover consumers, both
+# mandatory env on that service (no default, boot error when unset) and both
+# per-run groups here so a harness process never joins the live cluster's:
+# ReturnLineStaged of returns-processing (its ADR 0044) and fulfillment-
+# execution's TaskCompleted confirm-pick fact (its ADR 0035).
+INVENTORY_RETURN_LINE_CONSUMER_GROUP="inventory-storage-return-line-${E2E_CONSUMER_GROUP_SUFFIX}"
+INVENTORY_TASK_COMPLETED_CONSUMER_GROUP="inventory-storage-task-completed-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# returns-processing's three local-copy consumers (its ADR 0003; each group
+# env is mandatory on the service, no default), all per-run.
+RETURNS_PRODUCT_CLASSIFICATION_CONSUMER_GROUP="returns-processing-product-classification-${E2E_CONSUMER_GROUP_SUFFIX}"
+RETURNS_ORDER_LINES_CONSUMER_GROUP="returns-processing-order-lines-${E2E_CONSUMER_GROUP_SUFFIX}"
+RETURNS_MANIFEST_CONSUMER_GROUP="returns-processing-manifests-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# exception-management's six fact consumers (the pinned source topics of its
+# .claude/rules/integration-events.md; each group env is mandatory on the
+# service, no default), all per-run.
+EXCEPTIONS_FULFILLMENT_CONSUMER_GROUP="exception-management-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_WORK_PLANNING_CONSUMER_GROUP="exception-management-work-planning-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_NETWORK_FULFILLMENT_CONSUMER_GROUP="exception-management-network-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_ORDER_CORRELATION_CONSUMER_GROUP="exception-management-order-correlation-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_INVENTORY_CONSUMER_GROUP="exception-management-inventory-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_RETURNS_CONSUMER_GROUP="exception-management-returns-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# inbound-receiving's remaining always-on consumers (all mandatory env on its
+# develop, no default): the facility-layout dock-door copy, the packaging view,
+# dock-scheduling's appointment copy (its ADR 0019/0020), yard-management's
+# VisitCheckedIn arrival copy and inventory-storage's ContainerStowed copy (its
+# ADR 0021). A first start under a new group reads from the first offset.
+INBOUND_DOCK_DOOR_CONSUMER_GROUP="inbound-receiving-dock-door-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_PACKAGING_CONSUMER_GROUP="inbound-receiving-packaging-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_DOCK_APPOINTMENT_CONSUMER_GROUP="inbound-receiving-dock-appointment-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_VISIT_ARRIVAL_CONSUMER_GROUP="inbound-receiving-visit-arrival-${E2E_CONSUMER_GROUP_SUFFIX}"
+INBOUND_CARTON_STOW_CONSUMER_GROUP="inbound-receiving-carton-stow-${E2E_CONSUMER_GROUP_SUFFIX}"
+
+# The yard journey (features/yard_journey.feature). Every consumer group is
+# mandatory env on its service (no default) and per-run, so a harness process
+# never joins the live cluster's group for warehouse.dock-scheduling.events,
+# warehouse.yard-management.events or warehouse.facility.events.
+# dock-scheduling: yard facts, facility doors, ASNs, CPT schedules.
+DOCK_YARD_CONSUMER_GROUP="dock-scheduling-yard-${E2E_CONSUMER_GROUP_SUFFIX}"
+DOCK_FACILITY_CONSUMER_GROUP="dock-scheduling-facility-${E2E_CONSUMER_GROUP_SUFFIX}"
+DOCK_ASN_CONSUMER_GROUP="dock-scheduling-asn-${E2E_CONSUMER_GROUP_SUFFIX}"
+DOCK_CPT_CONSUMER_GROUP="dock-scheduling-cpt-${E2E_CONSUMER_GROUP_SUFFIX}"
+# yard-management: appointments, facility locations, ASNs and receipts.
+YARD_DOCK_CONSUMER_GROUP="yard-management-dock-scheduling-${E2E_CONSUMER_GROUP_SUFFIX}"
+YARD_FACILITY_CONSUMER_GROUP="yard-management-facility-${E2E_CONSUMER_GROUP_SUFFIX}"
+YARD_INBOUND_CONSUMER_GROUP="yard-management-inbound-receiving-${E2E_CONSUMER_GROUP_SUFFIX}"
+# outbound-shipping: six groups (fulfillment, dock, yard, CPT, layout, analytics).
+OUTBOUND_FULFILLMENT_CONSUMER_GROUP="outbound-shipping-fulfillment-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_DOCK_CONSUMER_GROUP="outbound-shipping-dock-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_YARD_CONSUMER_GROUP="outbound-shipping-yard-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_CPT_CONSUMER_GROUP="outbound-shipping-cpt-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_LAYOUT_CONSUMER_GROUP="outbound-shipping-layout-${E2E_CONSUMER_GROUP_SUFFIX}"
+OUTBOUND_ANALYTICS_CONSUMER_GROUP="outbound-shipping-analytics-${E2E_CONSUMER_GROUP_SUFFIX}"
 
 # slotting-optimization's three local-copy consumers (DEMAND_MODE,
 # PRODUCT_MODE, LAYOUT_MODE=kafka; each needs its group and has no default),
@@ -365,12 +473,66 @@ NIP_TRANSFER_FACT_CONSUMER_GROUP="nip-transfer-fact-${E2E_CONSUMER_GROUP_SUFFIX}
 # would join the live cluster's groups -- always override.
 WAREHOUSE_PLANNING_LABOR_CONSUMER_GROUP="warehouse-planning-labor-${E2E_CONSUMER_GROUP_SUFFIX}"
 WAREHOUSE_PLANNING_STORAGE_CONSUMER_GROUP="warehouse-planning-storage-${E2E_CONSUMER_GROUP_SUFFIX}"
+# Real-wiring standard (each service's ADR on develop): every consumer always
+# runs and its group env var is mandatory with no default, so a service that
+# gained a consumer since this file was written fails its boot until the group
+# is added here. Per-run groups, never the live cluster's.
+#
+# warehouse-planning: order-demand and task-completion (observed capacity)
+# consumers plus the dock-appointment consumer fed by dock-scheduling (its ADR
+# 0020). DEMAND_SITE_ID is the one site every consumed order and task
+# completion is attributed to; the transfer scenario creates its plans with an
+# explicit assigned_demand, so no run reads that attribution.
+WAREHOUSE_PLANNING_DEMAND_CONSUMER_GROUP="warehouse-planning-demand-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_DOCK_APPOINTMENT_CONSUMER_GROUP="warehouse-planning-dock-appointment-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_OBSERVED_CAPACITY_CONSUMER_GROUP="warehouse-planning-observed-capacity-${E2E_CONSUMER_GROUP_SUFFIX}"
+# warehouse-planning ADR 0022: the labour-standard copy of labor-performance (required at boot).
+WAREHOUSE_PLANNING_LABOR_STANDARD_CONSUMER_GROUP="warehouse-planning-labor-standards-${E2E_CONSUMER_GROUP_SUFFIX}"
+# workforce-management ADR 0043: the labour-plan copy of warehouse-planning (required at boot).
+WORKFORCE_LABOUR_PLAN_CONSUMER_GROUP="workforce-management-labour-plans-${E2E_CONSUMER_GROUP_SUFFIX}"
+WAREHOUSE_PLANNING_DEMAND_SITE_ID="${WAREHOUSE_PLANNING_DEMAND_SITE_ID:-E2E-DEMAND}"
+# NIP's pack-level consumer (product-master ProductPackLevel* facts).
+NIP_PACK_LEVEL_CONSUMER_GROUP="nip-pack-level-${E2E_CONSUMER_GROUP_SUFFIX}"
+# wes-work-planning: the pack-level view (ADR-0045) and the pick-face
+# replenishment consumer (ADR-0042). fulfillment-execution: the pack-level view
+# (ADR 0054; it MUST differ from PRODUCT_CLASSIFICATION_CONSUMER_GROUP, both
+# read warehouse.product-master.events) and the task-interleaving hint consumer.
+WES_PACK_VIEW_CONSUMER_GROUP="wes-work-planning-pack-view-${E2E_CONSUMER_GROUP_SUFFIX}"
+WES_REPLENISHMENT_CONSUMER_GROUP="wes-work-planning-replenishment-${E2E_CONSUMER_GROUP_SUFFIX}"
+FULFILLMENT_PACK_VIEW_CONSUMER_GROUP="fulfillment-execution-pack-view-${E2E_CONSUMER_GROUP_SUFFIX}"
+FULFILLMENT_TASK_INTERLEAVING_CONSUMER_GROUP="fulfillment-execution-task-interleaving-${E2E_CONSUMER_GROUP_SUFFIX}"
+# slotting-optimization's two further consumers: inventory-storage's
+# StockRelocated (plan execution progress, its ADR 0010) and product-master's
+# pack levels (its ADR 0012).
+SLOTTING_RELOCATION_CONSUMER_GROUP="slotting-optimization-relocation-${E2E_CONSUMER_GROUP_SUFFIX}"
+SLOTTING_PACK_LEVEL_CONSUMER_GROUP="slotting-optimization-pack-level-${E2E_CONSUMER_GROUP_SUFFIX}"
+# inbound-receiving's six consumers (its ADR 0011 / 0019 / 0021): product
+# (INBOUND_PRODUCT_CONSUMER_GROUP above), dock door (facility-layout dock
+# slots), packaging, dock appointment (the local copy fed by dock-scheduling),
+# visit arrival (yard-management VisitCheckedIn) and carton stow
+# (inventory-storage ContainerStowed).
+# (defined once, above)
+# exception-management's four further consumers (carton discrepancy from
+# inbound-receiving, yard-management, dock-scheduling, outbound-shipping).
+EXCEPTIONS_CARTON_DISCREPANCY_CONSUMER_GROUP="exception-management-carton-discrepancy-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_YARD_MANAGEMENT_CONSUMER_GROUP="exception-management-yard-management-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_DOCK_SCHEDULING_CONSUMER_GROUP="exception-management-dock-scheduling-${E2E_CONSUMER_GROUP_SUFFIX}"
+EXCEPTIONS_OUTBOUND_SHIPPING_CONSUMER_GROUP="exception-management-outbound-shipping-${E2E_CONSUMER_GROUP_SUFFIX}"
+# dock-scheduling's four mandatory consumers (yard-management's gate and unload
+# facts, facility-layout's dock slots and operating hours, inbound-receiving's
+# ASN, process-path-management's cut-off times) and yard-management's three
+# (dock-scheduling's appointments, facility-layout, inbound-receiving's
+# ReceiptClosed for the auto-complete). Its legacy importer
+# (DOCK_LEGACY_IMPORT_CONSUMER_GROUP) stays unset: that is the strangler
+# stage A migration aid and would replay a shared broker's history.
+# (The DOCK_* / YARD_* group variables themselves are defined once, in the
+# "yard journey" block above.)
 
 # ---- inter-warehouse transfer saga configuration --------------------
 # The pick leg's path is `pick-transfer` (inside the existing PICK family,
 # matchPrefix `pick`); the dispatch leg's is `dispatch-transfer` (the
 # DISPATCH family this harness's catalogue fixture adds). NIP has no
-# default for the pick path: unset, POST /v1/transfers:approve answers 503.
+# default for the pick path: unset, POST /v1/transfer-approvals answers 503.
 NIP_TRANSFER_PICK_PATH_ID="pick-transfer"
 NIP_TRANSFER_DISPATCH_PATH_ID="dispatch-transfer"
 # NIP refuses to plan from a single stale fact, anywhere in its read models

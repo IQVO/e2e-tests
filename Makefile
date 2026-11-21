@@ -16,7 +16,7 @@
 
 GO ?= go
 
-.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products seed-inventory down
+.PHONY: help fmt fmt-check vet test-compile scripts-sanity compose-config check check-all up run soak warehouse-day seed-products seed-inventory seed-tests provision-storefront provision-storefront-dry-run provision-storefront-verify retail-day retail-day-preflight down
 
 help:
 	@echo "e2e-tests — local quality gate (targets mirror .github/workflows/ci.yml)"
@@ -39,6 +39,14 @@ help:
 	@echo "  warehouse-day   scripts/07-run-warehouse-day.sh — simulate a full operating day, KPI + cross-context audit"
 	@echo "  seed-products   scripts/08-seed-products.sh — register >= 10,000 real products (real dimensions, weight, handling classes) in product-master, verified"
 	@echo "  seed-inventory  scripts/09-seed-inventory.sh — stock the pilot sites with >= 100,000 units of the registered products (bins + stow), verified"
+	@echo "  seed-tests      go test the seeders (seed-products, seed-inventory, seed-storefront) against their contract fakes + the warehouse-day site guard, offline"
+	@echo ""
+	@echo "  Storefront (kind cluster via Kong; see docs/storefront-provisioning.md):"
+	@echo "  provision-storefront          WRITES: network seed + dictionary check + cmd/seed-storefront, verified; a rerun writes nothing"
+	@echo "  provision-storefront-dry-run  the same checks and plans, nothing written"
+	@echo "  provision-storefront-verify   read-only: network verify, dictionary check, purchasable/quote/search verify"
+	@echo "  retail-day-preflight          read-only: cluster gate + REST checks + Kafka dead-letter snapshot for the three-tier run (docs/adr/0001-retail-day.md)"
+	@echo "  retail-day                    WRITES: the three-tier day (shoppers -> floor -> dock -> network -> doorstep), judged; RETAIL_DAY_ARGS=\"-start-now\" (needs a Kafka port-forward: docs/retail-day-journey.md)"
 	@echo "  down            scripts/05-down-services.sh — stops only what 'make up' started"
 
 fmt:
@@ -95,6 +103,29 @@ seed-products:
 seed-inventory:
 	bash scripts/09-seed-inventory.sh
 
+# Storefront provisioning (scripts/10-provision-storefront.sh, docs/storefront-provisioning.md):
+# WRITES to the kind cluster through Kong (network tier + storefront tier), idempotent; NOT part of check.
+provision-storefront:
+	bash scripts/10-provision-storefront.sh
+
+provision-storefront-dry-run:
+	bash scripts/10-provision-storefront.sh --dry-run
+
+provision-storefront-verify:
+	bash scripts/10-provision-storefront.sh --verify-only
+
+# The retail day (scripts/11-run-retail-day.sh, docs/adr/0001-retail-day.md).
+retail-day-preflight:
+	bash scripts/11-run-retail-day.sh --preflight
+
+retail-day:
+	bash scripts/11-run-retail-day.sh $(RETAIL_DAY_ARGS)
+
+# Offline tests of the seeders (contract fakes; no cluster) and of warehouse-day's site guard
+# and order body (httptest fakes), as in CI's seed-products-tests job.
+seed-tests:
+	$(GO) test ./cmd/seed-products/... ./cmd/seed-inventory/... ./cmd/seed-storefront/... ./cmd/warehouse-day/... ./cmd/retail-day/... ./internal/...
+
 down:
 	bash scripts/05-down-services.sh
 
@@ -108,3 +139,4 @@ guide-lint: ## lint agent guides: skills load, references resolve, context budge
 
 harness-test: ## unit-test the agent hooks (pre/post/stop)
 	python3 scripts/harness/test_hook.py
+	python3 scripts/harness/test_red_issue.py

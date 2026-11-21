@@ -48,9 +48,16 @@ const (
 	typeSiteSkuDemandChanged = "com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged"
 
 	// slotLocationType is the facility-layout location type of every forward
-	// slot the feature registers: 1000 kg / 2 m3, far above one unit of the
-	// feature's SKUs (205x121x82 mm, 1720 g).
-	slotLocationType = "SlotFwdRack"
+	// slot the feature registers. facility-layout's placement rules
+	// (RULE-ALLOW-FWD-*) allow only CartonFlow, Shelf and ToteWall in a FWD
+	// zone; Shelf's default capacity is far above one
+	// unit of the feature's SKUs (205x121x82 mm, 1720 g).
+	slotLocationType = "Shelf"
+	// slotLocationTypeWeightKg / VolumeM3 are the capacity the feature declares
+	// for it (the 150 kg / 0.4 m3 default features/phase5_case_pick.feature
+	// documents).
+	slotLocationTypeWeightKg = 150
+	slotLocationTypeVolumeM3 = 0.4
 	// slotLookbackDays is the demand window of every plan; the injected
 	// demand is due one hour ago, well inside it.
 	slotLookbackDays = 7
@@ -115,7 +122,12 @@ func (w *world) slotsExist(site string, hazmat bool, codes ...string) error {
 	if err := w.ensureSite(site, "Slotting E2E "+site); err != nil {
 		return fmt.Errorf("site %s: %w", site, err)
 	}
-	if err := w.ensureLocationType(slotLocationType, 1000, 2.0); err != nil {
+	// The location type is the feature's own precondition: facility-layout
+	// seeds none, so the scenario declares it itself (a 409 when an earlier
+	// scenario of the same run already did) instead of leaning on whichever
+	// feature ran first in a full-suite run -- the isolated CI job runs this
+	// feature alone and answered 404 location-type-not-found.
+	if err := w.ensureLocationType(slotLocationType, slotLocationTypeWeightKg, slotLocationTypeVolumeM3); err != nil {
 		return fmt.Errorf("location type %s: %w", slotLocationType, err)
 	}
 	for _, raw := range codes {
@@ -183,11 +195,21 @@ func (w *world) skuRegisteredClassifiedAndMeasured(sku, tags string) error {
 // ---------------------------------------------------------------------
 
 func (w *world) demandIsStated(lines, units int, sku, site string) error {
+	each := make([]int, lines)
+	for i := range each {
+		each[i] = units
+	}
+	return w.demandLinesAreStated(each, sku, site)
+}
+
+// demandLinesAreStated publishes one SiteSkuDemandChanged per entry of units
+// (one order line each), so a SKU can have lines of different sizes.
+func (w *world) demandLinesAreStated(units []int, sku, site string) error {
 	sku, site = w.rs(sku), w.rs(site)
 	st := w.sl()
 	key := site + "|" + sku
 	due := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	for i := 0; i < lines; i++ {
+	for i, u := range units {
 		st.demandSeq[key]++
 		order := fmt.Sprintf("ORD-%s-%s-%d", site, sku, st.demandSeq[key])
 		subject := order + "/line/1"
@@ -199,7 +221,7 @@ func (w *world) demandIsStated(lines, units int, sku, site string) error {
 				"line_no":            1,
 				"site_id":            site,
 				"sku":                sku,
-				"demanded_units":     units,
+				"demanded_units":     u,
 				"due_at":             due.Format(time.RFC3339),
 				"state":              "ACTIVE",
 				"assignment_version": "static-site-v1",
@@ -216,16 +238,12 @@ func (w *world) demandIsStated(lines, units int, sku, site string) error {
 func (w *world) velocityEventually(picks, units int, sku, site string) error {
 	sku, site = w.rs(sku), w.rs(site)
 	return eventually(func() error {
-		q := url.Values{"siteId": {site}, "windowDays": {fmt.Sprint(slotLookbackDays)}, "limit": {"500"}}
-		if err := w.doJSON(http.MethodGet, slottingBaseURL+"/sku-velocity?"+q.Encode(), nil); err != nil {
+		q := url.Values{"siteId": {site}, "windowDays": {fmt.Sprint(slotLookbackDays)}}
+		items, err := w.getItems(slottingBaseURL + "/sku-velocity?" + q.Encode())
+		if err != nil {
 			return err
 		}
-		if w.last.status != http.StatusOK {
-			return fmt.Errorf("GET /sku-velocity: status %d (body: %s)", w.last.status, w.last.body)
-		}
-		items, _ := w.last.json()["items"].([]any)
-		for _, it := range items {
-			m, _ := it.(map[string]any)
+		for _, m := range items {
 			if m["sku"] != sku {
 				continue
 			}
@@ -359,7 +377,7 @@ func (w *world) slotGenerate(site string) (map[string]any, error) {
 // Draft behind. Best effort: the outcome is irrelevant to the scenario.
 func (w *world) slotDiscard(p map[string]any) {
 	if id, _ := p["planId"].(string); id != "" {
-		_ = w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/reject", slottingBaseURL, id),
+		_ = w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/rejections", slottingBaseURL, id),
 			map[string]any{"reason": "e2e: intermediate draft while the local copies converge"})
 	}
 }
@@ -556,7 +574,7 @@ func (w *world) planIsApproved(label, site string) error {
 	if err != nil {
 		return err
 	}
-	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approve", slottingBaseURL, id), nil)); err != nil {
+	if err := w.expectOK2xx(w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approvals", slottingBaseURL, id), nil)); err != nil {
 		return fmt.Errorf("approve plan %s: %w", id, err)
 	}
 	if got := w.last.json()["state"]; w.last.status != http.StatusOK || got != "Approved" {
@@ -572,7 +590,7 @@ func (w *world) approvingIsRefused(label, site string, status int, slug string) 
 	if err != nil {
 		return err
 	}
-	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approve", slottingBaseURL, id), nil); err != nil {
+	if err := w.doJSON(http.MethodPost, fmt.Sprintf("%s/slot-plans/%s/approvals", slottingBaseURL, id), nil); err != nil {
 		return err
 	}
 	return w.problemIs(status, slug)

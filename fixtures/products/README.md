@@ -75,3 +75,7 @@ length/width/height order; they are not a shipping-carton size.
 Every file is validated on load (SKU rules, GTIN check digit for Open Food Facts entries,
 dimension and weight limits, tag enum, temperature class and DOT class invariants, no
 SKU in two files), so a hand edit that breaks a rule fails before the first request.
+
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with, endorsed by or affiliated with any company, and it uses no company's code, data, logos or trademarks. All names, figures and examples are illustrative or synthetic.
