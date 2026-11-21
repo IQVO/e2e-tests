@@ -369,6 +369,7 @@ func storageBins(ctx context.Context, c *sim.Client, building string) ([]string,
 	type slot struct {
 		LocationCode string `json:"locationCode"`
 		Status       string `json:"status"`
+		LocationType string `json:"locationType"`
 	}
 	path := "/sites/" + url.PathEscape(building) + "/locations?role=Storage"
 	slots, last := sim.ListAll[slot](ctx, c, "facility-layout", "GET /sites/{code}/locations", path)
@@ -377,7 +378,7 @@ func storageBins(ctx context.Context, c *sim.Client, building string) ([]string,
 	}
 	var codes []string
 	for _, s := range slots {
-		if s.Status == "Active" && s.LocationCode != "" {
+		if isStowCandidate(s.Status, s.LocationCode, s.LocationType) {
 			codes = append(codes, s.LocationCode)
 		}
 	}
@@ -399,4 +400,13 @@ func (b *building) cleanup(ctx context.Context) error {
 		b.cfg.logf("floor finding: %s", f)
 	}
 	return err
+}
+
+// automatedStorageType is facility-layout's well-known LocationType of an AS/RS logical location
+// (facility-layout ADR 0048); inventory-storage refuses loose stock into it (ADR 0054).
+const automatedStorageType = "AutomatedStorage"
+
+// isStowCandidate reports whether a Storage-role slot can be a restock bin.
+func isStowCandidate(status, locationCode, locationType string) bool {
+	return status == "Active" && locationCode != "" && locationType != automatedStorageType
 }
