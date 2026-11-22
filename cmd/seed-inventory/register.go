@@ -28,6 +28,16 @@ func retryable(err error) bool {
 	return err != nil
 }
 
+// statusOK reports whether code is one of the accepted codes of the call.
+func statusOK(code int, want []int) bool {
+	for _, w := range want {
+		if code == w {
+			return true
+		}
+	}
+	return false
+}
+
 // do sends one request, retrying transport errors, 5xx, 429 and 409 concurrent-modification
 // (a stow racing another on the same bin). out, when non-nil, receives a 2xx JSON body.
 func (c *invClient) do(ctx context.Context, method, path string, body any, key string, out any, ok ...int) (int, error) {
@@ -52,13 +62,11 @@ func (c *invClient) do(ctx context.Context, method, path string, body any, key s
 		if err == nil {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			_ = resp.Body.Close()
-			for _, s := range ok {
-				if resp.StatusCode == s {
-					if out != nil {
-						_ = json.Unmarshal(b, out)
-					}
-					return s, nil
+			if statusOK(resp.StatusCode, ok) {
+				if out != nil {
+					_ = json.Unmarshal(b, out)
 				}
+				return resp.StatusCode, nil
 			}
 			err = &apiError{Status: resp.StatusCode, Body: strings.TrimSpace(string(b))}
 		}

@@ -231,98 +231,116 @@ type zoneBins struct {
 	cursor int
 }
 
-// BuildPlan places every stockable registered product.
-func BuildPlan(products []Product, sites []Site, opt Options) *Plan {
-	if opt.Fill <= 0 || opt.Fill > 1 {
-		opt.Fill = 0.8
-	}
-	plan := &Plan{Unplaced: map[string]int{}, UnitsBySite: map[string]int{}, BinsBySite: map[string]int{}, SKUsByProfile: map[string]int{}}
+// siteState is one site of the planner's working set: the site and its bins
+// indexed by zone code.
+type siteState struct {
+	Site
+	zones map[string][]*BinPlan
+}
 
-	// bins per site and zone code, in a stable order
-	type siteState struct {
-		Site
-		zones map[string][]*BinPlan
-	}
+// buildSiteStates indexes every site's bins by zone code, sites and bins in a
+// stable order.
+func buildSiteStates(sites []Site) []*siteState {
 	states := make([]*siteState, 0, len(sites))
-	all := map[string]*BinPlan{}
 	for _, s := range sites {
 		st := &siteState{Site: s, zones: map[string][]*BinPlan{}}
 		bins := append([]Bin(nil), s.Bins...)
 		sort.Slice(bins, func(i, j int) bool { return bins[i].ID < bins[j].ID })
 		for _, b := range bins {
-			bp := &BinPlan{Bin: b, Site: s.Code}
-			st.zones[b.ZoneCode] = append(st.zones[b.ZoneCode], bp)
-			all[b.ID] = bp
+			st.zones[b.ZoneCode] = append(st.zones[b.ZoneCode], &BinPlan{Bin: b, Site: s.Code})
 		}
 		states = append(states, st)
 	}
 	sort.Slice(states, func(i, j int) bool { return states[i].Code < states[j].Code })
+	return states
+}
 
-	ordered := append([]Product(nil), products...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].SKU < ordered[j].SKU })
-
-	stocked := map[string]bool{}
-	for _, p := range ordered {
-		c := classify(p)
-		vol, wt := p.VolumeL, float64(p.WeightG)
-		if !p.HasDims {
-			vol, wt = assumedGroceryVolumeL, assumedGroceryWeightG
-		}
-		prefs := zonePreference(p, c)
-		var eligible []*siteState
-		for _, st := range states {
-			if !roleAccepts(st.Role, p, c) {
-				continue
-			}
-			for _, z := range prefs {
-				if len(st.zones[z]) > 0 {
-					eligible = append(eligible, st)
-					break
-				}
-			}
-		}
-		if len(eligible) == 0 {
-			plan.SkippedSKUs = append(plan.SkippedSKUs, p.SKU)
+// eligibleSites lists the sites whose role stocks p and that hold a bin in one
+// of p's preferred zones, in stable order.
+func eligibleSites(states []*siteState, p Product, c sizeClass, prefs []string) []*siteState {
+	var eligible []*siteState
+	for _, st := range states {
+		if !roleAccepts(st.Role, p, c) {
 			continue
 		}
-		n := siteCount(p, c, len(eligible))
-		start := int(h64("start", p.SKU) % uint64(len(eligible)))
-		for k := 0; k < n; k++ {
-			st := eligible[(start+k)%len(eligible)]
-			qty := quantityFor(p, c, st.Code)
-			// first zone of the preference list this site has, rotated by hash among those it has
-			var have []string
-			for _, z := range prefs {
-				if len(st.zones[z]) > 0 {
-					have = append(have, z)
-				}
-			}
-			zone := have[int(h64("zone", p.SKU, st.Code)%uint64(len(have)))]
-			left := placeInZone(st.zones[zone], p, vol, wt, qty, opt.Fill)
-			if left > 0 { // try the site's other eligible zones
-				for _, z := range have {
-					if z != zone && left > 0 {
-						left = placeInZone(st.zones[z], p, vol, wt, left, opt.Fill)
-					}
-				}
-			}
-			if left > 0 {
-				plan.Unplaced[p.SKU] += left
-			}
-			if left < qty {
-				stocked[p.SKU] = true
+		for _, z := range prefs {
+			if len(st.zones[z]) > 0 {
+				eligible = append(eligible, st)
+				break
 			}
 		}
-		plan.SKUsByProfile[profileOf(p, c)]++
 	}
+	return eligible
+}
 
+// zonesHeld is the site's zones among prefs, in preference order.
+func (st *siteState) zonesHeld(prefs []string) []string {
+	var have []string
+	for _, z := range prefs {
+		if len(st.zones[z]) > 0 {
+			have = append(have, z)
+		}
+	}
+	return have
+}
+
+// placeAtSites stows p at siteCount of the eligible sites (chosen by a stable
+// hash rotation), spilling from the hash-chosen zone into the site's other
+// eligible zones. It returns the units that found no bin and whether any unit
+// was stocked anywhere.
+func placeAtSites(eligible []*siteState, p Product, c sizeClass, prefs []string, vol, wt, fill float64) (unplaced int, stockedAny bool) {
+	n := siteCount(p, c, len(eligible))
+	start := int(h64("start", p.SKU) % uint64(len(eligible)))
+	for k := 0; k < n; k++ {
+		st := eligible[(start+k)%len(eligible)]
+		qty := quantityFor(p, c, st.Code)
+		have := st.zonesHeld(prefs)
+		zone := have[int(h64("zone", p.SKU, st.Code)%uint64(len(have)))]
+		left := placeInZone(st.zones[zone], p, vol, wt, qty, fill)
+		if left > 0 { // try the site's other eligible zones
+			for _, z := range have {
+				if z != zone && left > 0 {
+					left = placeInZone(st.zones[z], p, vol, wt, left, fill)
+				}
+			}
+		}
+		if left > 0 {
+			unplaced += left
+		}
+		if left < qty {
+			stockedAny = true
+		}
+	}
+	return unplaced, stockedAny
+}
+
+// stockProduct places one product across the sites and records what did not fit.
+func (plan *Plan) stockProduct(states []*siteState, p Product, c sizeClass, vol, wt, fill float64, stocked map[string]bool) {
+	prefs := zonePreference(p, c)
+	eligible := eligibleSites(states, p, c, prefs)
+	if len(eligible) == 0 {
+		plan.SkippedSKUs = append(plan.SkippedSKUs, p.SKU)
+		return
+	}
+	unplaced, stockedAny := placeAtSites(eligible, p, c, prefs, vol, wt, fill)
+	if unplaced > 0 {
+		plan.Unplaced[p.SKU] += unplaced
+	}
+	if stockedAny {
+		stocked[p.SKU] = true
+	}
+	plan.SKUsByProfile[profileOf(p, c)]++
+}
+
+// collectBins folds the stocked bins into the plan totals, bins in bin-id order.
+func (plan *Plan) collectBins(states []*siteState, fill float64) {
 	for _, st := range states {
 		for _, bins := range st.zones {
 			for _, bp := range bins {
 				if bp.Units == 0 {
 					continue
 				}
-				bp.Capacity = int(math.Ceil(float64(bp.Units) / opt.Fill))
+				bp.Capacity = int(math.Ceil(float64(bp.Units) / fill))
 				plan.Bins = append(plan.Bins, bp)
 				plan.Units += bp.Units
 				plan.Lines += len(bp.Lines)
@@ -332,6 +350,27 @@ func BuildPlan(products []Product, sites []Site, opt Options) *Plan {
 		}
 	}
 	sort.Slice(plan.Bins, func(i, j int) bool { return plan.Bins[i].Bin.ID < plan.Bins[j].Bin.ID })
+}
+
+// BuildPlan places every stockable registered product.
+func BuildPlan(products []Product, sites []Site, opt Options) *Plan {
+	if opt.Fill <= 0 || opt.Fill > 1 {
+		opt.Fill = 0.8
+	}
+	plan := &Plan{Unplaced: map[string]int{}, UnitsBySite: map[string]int{}, BinsBySite: map[string]int{}, SKUsByProfile: map[string]int{}}
+	states := buildSiteStates(sites)
+	ordered := append([]Product(nil), products...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].SKU < ordered[j].SKU })
+	stocked := map[string]bool{}
+	for _, p := range ordered {
+		c := classify(p)
+		vol, wt := p.VolumeL, float64(p.WeightG)
+		if !p.HasDims {
+			vol, wt = assumedGroceryVolumeL, assumedGroceryWeightG
+		}
+		plan.stockProduct(states, p, c, vol, wt, opt.Fill, stocked)
+	}
+	plan.collectBins(states, opt.Fill)
 	plan.SKUs = len(stocked)
 	sort.Strings(plan.SkippedSKUs)
 	return plan

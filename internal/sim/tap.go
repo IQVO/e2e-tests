@@ -90,6 +90,62 @@ func ShortType(s string) string {
 	return s
 }
 
+// messageType pulls the event type out of a consumed message: the CloudEvents
+// structured envelope ("type"), the legacy flat envelope ("event_type"), then
+// the CloudEvents binary-mode header ("ce_type"). The result is the short type
+// ("?" when nothing decodes).
+func messageType(m kafkago.Message) string {
+	var env struct {
+		Type      string `json:"type"`
+		EventType string `json:"event_type"`
+	}
+	_ = json.Unmarshal(m.Value, &env)
+	typ := env.Type
+	if typ == "" {
+		typ = env.EventType
+	}
+	for _, h := range m.Headers {
+		if typ == "" && (h.Key == "ce_type" || h.Key == "ce-type") {
+			typ = string(h.Value)
+		}
+	}
+	typ = ShortType(typ)
+	if typ == "" {
+		typ = "?"
+	}
+	return typ
+}
+
+// record indexes one consumed message under the tap's maps.
+func (t *EventTap) record(topic, typ, raw string) {
+	t.Mu.Lock()
+	defer t.Mu.Unlock()
+	if strings.HasSuffix(topic, ".dlq") {
+		// A shared, long-lived broker dead-letters legacy (pre-CloudEvents)
+		// messages whenever a consumer group replays history. Those are
+		// not today's failures; count them separately and fail the run
+		// only on dead-lettered messages that mention this run.
+		if t.RunID != "" && strings.Contains(raw, t.RunID) {
+			t.Dlq[topic]++
+		} else {
+			t.DlqLegacy[topic]++
+		}
+		return
+	}
+	if t.Counts[topic] == nil {
+		t.Counts[topic] = map[string]int{}
+	}
+	t.Counts[topic][typ]++
+	for _, ref := range t.Refs {
+		if strings.Contains(raw, ref) {
+			if t.ByRef[ref] == nil {
+				t.ByRef[ref] = map[string]int{}
+			}
+			t.ByRef[ref][typ]++
+		}
+	}
+}
+
 func (t *EventTap) consume(ctx context.Context, r *kafkago.Reader, topic string) {
 	for {
 		m, err := r.ReadMessage(ctx)
@@ -101,51 +157,7 @@ func (t *EventTap) consume(ctx context.Context, r *kafkago.Reader, topic string)
 			}
 			return
 		}
-		var env struct {
-			Type      string `json:"type"`
-			EventType string `json:"event_type"`
-		}
-		_ = json.Unmarshal(m.Value, &env)
-		typ := env.Type
-		if typ == "" {
-			typ = env.EventType
-		}
-		for _, h := range m.Headers {
-			if typ == "" && (h.Key == "ce_type" || h.Key == "ce-type") {
-				typ = string(h.Value)
-			}
-		}
-		typ = ShortType(typ)
-		if typ == "" {
-			typ = "?"
-		}
-		raw := string(m.Value)
-		t.Mu.Lock()
-		if strings.HasSuffix(topic, ".dlq") {
-			// A shared, long-lived broker dead-letters legacy (pre-CloudEvents)
-			// messages whenever a consumer group replays history. Those are
-			// not today's failures; count them separately and fail the run
-			// only on dead-lettered messages that mention this run.
-			if t.RunID != "" && strings.Contains(raw, t.RunID) {
-				t.Dlq[topic]++
-			} else {
-				t.DlqLegacy[topic]++
-			}
-		} else {
-			if t.Counts[topic] == nil {
-				t.Counts[topic] = map[string]int{}
-			}
-			t.Counts[topic][typ]++
-			for _, ref := range t.Refs {
-				if strings.Contains(raw, ref) {
-					if t.ByRef[ref] == nil {
-						t.ByRef[ref] = map[string]int{}
-					}
-					t.ByRef[ref][typ]++
-				}
-			}
-		}
-		t.Mu.Unlock()
+		t.record(topic, messageType(m), string(m.Value))
 	}
 }
 
