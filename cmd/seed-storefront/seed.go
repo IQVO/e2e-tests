@@ -81,22 +81,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	// ---- CHECK: observed storefront state ----
-	obs, err := observe(ctx, c, desired)
+	obs, err := observeStage(ctx, c, desired, site, cpt, building)
 	if err != nil {
-		return res, fmt.Errorf("check: %w", err)
+		return res, err
 	}
-	desired.Site, obs.CPT, obs.Building = site, cpt, building
 
 	// ---- PLAN ----
 	plan := BuildPlan(*desired, *obs)
 	res.Plan = plan
 	logPlan(plan, logf)
 	if cfg.DryRun {
-		logf("dry run: nothing written")
-		if len(plan.Blocked) > 0 {
-			return res, fmt.Errorf("plan: %d products are blocked (see BLOCKED above)", len(plan.Blocked))
-		}
-		return res, nil
+		return dryRunExit(res, plan, logf)
 	}
 
 	// ---- APPLY ----
@@ -203,6 +198,28 @@ func checkCatalogue(ctx context.Context, c *client, cfg Config, fx *Fixture, phy
 	}
 	logf("check: %d products resolved to ACTIVE catalogue items by title (%d catalogue items read)", len(desired.Products), len(catalog))
 	return desired, nil
+}
+
+// observeStage reads the current storefront state of everything the desired
+// state names and pins the WMS side of the promise (the site and both CPT
+// schedules) onto it.
+func observeStage(ctx context.Context, c *client, desired *Desired, site *SiteFixture, cpt, building *CPTSchedule) (*Observed, error) {
+	obs, err := observe(ctx, c, desired)
+	if err != nil {
+		return nil, fmt.Errorf("check: %w", err)
+	}
+	desired.Site, obs.CPT, obs.Building = site, cpt, building
+	return obs, nil
+}
+
+// dryRunExit is the dry run's outcome: nothing was written; blocked products
+// still fail it.
+func dryRunExit(res *Result, plan *Plan, logf func(string, ...any)) (*Result, error) {
+	logf("dry run: nothing written")
+	if len(plan.Blocked) > 0 {
+		return res, fmt.Errorf("plan: %d products are blocked (see BLOCKED above)", len(plan.Blocked))
+	}
+	return res, nil
 }
 
 // fixtureSKUs lists the fixture's SKUs in fixture order.

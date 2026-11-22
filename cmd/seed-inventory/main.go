@@ -59,26 +59,7 @@ func main() {
 	inv := &invClient{base: strings.TrimRight(*invURL, "/"), http: hc}
 
 	// 1. CHECK
-	products, skipped, err := loadProducts(ctx, pm)
-	if err != nil {
-		log.Fatalf("check: %v", err)
-	}
-	var codes []string
-	for _, c := range strings.Split(*sitesCSV, ",") {
-		if c = strings.TrimSpace(c); c != "" {
-			codes = append(codes, c)
-		}
-	}
-	sites, err := loadSites(ctx, fl, codes)
-	if err != nil {
-		log.Fatalf("check: %v", err)
-	}
-	bins := 0
-	for _, s := range sites {
-		bins += len(s.Bins)
-	}
-	log.Printf("check: %d registered products stockable (%d skipped: no dimensions and not a grocery); %d pilot sites, %d storage bins",
-		len(products), len(skipped), len(sites), bins)
+	products, sites := checkStage(ctx, pm, fl, *sitesCSV)
 
 	// 2. PLAN
 	plan := BuildPlan(products, sites, Options{Fill: *fill})
@@ -99,6 +80,33 @@ func main() {
 	if *doVerify {
 		verifyPhase(ctx, inv, plan, *workers, *sample)
 	}
+}
+
+// checkStage is the CHECK step: every product registered in product-master
+// and every Active storage slot of the pilot sites in facility-layout. It
+// exits the process on a read that fails.
+func checkStage(ctx context.Context, pm, fl *reader, sitesCSV string) ([]Product, []Site) {
+	products, skipped, err := loadProducts(ctx, pm)
+	if err != nil {
+		log.Fatalf("check: %v", err)
+	}
+	var codes []string
+	for _, c := range strings.Split(sitesCSV, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			codes = append(codes, c)
+		}
+	}
+	sites, err := loadSites(ctx, fl, codes)
+	if err != nil {
+		log.Fatalf("check: %v", err)
+	}
+	bins := 0
+	for _, s := range sites {
+		bins += len(s.Bins)
+	}
+	log.Printf("check: %d registered products stockable (%d skipped: no dimensions and not a grocery); %d pilot sites, %d storage bins",
+		len(products), len(skipped), len(sites), bins)
+	return products, sites
 }
 
 // printCapped prints the first 20 lines under mark, then the count of the rest.

@@ -117,17 +117,9 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 		return d
 	}
 
-	dest := p.DestStationNodeID
-	if dest == "" {
-		dest = lr.Load.DestinationNodeID
-	}
-	node, err := t.Station.Node(ctx, dest)
-	if err != nil {
-		add("%s", err)
-		return d
-	}
-	if node.NodeType != "DELIVERY_STATION" {
-		add("node %s is a %s, not a DELIVERY_STATION: LoadArrived is not inducted into a wave there", node.NodeID, node.NodeType)
+	node, problem := t.stationNode(ctx, p, lr)
+	if problem != "" {
+		add("%s", problem)
 		return d
 	}
 
@@ -153,6 +145,24 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 	}
 	t.logf("parcel %v: %d problem(s), delivered=%v", p.TrackingNumbers, len(d.Problems), d.Delivered())
 	return d
+}
+
+// stationNode is the parcel's destination station: the parcel's own when it
+// names one, the linehaul load's otherwise. It must be a DELIVERY_STATION;
+// the returned string is the problem when it is not ("" when it is).
+func (t *Transport) stationNode(ctx context.Context, p Parcel, lr LoadResult) (Node, string) {
+	dest := p.DestStationNodeID
+	if dest == "" {
+		dest = lr.Load.DestinationNodeID
+	}
+	node, err := t.Station.Node(ctx, dest)
+	if err != nil {
+		return Node{}, err.Error()
+	}
+	if node.NodeType != "DELIVERY_STATION" {
+		return node, fmt.Sprintf("node %s is a %s, not a DELIVERY_STATION: LoadArrived is not inducted into a wave there", node.NodeID, node.NodeType)
+	}
+	return node, ""
 }
 
 // checkParcel rejects a parcel or an option combination a service would refuse

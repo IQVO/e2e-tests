@@ -89,27 +89,38 @@ func errNotReadied(what string) error {
 	return fmt.Errorf("the %s was never readied: the prepare phase did not complete", what)
 }
 
-// newPhases reads, writes nothing. Everything it needs from the cluster it needs as a read: the
+// loadWireInputs loads and cross-checks the fulfilment-site fixture and the
+// SKU dictionary the day is wired from.
+func loadWireInputs(ctx context.Context, cfg wireConfig) (siteFixture, dictionary, error) {
+	site, err := loadSiteFixture(filepath.Join(cfg.FixtureDir, "fulfilment-site.json"))
+	if err != nil {
+		return siteFixture{}, dictionary{}, err
+	}
+	if site.WarehouseSiteID != cfg.Building || (site.SiteID != "" && site.SiteID != cfg.NetworkSite) {
+		return siteFixture{}, dictionary{}, fmt.Errorf("the fulfilment-site fixture serves %s from %s, the run was given -building %s and -network-site %s", site.SiteID, site.WarehouseSiteID, cfg.Building, cfg.NetworkSite)
+	}
+	dict, err := loadDictionary(ctx, cfg.Client, filepath.Join(cfg.FixtureDir, "catalogue.json"), cfg.NetworkData)
+	if err != nil {
+		return siteFixture{}, dictionary{}, err
+	}
+	cfg.logf("dictionary: %d SKU(s) paired with a catalogue item, %d without", len(dict.ItemBySKU), len(dict.Unresolved))
+	for _, u := range dict.Unresolved {
+		cfg.logf("dictionary: unresolved %s", u)
+	}
+	return site, dict, nil
+}
+
+// newPhases wires the day's real actors behind the day package's phase
+// interfaces. It reads, writes nothing. Everything it needs from the cluster it needs as a read: the
 // SKU dictionary (offer-availability GET /catalog). A fixture or dictionary that does not hold, or a
 // cluster that cannot be read, is an error here, before the day has touched anything.
 func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) {
 	if cfg.Client == nil {
 		return day.Phases{}, nil, errors.New("wire: no client")
 	}
-	site, err := loadSiteFixture(filepath.Join(cfg.FixtureDir, "fulfilment-site.json"))
+	site, dict, err := loadWireInputs(ctx, cfg)
 	if err != nil {
 		return day.Phases{}, nil, err
-	}
-	if site.WarehouseSiteID != cfg.Building || (site.SiteID != "" && site.SiteID != cfg.NetworkSite) {
-		return day.Phases{}, nil, fmt.Errorf("the fulfilment-site fixture serves %s from %s, the run was given -building %s and -network-site %s", site.SiteID, site.WarehouseSiteID, cfg.Building, cfg.NetworkSite)
-	}
-	dict, err := loadDictionary(ctx, cfg.Client, filepath.Join(cfg.FixtureDir, "catalogue.json"), cfg.NetworkData)
-	if err != nil {
-		return day.Phases{}, nil, err
-	}
-	cfg.logf("dictionary: %d SKU(s) paired with a catalogue item, %d without", len(dict.ItemBySKU), len(dict.Unresolved))
-	for _, u := range dict.Unresolved {
-		cfg.logf("dictionary: unresolved %s", u)
 	}
 
 	prefixes := &orderPrefixes{}
