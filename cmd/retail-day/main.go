@@ -66,40 +66,63 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 // runIDPattern is what the actors accept as a run id: short, upper-case, run-unique.
 var runIDPattern = regexp.MustCompile(`^[A-Z0-9]{3,12}$`)
 
+// options is the parsed command line of one run.
+type options struct {
+	gateway, storefront, netSite, building, vendor     *string
+	minProducts                                        *int
+	handling, ackBudget                                *time.Duration
+	requireWindow, waitWindow                          *bool
+	maxWait                                            *time.Duration
+	preflightOnly, asJSON                              *bool
+	seed                                               *int64
+	shoppers, shelfSize, parallel                      *int
+	startNow                                           *bool
+	linkTimeout                                        *time.Duration
+	allowUnverified, deliveryPoint, provision, verbose *bool
+	brokers, runID, fixtures, networkData              *string
+	doors, staging, stowBins                           *string
+}
+
+// parseFlags defines retail-day's flags on fs and returns their bindings.
+func parseFlags(fs *flag.FlagSet) *options {
+	o := &options{}
+	o.gateway = fs.String("gateway", envOr("WAREHOUSE_GATEWAY", "http://localhost:8000/api"), "Kong base of the k3s cluster (k3s-edges.sh forwards it to localhost:8000)")
+	o.storefront = fs.String("storefront", envOr("STOREFRONT_BASE_URL", "http://storefront.localhost/api/storefront"), "base URL of the storefront BFF")
+	o.netSite = fs.String("network-site", envOr("RETAIL_DAY_NETWORK_SITE", "site-1"), "the id the network knows the fulfilment node by (vendorNodeCode, network-fulfillment SITE_ID)")
+	o.building = fs.String("building", envOr("RETAIL_DAY_BUILDING", "AUS3"), "the facility-layout site that serves the node (ADR 0001 D1)")
+	o.vendor = fs.String("vendor", envOr("RETAIL_DAY_VENDOR", "V-WS"), "vendor id of the fulfilment node")
+	o.minProducts = fs.Int("min-products", 10, "purchasable products the storefront must list")
+	o.handling = fs.Duration("handling", 0, "override the node's handling time (0 = read it from the node profile)")
+	o.ackBudget = fs.Duration("ack-budget", 30*time.Minute, "order-sourcing's release budget before handling (a constant in its code)")
+	o.requireWindow = fs.Bool("require-window", false, "fail the preflight outside the release window")
+	o.waitWindow = fs.Bool("wait-for-window", false, "after a passing preflight, sleep until the release window opens")
+	o.maxWait = fs.Duration("max-wait", 8*time.Hour, "longest -wait-for-window may sleep; a further window is refused")
+	o.preflightOnly = fs.Bool("preflight", false, "run the read-only preflight and exit")
+	o.asJSON = fs.Bool("json", false, "print the preflight (with -preflight) or the day's report as JSON")
+	o.seed = fs.Int64("seed", 0, "the day's seed: the shelf, the buyers and their baskets are a function of it (0 = one from the clock, printed in the report)")
+	o.shoppers = fs.Int("shoppers", 8, "buyers: at least 5 (one delivered order plus one each of declined, cancelled, not served and in doubt)")
+	o.shelfSize = fs.Int("shelf", 10, "SKUs on the day's shelf, chosen by the seed from the purchasable products")
+	o.parallel = fs.Int("parallel", 4, "buyers, orders on the floor, loads at the dock and parcels in transit at once; also sizes the floor's crew")
+	o.startNow = fs.Bool("start-now", false, "play the day outside the release window: the purchase-order wait then lasts until the computed release time (ADR 0001 D3), bounded by -link-timeout")
+	o.linkTimeout = fs.Duration("link-timeout", 2*time.Hour, "longest the day waits for ONE purchase order to be released, acknowledged and raised in order-management")
+	o.allowUnverified = fs.Bool("allow-unverified", false, "list what the evidence could not read (the run's dead letters when the broker cannot be read or -brokers is empty) as NOT VERIFIED instead of failing the day on it (nothing else is excused)")
+	o.brokers = fs.String("brokers", envOr("KAFKA_BROKERS", defaultBrokers), "the ONE Kafka broker address (host:port) the run's dead letters are counted through; the k3s broker is not forwarded by k3s-edges.sh, so this needs a `kubectl port-forward svc/kafka 9092:9092` (the preflight says so). Empty: dead letters are not counted")
+	o.deliveryPoint = fs.Bool("delivery-point", false, "exercise the delivery-point chain (gap G67): the FIRST delivered order fails twice (the driver reports NOT_HOME), runs alone, and the day must observe DeliveryPointFlagged on last-mile-delivery's topic (read through -brokers; without it only the advisory on the order's tracking view) and the advisory on customer-ordering's tracking view")
+	o.provision = fs.Bool("provision", false, "let the readiness steps WRITE setup data: register missing -doors and -staging slots and declare a never-declared dock calendar. Never the CPT schedule (make provision-storefront), never bins")
+	o.runID = fs.String("run-id", "", "run id stamped on stations, plates, seals and ASNs: 3-12 upper-case letters or digits (default RD + the clock)")
+	o.fixtures = fs.String("fixtures", envOr("RETAIL_DAY_FIXTURES", "fixtures/storefront"), "directory of catalogue.json and fulfilment-site.json (the SKUs and the building's CPT schedule)")
+	o.networkData = fs.String("network-data", envOr("RETAIL_DAY_NETWORK_DATA", "../warehouse-infra/scripts/data/retail-network-seed.json"), "warehouse-infra's retail-network-seed.json (SKU -> catalogue title)")
+	o.doors = fs.String("doors", "", "comma-separated facility-layout OUTBOUND dock slot codes -provision may register when missing (default: use the Active ones the building has)")
+	o.staging = fs.String("staging", "", "comma-separated facility-layout Staging slot codes -provision may register when missing (default: use the Active ones the building has)")
+	o.stowBins = fs.String("stow-bins", "", "comma-separated inventory-storage bins the restock may stow into (default: the building's Storage slots that are registered bins with room)")
+	o.verbose = fs.Bool("v", false, "log every actor's own steps to stderr")
+	return o
+}
+
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("retail-day", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	gateway := fs.String("gateway", envOr("WAREHOUSE_GATEWAY", "http://localhost:8000/api"), "Kong base of the k3s cluster (k3s-edges.sh forwards it to localhost:8000)")
-	storefront := fs.String("storefront", envOr("STOREFRONT_BASE_URL", "http://storefront.localhost/api/storefront"), "base URL of the storefront BFF")
-	netSite := fs.String("network-site", envOr("RETAIL_DAY_NETWORK_SITE", "site-1"), "the id the network knows the fulfilment node by (vendorNodeCode, network-fulfillment SITE_ID)")
-	building := fs.String("building", envOr("RETAIL_DAY_BUILDING", "AUS3"), "the facility-layout site that serves the node (ADR 0001 D1)")
-	vendor := fs.String("vendor", envOr("RETAIL_DAY_VENDOR", "V-WS"), "vendor id of the fulfilment node")
-	minProducts := fs.Int("min-products", 10, "purchasable products the storefront must list")
-	handling := fs.Duration("handling", 0, "override the node's handling time (0 = read it from the node profile)")
-	ackBudget := fs.Duration("ack-budget", 30*time.Minute, "order-sourcing's release budget before handling (a constant in its code)")
-	requireWindow := fs.Bool("require-window", false, "fail the preflight outside the release window")
-	waitWindow := fs.Bool("wait-for-window", false, "after a passing preflight, sleep until the release window opens")
-	maxWait := fs.Duration("max-wait", 8*time.Hour, "longest -wait-for-window may sleep; a further window is refused")
-	preflightOnly := fs.Bool("preflight", false, "run the read-only preflight and exit")
-	asJSON := fs.Bool("json", false, "print the preflight (with -preflight) or the day's report as JSON")
-
-	seed := fs.Int64("seed", 0, "the day's seed: the shelf, the buyers and their baskets are a function of it (0 = one from the clock, printed in the report)")
-	shoppers := fs.Int("shoppers", 8, "buyers: at least 5 (one delivered order plus one each of declined, cancelled, not served and in doubt)")
-	shelfSize := fs.Int("shelf", 10, "SKUs on the day's shelf, chosen by the seed from the purchasable products")
-	parallel := fs.Int("parallel", 4, "buyers, orders on the floor, loads at the dock and parcels in transit at once; also sizes the floor's crew")
-	startNow := fs.Bool("start-now", false, "play the day outside the release window: the purchase-order wait then lasts until the computed release time (ADR 0001 D3), bounded by -link-timeout")
-	linkTimeout := fs.Duration("link-timeout", 2*time.Hour, "longest the day waits for ONE purchase order to be released, acknowledged and raised in order-management")
-	allowUnverified := fs.Bool("allow-unverified", false, "list what the evidence could not read (the run's dead letters when the broker cannot be read or -brokers is empty) as NOT VERIFIED instead of failing the day on it")
-	brokers := fs.String("brokers", envOr("KAFKA_BROKERS", defaultBrokers), "the ONE Kafka broker address (host:port) the run's dead letters are counted through; the k3s broker is not forwarded by k3s-edges.sh, so this needs a `kubectl port-forward svc/kafka 9092:9092` (the preflight says so). Empty: dead letters are not counted")
-	deliveryPoint := fs.Bool("delivery-point", false, "exercise the delivery-point chain (gap G67): the FIRST delivered order fails twice (the driver reports NOT_HOME), runs alone, and the day must observe DeliveryPointFlagged on last-mile-delivery's topic (read through -brokers; without it only the advisory on the order's tracking view) and the advisory on customer-ordering's tracking view")
-	provision := fs.Bool("provision", false, "let the readiness steps WRITE setup data: register missing -doors and -staging slots and declare a never-declared dock calendar. Never the CPT schedule (make provision-storefront), never bins")
-	runID := fs.String("run-id", "", "run id stamped on stations, plates, seals and ASNs: 3-12 upper-case letters or digits (default RD + the clock)")
-	fixtures := fs.String("fixtures", envOr("RETAIL_DAY_FIXTURES", "fixtures/storefront"), "directory of catalogue.json and fulfilment-site.json (the SKUs and the building's CPT schedule)")
-	networkData := fs.String("network-data", envOr("RETAIL_DAY_NETWORK_DATA", "../warehouse-infra/scripts/data/retail-network-seed.json"), "warehouse-infra's retail-network-seed.json (SKU -> catalogue title)")
-	doors := fs.String("doors", "", "comma-separated facility-layout OUTBOUND dock slot codes -provision may register when missing (default: use the Active ones the building has)")
-	staging := fs.String("staging", "", "comma-separated facility-layout Staging slot codes -provision may register when missing (default: use the Active ones the building has)")
-	stowBins := fs.String("stow-bins", "", "comma-separated inventory-storage bins the restock may stow into (default: the building's Storage slots that are registered bins with room)")
-	verbose := fs.Bool("v", false, "log every actor's own steps to stderr")
+	opts := parseFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -107,16 +130,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "retail-day: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	if msg := checkBrokers(*brokers); msg != "" {
+	if msg := checkBrokers(*opts.brokers); msg != "" {
 		fmt.Fprintf(stderr, "retail-day: %s\n", msg)
 		return 2
 	}
-	id := *runID
-	if !*preflightOnly {
+	id := *opts.runID
+	if !*opts.preflightOnly {
 		if id == "" {
 			id = "RD" + strings.ToUpper(strconv.FormatInt(time.Now().Unix(), 36))
 		}
-		if msg := checkUsage(id, *shoppers, *shelfSize, *parallel, *linkTimeout); msg != "" {
+		if msg := checkUsage(id, *opts.shoppers, *opts.shelfSize, *opts.parallel, *opts.linkTimeout); msg != "" {
 			fmt.Fprintf(stderr, "retail-day: %s\n", msg)
 			return 2
 		}
@@ -125,46 +148,59 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	base := sim.GatewayBase(*gateway, retailday.AllGateway())
-	base[retailday.BFF] = *storefront
-	base[shopper.Service] = *storefront // the shopper actor's own key for the BFF
+	base := sim.GatewayBase(*opts.gateway, retailday.AllGateway())
+	base[retailday.BFF] = *opts.storefront
+	base[shopper.Service] = *opts.storefront // the shopper actor's own key for the BFF
 	client := sim.NewClient(base, sim.NewCallStats())
 	cfg := retailday.Config{
-		NetworkSite: *netSite, BuildingSite: *building, VendorID: *vendor, MinProducts: *minProducts,
-		RequireWindow: *requireWindow, Handling: *handling, AckBudget: *ackBudget,
+		NetworkSite: *opts.netSite, BuildingSite: *opts.building, VendorID: *opts.vendor, MinProducts: *opts.minProducts,
+		RequireWindow: *opts.requireWindow, Handling: *opts.handling, AckBudget: *opts.ackBudget,
 	}
+	if stop, code := preflightStage(ctx, client, cfg, opts, stdout, stderr); stop {
+		return code
+	}
+
+	var notes []string
+	if code, note := gateWindow(ctx, client, cfg, windowGate{wait: *opts.waitWindow, maxWait: *opts.maxWait, startNow: *opts.startNow, linkTimeout: *opts.linkTimeout}, stderr); code != 0 {
+		return code
+	} else if note != "" {
+		notes = append(notes, note)
+	}
+	return runDay(ctx, opts, base, id, notes, stdout, stderr)
+}
+
+// preflightStage runs the read-only preflight and reports it; stop says the
+// run is over, and code is then its exit status.
+func preflightStage(ctx context.Context, client *sim.Client, cfg retailday.Config, opts *options, stdout, stderr io.Writer) (stop bool, code int) {
 	checks := runPreflight(ctx, client, cfg)
 	if retailday.Failed(checks) == 0 {
 		// the broker is read only once the cluster is known to answer: a day that cannot count its dead letters
 		// stops here, not after the release window was waited for
-		if c, ok := checkKafka(ctx, *brokers); ok {
+		if c, ok := checkKafka(ctx, *opts.brokers); ok {
 			checks = append(checks, c)
 		}
 	}
 	failed := retailday.Failed(checks)
 	switch {
-	case *asJSON && (*preflightOnly || failed > 0):
+	case *opts.asJSON && (*opts.preflightOnly || failed > 0):
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(map[string]any{"checks": checks, "failed": failed})
-	case !*asJSON:
+	case !*opts.asJSON:
 		printChecks(stdout, checks)
 	}
 	if failed > 0 {
 		fmt.Fprintf(stderr, "retail-day: preflight FAILED (%d of %d checks)\n", failed, len(checks))
-		return 1
+		return true, 1
 	}
-	if *preflightOnly {
-		return 0
+	if *opts.preflightOnly {
+		return true, 0
 	}
+	return false, 0
+}
 
-	var notes []string
-	if code, note := gateWindow(ctx, client, cfg, windowGate{wait: *waitWindow, maxWait: *maxWait, startNow: *startNow, linkTimeout: *linkTimeout}, stderr); code != 0 {
-		return code
-	} else if note != "" {
-		notes = append(notes, note)
-	}
-
+// runDay builds the day's phases, plays the day and returns the exit code.
+func runDay(ctx context.Context, opts *options, base map[string]string, id string, notes []string, stdout, stderr io.Writer) int {
 	var logMu sync.Mutex
 	logf := func(format string, a ...any) {
 		logMu.Lock()
@@ -172,7 +208,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "retail-day: "+format+"\n", a...)
 	}
 	var actorLog sim.LogFunc
-	if *verbose {
+	if *opts.verbose {
 		actorLog = func(who, format string, a ...any) { logf("%s: "+format, append([]any{who}, a...)...) }
 	}
 	// the day has its own client and statistics: the preflight's calls are not the day's, and the BFF's 15 s
@@ -180,10 +216,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	dayClient := sim.NewClient(base, sim.NewCallStats())
 	dayClient.HTTP = dayHTTPClient()
 	phases, release, err := buildPhases(ctx, wireConfig{
-		Client: dayClient, RunID: id, Building: *building, NetworkSite: *netSite, VendorID: *vendor,
-		FixtureDir: *fixtures, NetworkData: *networkData, LinkTimeout: *linkTimeout, Parallel: *parallel,
-		Provision: *provision, Doors: splitList(*doors), Staging: splitList(*staging), StowBins: splitList(*stowBins),
-		Brokers: *brokers, DeliveryPoint: *deliveryPoint, Log: logf, ActorLog: actorLog,
+		Client: dayClient, RunID: id, Building: *opts.building, NetworkSite: *opts.netSite, VendorID: *opts.vendor,
+		FixtureDir: *opts.fixtures, NetworkData: *opts.networkData, LinkTimeout: *opts.linkTimeout, Parallel: *opts.parallel,
+		Provision: *opts.provision, Doors: splitList(*opts.doors), Staging: splitList(*opts.staging), StowBins: splitList(*opts.stowBins),
+		Brokers: *opts.brokers, DeliveryPoint: *opts.deliveryPoint, Log: logf, ActorLog: actorLog,
 	})
 	if release != nil {
 		defer release()
@@ -193,16 +229,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	s := *seed
+	s := *opts.seed
 	if s == 0 {
 		s = time.Now().Unix()
 	}
 	runner := day.Runner{Phases: phases, Config: day.Config{
-		Plan:     day.PlanConfig{RunID: id, Seed: s, Shoppers: *shoppers, ShelfSize: *shelfSize},
-		Parallel: *parallel, AllowUnverified: *allowUnverified, Notes: notes, Log: logf,
+		Plan:     day.PlanConfig{RunID: id, Seed: s, Shoppers: *opts.shoppers, ShelfSize: *opts.shelfSize},
+		Parallel: *opts.parallel, AllowUnverified: *opts.allowUnverified, Notes: notes, Log: logf,
 	}}
 	rep := runner.Run(ctx)
-	if *asJSON {
+	if *opts.asJSON {
 		if err := rep.JSON(stdout); err != nil {
 			fmt.Fprintf(stderr, "retail-day: the report could not be written: %v\n", err)
 			return 1
