@@ -1,0 +1,41 @@
+# lefthook.yml — git hooks for e2e-tests.
+#
+# One-time local activation (hooks are NOT tracked in git, so every clone must
+# do this once):
+#
+#   brew install lefthook          # or: go install github.com/evilmartians/lefthook@latest
+#   lefthook install
+#
+# The hooks are thin wrappers around the Makefile so there is exactly ONE
+# definition of each sensor (see Makefile / .github/workflows/ci.yml).
+# Everything here is offline: no cluster, no containers at commit time.
+
+min_version: 1.7.0
+
+# Fast structural sensors only — must stay snappy enough to run on every commit.
+pre-commit:
+  parallel: false
+  jobs:
+    - name: fmt-check
+      run: |
+        command -v make >/dev/null 2>&1 || {
+          echo "lefthook/pre-commit: 'make' is not installed or not on PATH — cannot run the quality gate."
+          exit 1
+        }
+        make fmt-check
+    - name: vet
+      run: make vet
+    - name: test-compile
+      run: make test-compile
+
+# The last gate before code leaves the machine.
+pre-push:
+  parallel: false
+  jobs:
+    - name: check
+      run: |
+        command -v make >/dev/null 2>&1 || {
+          echo "lefthook/pre-push: 'make' is not installed or not on PATH — cannot run the quality gate."
+          exit 1
+        }
+        make check
