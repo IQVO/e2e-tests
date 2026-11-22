@@ -24,37 +24,52 @@ func (s *sim) planOrders() {
 			weighted = append(weighted, sd)
 		}
 	}
-	pickSKU := func() skuDef {
-		total := 0.0
-		for _, sd := range weighted {
-			total += sd.demand
-		}
-		x := s.rf() * total
-		for _, sd := range weighted {
-			if x -= sd.demand; x <= 0 {
-				return sd
-			}
-		}
-		return weighted[0]
+	special := s.assignSpecialKinds()
+	n := s.cfg.orders
+	for i := 0; i < n; i++ {
+		s.orders = append(s.orders, s.newOrder(i, special, weighted))
 	}
-	curveTotal := 0.0
-	for _, w := range demandCurve {
-		curveTotal += w
-	}
-	simMinute := func() int {
-		x := s.rf() * curveTotal
-		for h, w := range demandCurve {
-			if x -= w; x <= 0 {
-				m := h*60 + s.ri(60)
-				if m < 15 {
-					m = 15 + s.ri(30)
-				}
-				return m
-			}
-		}
-		return 13*60 + 15
-	}
+	sort.Slice(s.orders, func(i, j int) bool { return s.orders[i].arriveAt.Before(s.orders[j].arriveAt) })
+}
 
+// pickWeightedSKU draws one SKU from the demand-weighted catalogue.
+func (s *sim) pickWeightedSKU(weighted []skuDef) skuDef {
+	total := 0.0
+	for _, sd := range weighted {
+		total += sd.demand
+	}
+	x := s.rf() * total
+	for _, sd := range weighted {
+		if x -= sd.demand; x <= 0 {
+			return sd
+		}
+	}
+	return weighted[0]
+}
+
+// simMinuteOnCurve draws one minute of the day from the demand curve
+// (06:00..19:00; the first quarter hour is kept clear of orders).
+func (s *sim) simMinuteOnCurve() int {
+	total := 0.0
+	for _, w := range demandCurve {
+		total += w
+	}
+	x := s.rf() * total
+	for h, w := range demandCurve {
+		if x -= w; x <= 0 {
+			m := h*60 + s.ri(60)
+			if m < 15 {
+				m = 15 + s.ri(30)
+			}
+			return m
+		}
+	}
+	return 13*60 + 15
+}
+
+// assignSpecialKinds hands the day's special order kinds to randomly chosen
+// orders (draws are stable under the run's seed).
+func (s *sim) assignSpecialKinds() map[int]orderKind {
 	special := map[int]orderKind{}
 	n := s.cfg.orders
 	assign := func(k orderKind, count int) {
@@ -73,49 +88,51 @@ func (s *sim) planOrders() {
 	assign(kindHeldCancel, 2)
 	assign(kindMispickInjct, max(1, n/40))
 	assign(kindPartialOK, n/6)
+	return special
+}
 
-	for i := 0; i < n; i++ {
-		o := &orderRec{seq: i + 1, kind: kindStandard, releaseOnAlloc: true, pickedLines: map[int]bool{}}
-		if k, ok := special[i]; ok {
-			o.kind = k
-		}
-		nLines := 1
-		if x := s.rf(); x > 0.6 {
-			nLines = 2
-		}
-		if x := s.rf(); x > 0.9 {
-			nLines = 3
-		}
-		used := map[string]bool{}
-		for len(o.lines) < nLines {
-			sd := pickSKU()
-			if used[sd.key] {
-				continue
-			}
-			used[sd.key] = true
-			o.lines = append(o.lines, orderLinePlan{sku: sd.key, qty: 1 + s.ri(2), giftWrap: s.rf() < 0.08})
-		}
-		switch o.kind {
-		case kindBackorder:
-			o.lines = append(o.lines, orderLinePlan{sku: "CAMERA", qty: 2})
-		case kindHeldRelease, kindHeldCancel:
-			o.releaseOnAlloc = false
-		case kindPartialOK:
-			o.allowPartial = true
-		}
-		m := simMinute()
-		if o.kind == kindBackorder {
-			// A backorder only exists while CAMERA is out of stock: the
-			// 13:00 replenishment would let a later order allocate in full.
-			for m >= (replenishHour-dayOpenHour)*60-30 {
-				m = simMinute()
-			}
-		}
-		o.arriveAt = s.clock.wallAt(dayOpenHour, 0).Add(s.clock.simDur(time.Duration(m) * time.Minute))
-		o.simAt = fmt.Sprintf("%02d:%02d", dayOpenHour+m/60, m%60)
-		s.orders = append(s.orders, o)
+// newOrder draws one customer order: its kind, its lines and its arrival
+// minute on the demand curve.
+func (s *sim) newOrder(i int, special map[int]orderKind, weighted []skuDef) *orderRec {
+	o := &orderRec{seq: i + 1, kind: kindStandard, releaseOnAlloc: true, pickedLines: map[int]bool{}}
+	if k, ok := special[i]; ok {
+		o.kind = k
 	}
-	sort.Slice(s.orders, func(i, j int) bool { return s.orders[i].arriveAt.Before(s.orders[j].arriveAt) })
+	nLines := 1
+	if x := s.rf(); x > 0.6 {
+		nLines = 2
+	}
+	if x := s.rf(); x > 0.9 {
+		nLines = 3
+	}
+	used := map[string]bool{}
+	for len(o.lines) < nLines {
+		sd := s.pickWeightedSKU(weighted)
+		if used[sd.key] {
+			continue
+		}
+		used[sd.key] = true
+		o.lines = append(o.lines, orderLinePlan{sku: sd.key, qty: 1 + s.ri(2), giftWrap: s.rf() < 0.08})
+	}
+	switch o.kind {
+	case kindBackorder:
+		o.lines = append(o.lines, orderLinePlan{sku: "CAMERA", qty: 2})
+	case kindHeldRelease, kindHeldCancel:
+		o.releaseOnAlloc = false
+	case kindPartialOK:
+		o.allowPartial = true
+	}
+	m := s.simMinuteOnCurve()
+	if o.kind == kindBackorder {
+		// A backorder only exists while CAMERA is out of stock: the
+		// 13:00 replenishment would let a later order allocate in full.
+		for m >= (replenishHour-dayOpenHour)*60-30 {
+			m = s.simMinuteOnCurve()
+		}
+	}
+	o.arriveAt = s.clock.wallAt(dayOpenHour, 0).Add(s.clock.simDur(time.Duration(m) * time.Minute))
+	o.simAt = fmt.Sprintf("%02d:%02d", dayOpenHour+m/60, m%60)
+	return o
 }
 
 type omLine struct {

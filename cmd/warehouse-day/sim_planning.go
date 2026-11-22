@@ -32,14 +32,7 @@ func (s *sim) planTheDay(ctx context.Context) error {
 			units += l.qty
 		}
 	}
-	var buckets []map[string]any
-	for i, t := range truckCutoffs {
-		share := []float64{0.35, 0.40, 0.25}[i]
-		buckets = append(buckets, map[string]any{
-			"cpt":      s.clock.wallAt(t.h, t.m).UTC().Truncate(time.Minute).Add(time.Minute).Format(time.RFC3339),
-			"quantity": int(float64(units) * share),
-		})
-	}
+	buckets := s.forecastBuckets(units)
 	heads := map[string]int{
 		"PICK": s.cfg.pickers + s.cfg.flex, "PACK": s.cfg.packers + s.cfg.flex,
 		"SLAM": s.cfg.slammers, "REBIN": s.cfg.rebinners,
@@ -68,6 +61,34 @@ func (s *sim) planTheDay(ctx context.Context) error {
 	}
 	s.proposeFromLabourPlan(ctx, site, shift, planned)
 
+	r = s.api.Call(ctx, svcWorkforce, http.MethodPost, "/shift-plans", "/shift-plans",
+		map[string]any{"buildingId": s.cfg.buildingID, "shiftId": shift, "lines": shiftPlanLines(heads)})
+	if !r.OK() {
+		// Not fatal for the floor (associates are assigned individually),
+		// but the supervisor loses the planned-vs-active staffing view.
+		s.finding("workforce-management rejected the shift plan: %d %s", r.Status, truncate(string(r.Body), 220))
+	} else {
+		s.shiftPlanned = true
+	}
+	logf("planner", "shift plan %s (committed=%v; PICK %d, PACK %d, SLAM %d, REBIN %d heads; labour plan PICK %d)", shift, s.shiftPlanned, heads["PICK"], heads["PACK"], heads["SLAM"], heads["REBIN"], planned)
+	return nil
+}
+
+// forecastBuckets splits the day's pick units across the truck cutoffs.
+func (s *sim) forecastBuckets(units int) []map[string]any {
+	var buckets []map[string]any
+	for i, t := range truckCutoffs {
+		share := []float64{0.35, 0.40, 0.25}[i]
+		buckets = append(buckets, map[string]any{
+			"cpt":      s.clock.wallAt(t.h, t.m).UTC().Truncate(time.Minute).Add(time.Minute).Format(time.RFC3339),
+			"quantity": int(float64(units) * share),
+		})
+	}
+	return buckets
+}
+
+// shiftPlanLines is the shift plan's staffing lines, one per staffed path.
+func shiftPlanLines(heads map[string]int) []map[string]any {
 	var lines []map[string]any
 	for _, p := range []string{"PICK", "PACK", "SLAM", "REBIN"} {
 		if heads[p] == 0 {
@@ -78,17 +99,7 @@ func (s *sim) planTheDay(ctx context.Context) error {
 			"plannedHours": float64(heads[p]) * plannedShiftHours, "installedStations": heads[p],
 		})
 	}
-	r = s.api.Call(ctx, svcWorkforce, http.MethodPost, "/shift-plans", "/shift-plans",
-		map[string]any{"buildingId": s.cfg.buildingID, "shiftId": shift, "lines": lines})
-	if !r.OK() {
-		// Not fatal for the floor (associates are assigned individually),
-		// but the supervisor loses the planned-vs-active staffing view.
-		s.finding("workforce-management rejected the shift plan: %d %s", r.Status, truncate(string(r.Body), 220))
-	} else {
-		s.shiftPlanned = true
-	}
-	logf("planner", "shift plan %s (committed=%v; PICK %d, PACK %d, SLAM %d, REBIN %d heads; labour plan PICK %d)", shift, s.shiftPlanned, heads["PICK"], heads["PACK"], heads["SLAM"], heads["REBIN"], planned)
-	return nil
+	return lines
 }
 
 // shiftStart is the wall instant the simulated 06:00 shift starts, the

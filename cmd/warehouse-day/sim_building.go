@@ -164,6 +164,15 @@ func (s *sim) workCentreCode(n int) string {
 }
 
 func (s *sim) mapBuilding(ctx context.Context, stations int) error {
+	if err := s.importLocations(ctx, stations); err != nil {
+		return err
+	}
+	return s.registerStorageBins(ctx)
+}
+
+// importLocations registers the simulated location types and imports the
+// building's storage and work-station rows in one facility-layout import.
+func (s *sim) importLocations(ctx context.Context, stations int) error {
 	for _, lt := range []map[string]any{
 		{"name": "SimShelf", "role": "Storage", "defaultCapacity": map[string]any{"maxWeightKg": 250, "maxVolumeM3": 1.2}},
 		{"name": "SimWorkStation", "role": "WorkCenter"},
@@ -173,25 +182,7 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 			return fail("register location type %v -> %d %s", lt["name"], r.Status, truncate(string(r.Body), 200))
 		}
 	}
-	var rows []map[string]any
-	for a := 1; a <= storageAisles; a++ {
-		for b := 1; b <= storageBays; b++ {
-			rows = append(rows, map[string]any{
-				"siteCode": s.cfg.siteCode, "siteName": "Simulated FC", "areaCode": "STOR", "zoneCode": "AMB",
-				"temperatureClass": "Ambient", "hazmat": false, "aisleCode": fmt.Sprintf("A%02d", a), "sequenceHint": a,
-				"direction": "TwoWay", "bay": fmt.Sprintf("%02d", b), "level": "01", "position": "A", "locationType": "SimShelf",
-			})
-		}
-	}
-	for n := 1; n <= stations; n++ {
-		rows = append(rows, map[string]any{
-			"siteCode": s.cfg.siteCode, "siteName": "Simulated FC", "areaCode": "OPS", "zoneCode": "WC",
-			"temperatureClass": "Ambient", "hazmat": false, "aisleCode": "W01", "sequenceHint": 1,
-			"direction": "TwoWay", "bay": fmt.Sprintf("%02d", n), "level": "01", "position": "A", "locationType": "SimWorkStation",
-			"activities": []string{"Pack"},
-		})
-	}
-	r := s.api.Call(ctx, svcFacility, http.MethodPost, "/location-imports", "/location-imports", rows)
+	r := s.api.Call(ctx, svcFacility, http.MethodPost, "/location-imports", "/location-imports", s.locationRows(stations))
 	if !r.OK() {
 		return fail("POST /location-imports -> %d %s", r.Status, truncate(string(r.Body), 300))
 	}
@@ -219,7 +210,36 @@ func (s *sim) mapBuilding(ctx context.Context, stations int) error {
 	}
 	s.slotsImported = rep.SlotsImported
 	logf("facilities", "building map: %d slots imported, %d already on the map (site %s)", rep.SlotsImported, reused, s.cfg.siteCode)
+	return nil
+}
 
+// locationRows builds the location-import rows: the storage aisles first, then
+// the work stations.
+func (s *sim) locationRows(stations int) []map[string]any {
+	var rows []map[string]any
+	for a := 1; a <= storageAisles; a++ {
+		for b := 1; b <= storageBays; b++ {
+			rows = append(rows, map[string]any{
+				"siteCode": s.cfg.siteCode, "siteName": "Simulated FC", "areaCode": "STOR", "zoneCode": "AMB",
+				"temperatureClass": "Ambient", "hazmat": false, "aisleCode": fmt.Sprintf("A%02d", a), "sequenceHint": a,
+				"direction": "TwoWay", "bay": fmt.Sprintf("%02d", b), "level": "01", "position": "A", "locationType": "SimShelf",
+			})
+		}
+	}
+	for n := 1; n <= stations; n++ {
+		rows = append(rows, map[string]any{
+			"siteCode": s.cfg.siteCode, "siteName": "Simulated FC", "areaCode": "OPS", "zoneCode": "WC",
+			"temperatureClass": "Ambient", "hazmat": false, "aisleCode": "W01", "sequenceHint": 1,
+			"direction": "TwoWay", "bay": fmt.Sprintf("%02d", n), "level": "01", "position": "A", "locationType": "SimWorkStation",
+			"activities": []string{"Pack"},
+		})
+	}
+	return rows
+}
+
+// registerStorageBins PUTs every storage bin into inventory-storage and records
+// the pick bins and the overflow bin.
+func (s *sim) registerStorageBins(ctx context.Context) error {
 	for a := 1; a <= storageAisles; a++ {
 		for b := 1; b <= storageBays; b++ {
 			code := s.storageCode(a, b)
