@@ -207,31 +207,48 @@ func treeIndex(t CategoryTree) map[string]Category {
 // BuildPlan is the PURE, deterministic diff of the desired against the observed state.
 func BuildPlan(d Desired, o Observed) *Plan {
 	p := &Plan{}
-	cur := d.Currency
+	planWMS(p, &d, &o)
+	planPricing(p, &d, &o)
+	idx := planCategories(p, &d, &o)
+	byID := map[string]Category{}
+	for _, c := range o.Tree.Categories {
+		byID[c.CategoryID] = c
+	}
+	planProducts(p, &d, &o, idx, byID)
+	sort.Strings(p.Blocked)
+	return p
+}
 
-	// WMS: the fulfilment site's CPT schedule, compared by timezone and cutoffs (order-insensitive)
+// planWMS diffs the fulfilment site's CPT schedule and the warehouse building's
+// copy of it (compared by timezone and cutoffs, order-insensitive).
+func planWMS(p *Plan, d *Desired, o *Observed) {
 	if d.Site != nil {
 		planCPT(p, d.Site, o.CPT)
 		planBuildingCPT(p, d.Site, o.Building)
 	}
-	// tax table: compared as a set of bands
+}
+
+// planPricing diffs the tax table (as a set of bands) and the delivery charge
+// schedule (as a set keyed by tier).
+func planPricing(p *Plan, d *Desired, o *Observed) {
 	if o.Tax != nil {
 		p.TaxCurrent = o.Tax.Version
 	}
 	if o.Tax == nil || !sameBands(o.Tax.Bands, d.TaxBands) {
 		p.TaxTable = &TaxTable{Version: p.TaxCurrent + 1, Bands: sortedBands(d.TaxBands)}
 	}
-
-	// delivery charge schedule: compared as a set keyed by tier
-	want := desiredTiers(d.Charges, cur)
+	want := desiredTiers(d.Charges, d.Currency)
 	if o.Charges != nil {
 		p.ChargesCurrent = o.Charges.Version
 	}
 	if o.Charges == nil || !sameTiers(o.Charges.Tiers, want) {
 		p.ChargeSchedule = &ChargeSchedule{Version: p.ChargesCurrent + 1, Tiers: want}
 	}
+}
 
-	// categories by path
+// planCategories diffs the desired category tree against the observed one and
+// returns the observed tree's path index.
+func planCategories(p *Plan, d *Desired, o *Observed) map[string]Category {
 	idx := treeIndex(o.Tree)
 	for _, c := range d.Categories {
 		if _, ok := idx[strings.ToLower(c.Path)]; ok {
@@ -240,52 +257,58 @@ func BuildPlan(d Desired, o Observed) *Plan {
 		}
 		p.Categories = append(p.Categories, c)
 	}
+	return idx
+}
 
-	byID := map[string]Category{}
-	for _, c := range o.Tree.Categories {
-		byID[c.CategoryID] = c
-	}
+// planProducts diffs every product's price and content.
+func planProducts(p *Plan, d *Desired, o *Observed, idx map[string]Category, byID map[string]Category) {
 	for _, dp := range d.Products {
-		// price
-		switch ip := o.Prices[dp.CatalogItemID]; {
-		case ip == nil:
-			p.Prices = append(p.Prices, PriceAction{SKU: dp.SKU, CatalogItemID: dp.CatalogItemID, Create: true, AmountMinor: dp.ListPriceMinor})
-			p.PricesToCreate++
-		case ip.State == "WITHDRAWN":
-			p.PricesWithdrawn++
-			p.Blocked = append(p.Blocked, fmt.Sprintf("%s (%s): price is WITHDRAWN; pricing has no transition back to ACTIVE, so the item cannot be sold (left alone)", dp.SKU, dp.CatalogItemID))
-		case ip.ListPrice.AmountMinor == dp.ListPriceMinor && ip.ListPrice.Currency == cur:
-			p.PricesUnchanged++
-		default:
-			p.Prices = append(p.Prices, PriceAction{SKU: dp.SKU, CatalogItemID: dp.CatalogItemID, AmountMinor: dp.ListPriceMinor, Version: ip.Version})
-			p.PricesToChange++
+		planPrice(p, dp, o.Prices[dp.CatalogItemID], d.Currency)
+		if a, ok := planContent(p, dp, o.Contents[dp.CatalogItemID], idx, byID); ok {
+			p.Contents = append(p.Contents, a)
 		}
-
-		// content
-		pc := o.Contents[dp.CatalogItemID]
-		a := ContentAction{SKU: dp.SKU, CatalogItemID: dp.CatalogItemID, Body: dp.Body, CategoryPath: dp.CategoryPath}
-		switch {
-		case pc == nil:
-			a.Create, a.Publish = true, true
-			p.ContentsToCreate++
-		case pc.State == "RETIRED":
-			p.ContentsRetired++
-			p.Blocked = append(p.Blocked, fmt.Sprintf("%s (%s): content is RETIRED; retired content never changes again, so the item cannot be published (left alone)", dp.SKU, dp.CatalogItemID))
-			continue
-		case !sameContent(pc, dp, idx, byID):
-			a.Revise, a.FromRevision, a.Publish = true, pc.Revision, true
-			p.ContentsToRevise++
-		case pc.State != "PUBLISHED" || pc.Revision != pc.PublishedRevision:
-			a.Publish, a.FromRevision = true, pc.Revision
-			p.ContentsToPublish++
-		default:
-			p.ContentsUnchanged++
-			continue
-		}
-		p.Contents = append(p.Contents, a)
 	}
-	sort.Strings(p.Blocked)
-	return p
+}
+
+// planPrice diffs one product's item price.
+func planPrice(p *Plan, dp DesiredProduct, ip *ItemPrice, cur string) {
+	switch {
+	case ip == nil:
+		p.Prices = append(p.Prices, PriceAction{SKU: dp.SKU, CatalogItemID: dp.CatalogItemID, Create: true, AmountMinor: dp.ListPriceMinor})
+		p.PricesToCreate++
+	case ip.State == "WITHDRAWN":
+		p.PricesWithdrawn++
+		p.Blocked = append(p.Blocked, fmt.Sprintf("%s (%s): price is WITHDRAWN; pricing has no transition back to ACTIVE, so the item cannot be sold (left alone)", dp.SKU, dp.CatalogItemID))
+	case ip.ListPrice.AmountMinor == dp.ListPriceMinor && ip.ListPrice.Currency == cur:
+		p.PricesUnchanged++
+	default:
+		p.Prices = append(p.Prices, PriceAction{SKU: dp.SKU, CatalogItemID: dp.CatalogItemID, AmountMinor: dp.ListPriceMinor, Version: ip.Version})
+		p.PricesToChange++
+	}
+}
+
+// planContent diffs one product's content; ok is false when there is nothing to do.
+func planContent(p *Plan, dp DesiredProduct, pc *ProductContent, idx map[string]Category, byID map[string]Category) (a ContentAction, ok bool) {
+	a = ContentAction{SKU: dp.SKU, CatalogItemID: dp.CatalogItemID, Body: dp.Body, CategoryPath: dp.CategoryPath}
+	switch {
+	case pc == nil:
+		a.Create, a.Publish = true, true
+		p.ContentsToCreate++
+	case pc.State == "RETIRED":
+		p.ContentsRetired++
+		p.Blocked = append(p.Blocked, fmt.Sprintf("%s (%s): content is RETIRED; retired content never changes again, so the item cannot be published (left alone)", dp.SKU, dp.CatalogItemID))
+		return a, false
+	case !sameContent(pc, dp, idx, byID):
+		a.Revise, a.FromRevision, a.Publish = true, pc.Revision, true
+		p.ContentsToRevise++
+	case pc.State != "PUBLISHED" || pc.Revision != pc.PublishedRevision:
+		a.Publish, a.FromRevision = true, pc.Revision
+		p.ContentsToPublish++
+	default:
+		p.ContentsUnchanged++
+		return a, false
+	}
+	return a, true
 }
 
 func sortedBands(bs []TaxBand) []TaxBand {

@@ -128,6 +128,24 @@ func LoadNetworkTitles(path string) (map[string]string, error) {
 func (f *Fixture) Validate(phys map[string]PhysicalProduct, titles map[string]string) []string {
 	var problems []string
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	f.validatePricing(add)
+	depts := f.validateDepartments(add)
+	used := f.validateProducts(add, phys, titles, depts)
+	for _, d := range f.Departments {
+		if !used[d.Slug] {
+			add("department %s has no product (an empty department never shows up in search)", d.Slug)
+		}
+	}
+	if len(f.Products) == 0 {
+		add("no products")
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// validatePricing checks the currency, the tax bands and the delivery charges
+// (pricing's closed tier enum) of the fixture.
+func (f *Fixture) validatePricing(add func(string, ...any)) {
 	if f.Currency != "USD" {
 		add("currency %q: the cluster prices in USD (helm-values/pricing.yaml PRICING_CURRENCY)", f.Currency)
 	}
@@ -160,6 +178,11 @@ func (f *Fixture) Validate(phys map[string]PhysicalProduct, titles map[string]st
 	if len(f.DeliverablePostalPrefixes) == 0 {
 		add("no deliverable postal prefixes")
 	}
+}
+
+// validateDepartments checks every department's slug and name and returns the
+// declared departments by slug.
+func (f *Fixture) validateDepartments(add func(string, ...any)) map[string]bool {
 	depts := map[string]bool{}
 	names := map[string]bool{}
 	for _, d := range f.Departments {
@@ -172,6 +195,12 @@ func (f *Fixture) Validate(phys map[string]PhysicalProduct, titles map[string]st
 		depts[d.Slug] = true
 		names[strings.ToLower(d.Name)] = true
 	}
+	return depts
+}
+
+// validateProducts checks every product against the fixture's own departments
+// and the real product data, and returns which departments the products use.
+func (f *Fixture) validateProducts(add func(string, ...any), phys map[string]PhysicalProduct, titles map[string]string, depts map[string]bool) map[string]bool {
 	seen := map[string]bool{}
 	used := map[string]bool{}
 	for _, p := range f.Products {
@@ -200,16 +229,7 @@ func (f *Fixture) Validate(phys map[string]PhysicalProduct, titles map[string]st
 			add("product %s has no catalogue title in the retail-network data file", p.SKU)
 		}
 	}
-	for _, d := range f.Departments {
-		if !used[d.Slug] {
-			add("department %s has no product (an empty department never shows up in search)", d.Slug)
-		}
-	}
-	if len(f.Products) == 0 {
-		add("no products")
-	}
-	sort.Strings(problems)
-	return problems
+	return used
 }
 
 func validSlug(s string) bool {

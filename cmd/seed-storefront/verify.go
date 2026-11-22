@@ -85,16 +85,54 @@ func orNone(s []string) string {
 func verify(ctx context.Context, c *client, d *Desired, fx *Fixture, tree CategoryTree, cfg Config) *VerifyReport {
 	rep := &VerifyReport{Products: len(d.Products), QuotePrefix: cfg.QuotePrefix}
 	start := time.Now()
-	timeout, interval := cfg.VerifyTimeout, cfg.VerifyInterval
+	interval := cfg.VerifyInterval
 	if interval <= 0 {
 		interval = time.Second
 	}
-	pending := map[string]DesiredProduct{}
+	pending, last, lastErr := awaitPurchasable(ctx, c, d, start.Add(cfg.VerifyTimeout), interval)
+	rep.Elapsed = time.Since(start)
+	rep.Purchasable = len(d.Products) - len(pending)
+	for _, p := range d.Products {
+		if _, ok := pending[p.CatalogItemID]; !ok {
+			continue
+		}
+		v, seen := last[p.CatalogItemID]
+		rep.NotPurchasable = append(rep.NotPurchasable, fmt.Sprintf("%s %q (%s): %s", p.SKU, p.Title, p.CatalogItemID, whyNotPurchasable(v, seen, lastErr[p.CatalogItemID])))
+	}
+	if len(pending) > 0 {
+		rep.Failures = append(rep.Failures, fmt.Sprintf("%d products not purchasable within %s", len(pending), cfg.VerifyTimeout))
+	}
+
+	// one delivery quote through the BFF, for the first fixture product
+	if len(d.Products) > 0 {
+		rep.QuoteSKU = d.Products[0].SKU
+		tiers, failure := quoteDelivery(ctx, c, cfg, d.Products[0])
+		rep.QuoteTiers = tiers
+		if failure != "" {
+			rep.Failures = append(rep.Failures, failure)
+		}
+	}
+
+	hits, searchFailures := verifyDepartments(ctx, c, fx, tree)
+	rep.DepartmentHits = hits
+	rep.Failures = append(rep.Failures, searchFailures...)
+
+	if w := checkDepartmentImage(ctx, c, cfg, fx); w != "" {
+		rep.Warnings = append(rep.Warnings, w)
+	}
+	return rep
+}
+
+// awaitPurchasable polls product-discovery until every desired product is
+// purchasable, the deadline lapses or the context ends. It returns the products
+// still pending and, per catalogue item, the last view (and last error) seen.
+func awaitPurchasable(ctx context.Context, c *client, d *Desired, deadline time.Time, interval time.Duration) (pending map[string]DesiredProduct, last map[string]ProductView, lastErr map[string]error) {
+	pending = map[string]DesiredProduct{}
 	for _, p := range d.Products {
 		pending[p.CatalogItemID] = p
 	}
-	last := map[string]ProductView{}
-	lastErr := map[string]error{}
+	last = map[string]ProductView{}
+	lastErr = map[string]error{}
 	for {
 		ids := make([]string, 0, len(pending))
 		for id := range pending {
@@ -112,72 +150,63 @@ func verify(ctx context.Context, c *client, d *Desired, fx *Fixture, tree Catego
 				}
 			}
 		}
-		if len(pending) == 0 || time.Since(start) >= timeout || ctx.Err() != nil {
-			break
+		if len(pending) == 0 || !time.Now().Before(deadline) || ctx.Err() != nil {
+			return pending, last, lastErr
 		}
 		select {
 		case <-ctx.Done():
 		case <-time.After(interval):
 		}
 	}
-	rep.Elapsed = time.Since(start)
-	rep.Purchasable = len(d.Products) - len(pending)
-	for _, p := range d.Products {
-		if _, ok := pending[p.CatalogItemID]; !ok {
-			continue
-		}
-		v, seen := last[p.CatalogItemID]
-		why := ""
-		switch {
-		case !seen:
-			why = fmt.Sprintf("not in product-discovery (%v)", lastErr[p.CatalogItemID])
-		default:
-			var miss []string
-			if !v.InStock {
-				miss = append(miss, "out of stock (WMS usable stock -> network-fulfillment ACL, capped by the CPT schedule's pre-cutoff capacity -> listing feed)")
-			}
-			if v.EffectivePrice == nil {
-				miss = append(miss, "no ACTIVE price")
-			}
-			if v.Description == "" || v.CategoryID == "" {
-				miss = append(miss, "no PUBLISHED content")
-			}
-			if len(miss) == 0 {
-				miss = append(miss, "purchasable=false")
-			}
-			why = strings.Join(miss, ", ")
-		}
-		rep.NotPurchasable = append(rep.NotPurchasable, fmt.Sprintf("%s %q (%s): %s", p.SKU, p.Title, p.CatalogItemID, why))
-	}
-	if len(pending) > 0 {
-		rep.Failures = append(rep.Failures, fmt.Sprintf("%d products not purchasable within %s", len(pending), timeout))
-	}
+}
 
-	// one delivery quote through the BFF, for the first fixture product
-	if len(d.Products) > 0 {
-		p := d.Products[0]
-		rep.QuoteSKU = p.SKU
-		var dates struct {
-			Tiers []struct {
-				Tier string `json:"tier"`
-			} `json:"tiers"`
-			Unavailable []map[string]any `json:"unavailable"`
-		}
-		body := map[string]string{"postalPrefix": cfg.QuotePrefix}
-		u := c.sf + "/products/" + url.PathEscape(p.CatalogItemID) + "/delivery-date-quotes"
-		if _, err := c.do(ctx, http.MethodPost, u, body, fmt.Sprintf("seed-sf-verify-%d", time.Now().UnixNano()), &dates, http.StatusOK); err != nil {
-			rep.Failures = append(rep.Failures, fmt.Sprintf("delivery quote: %v", err))
-		} else {
-			for _, t := range dates.Tiers {
-				rep.QuoteTiers = append(rep.QuoteTiers, t.Tier)
-			}
-			if len(rep.QuoteTiers) == 0 {
-				rep.Failures = append(rep.Failures, fmt.Sprintf("delivery quote for prefix %s returned no tier (unavailable: %v)", cfg.QuotePrefix, dates.Unavailable))
-			}
-		}
+// whyNotPurchasable explains one product that never became purchasable.
+func whyNotPurchasable(v ProductView, seen bool, err error) string {
+	if !seen {
+		return fmt.Sprintf("not in product-discovery (%v)", err)
 	}
+	var miss []string
+	if !v.InStock {
+		miss = append(miss, "out of stock (WMS usable stock -> network-fulfillment ACL, capped by the CPT schedule's pre-cutoff capacity -> listing feed)")
+	}
+	if v.EffectivePrice == nil {
+		miss = append(miss, "no ACTIVE price")
+	}
+	if v.Description == "" || v.CategoryID == "" {
+		miss = append(miss, "no PUBLISHED content")
+	}
+	if len(miss) == 0 {
+		miss = append(miss, "purchasable=false")
+	}
+	return strings.Join(miss, ", ")
+}
 
-	// BFF search: at least one hit of every department
+// quoteDelivery asks the BFF for one delivery date quote and returns its tiers,
+// or the failure line instead ("" when the quote answered with at least one tier).
+func quoteDelivery(ctx context.Context, c *client, cfg Config, p DesiredProduct) (tiers []string, failure string) {
+	var dates struct {
+		Tiers []struct {
+			Tier string `json:"tier"`
+		} `json:"tiers"`
+		Unavailable []map[string]any `json:"unavailable"`
+	}
+	body := map[string]string{"postalPrefix": cfg.QuotePrefix}
+	u := c.sf + "/products/" + url.PathEscape(p.CatalogItemID) + "/delivery-date-quotes"
+	if _, err := c.do(ctx, http.MethodPost, u, body, fmt.Sprintf("seed-sf-verify-%d", time.Now().UnixNano()), &dates, http.StatusOK); err != nil {
+		return nil, fmt.Sprintf("delivery quote: %v", err)
+	}
+	for _, t := range dates.Tiers {
+		tiers = append(tiers, t.Tier)
+	}
+	if len(tiers) == 0 {
+		return tiers, fmt.Sprintf("delivery quote for prefix %s returned no tier (unavailable: %v)", cfg.QuotePrefix, dates.Unavailable)
+	}
+	return tiers, ""
+}
+
+// verifyDepartments searches the BFF for every department; it returns the hit
+// lines ("<department> <n>") and the failures.
+func verifyDepartments(ctx context.Context, c *client, fx *Fixture, tree CategoryTree) (hits []string, failures []string) {
 	idx := treeIndex(tree)
 	under := map[string]map[string]bool{} // department name -> category ids of its subtree
 	for _, cat := range tree.Categories {
@@ -191,27 +220,33 @@ func verify(ctx context.Context, c *client, d *Desired, fx *Fixture, tree Catego
 	for _, dept := range fx.Departments {
 		n, err := searchDepartment(ctx, c, dept.Name, idx, under[strings.ToLower(dept.Name)])
 		if err != nil {
-			rep.Failures = append(rep.Failures, fmt.Sprintf("search %q: %v", dept.Name, err))
+			failures = append(failures, fmt.Sprintf("search %q: %v", dept.Name, err))
 		} else if n == 0 {
-			rep.Failures = append(rep.Failures, fmt.Sprintf("search %q: no hit of the department", dept.Name))
+			failures = append(failures, fmt.Sprintf("search %q: no hit of the department", dept.Name))
 		}
-		rep.DepartmentHits = append(rep.DepartmentHits, fmt.Sprintf("%s %d", dept.Name, n))
+		hits = append(hits, fmt.Sprintf("%s %d", dept.Name, n))
 	}
+	return hits, failures
+}
 
-	// the department image is served by storefront-web; a missing one only breaks the picture
-	if len(fx.Departments) > 0 && cfg.MediaBase != "" {
-		u := strings.TrimRight(cfg.MediaBase, "/") + "/" + fx.Departments[0].Slug + ".svg"
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, bytes.NewReader(nil))
-		if resp, err := c.http.Do(req); err != nil {
-			rep.Warnings = append(rep.Warnings, fmt.Sprintf("department image %s: %v", u, err))
-		} else {
-			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				rep.Warnings = append(rep.Warnings, fmt.Sprintf("department image %s answers HTTP %d (storefront-web ships public/media/departments/*.svg; the product page shows no picture until it does)", u, resp.StatusCode))
-			}
-		}
+// checkDepartmentImage fetches the first department's storefront-web image; a
+// missing one only breaks the picture, so it warns ("" when there is nothing to
+// check).
+func checkDepartmentImage(ctx context.Context, c *client, cfg Config, fx *Fixture) string {
+	if len(fx.Departments) == 0 || cfg.MediaBase == "" {
+		return ""
 	}
-	return rep
+	u := strings.TrimRight(cfg.MediaBase, "/") + "/" + fx.Departments[0].Slug + ".svg"
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, bytes.NewReader(nil))
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Sprintf("department image %s: %v", u, err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("department image %s answers HTTP %d (storefront-web ships public/media/departments/*.svg; the product page shows no picture until it does)", u, resp.StatusCode)
+	}
+	return ""
 }
 
 // searchDepartment counts the BFF search hits of a department: first a full-text query for the
