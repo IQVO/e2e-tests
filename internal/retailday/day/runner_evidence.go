@@ -83,6 +83,17 @@ func (s *run) judge(j *journey) {
 
 func (s *run) audit() (string, string) {
 	skus := s.plan.ShelfSKUs()
+	stock := s.auditShelf(skus)
+	dead := s.auditDeadLetters()
+	serverErrors := s.auditCallStats()
+	s.estate = append(s.estate, retailday.AuditEstate(stock, dead, serverErrors, 0)...)
+	return PhaseOK, fmt.Sprintf("%d SKU(s) accounted, %d dead letter(s), %d 5xx", len(stock), dead, serverErrors)
+}
+
+// auditShelf reads the shelf after the day and accounts every SKU: what the
+// day shipped, what the restock brought back, and whether the shelf still
+// holds what it started with. It returns the estate audit's stock facts.
+func (s *run) auditShelf(skus []string) []retailday.StockFacts {
 	var after map[string]retailday.Shelf
 	var stock []retailday.StockFacts
 	shelfErr := guard("evidence", func() (e error) { after, e = s.r.Evidence.Shelf(s.ctx, skus); return })
@@ -119,8 +130,12 @@ func (s *run) audit() (string, string) {
 		stock = append(stock, retailday.StockFacts{SKU: sku, UsableBefore: b.Usable, UsableAfter: sh.Usable, Shipped: shipped[sku], Restocked: s.restocked[sku], AdvertisedNow: -1, Purchasable: sh.Purchasable})
 		s.rep.Stock = append(s.rep.Stock, StockRow{SKU: sku, Before: b.Usable, After: sh.Usable, Shipped: shipped[sku], Restocked: s.restocked[sku], Purchasable: sh.Purchasable})
 	}
+	return stock
+}
 
-	dead := 0
+// auditDeadLetters counts the run's dead letters off the Kafka DLQ topics; a
+// count that cannot be made is recorded as unverified, never as none.
+func (s *run) auditDeadLetters() (dead int) {
 	var n int
 	var known bool
 	dlqErr := guard("evidence", func() (e error) { n, known, e = s.r.Evidence.DeadLetters(s.ctx, s.cfg.Plan.RunID); return })
@@ -132,7 +147,12 @@ func (s *run) audit() (string, string) {
 	default:
 		dead = n
 	}
+	return dead
+}
 
+// auditCallStats folds the HTTP call statistics into the report and returns
+// the day's 5xx and transport-error count.
+func (s *run) auditCallStats() int {
 	serverErrors := 0
 	if s.r.Calls == nil {
 		s.unverified("http/5xx-unverified", "call statistics are not wired: 5xx and transport errors were not counted")
@@ -148,8 +168,7 @@ func (s *run) audit() (string, string) {
 			s.rep.NotVerified = append(s.rep.NotVerified, fmt.Sprintf("5xx: the host was suspended %d time(s); the call statistics keep no timestamps, so no 5xx can be attributed to a suspension and every one counts", k))
 		}
 	}
-	s.estate = append(s.estate, retailday.AuditEstate(stock, dead, serverErrors, 0)...)
-	return PhaseOK, fmt.Sprintf("%d SKU(s) accounted, %d dead letter(s), %d 5xx", len(stock), dead, serverErrors)
+	return serverErrors
 }
 
 // unverified records something the day could not establish: a NOT VERIFIED line and a finding

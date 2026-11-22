@@ -115,33 +115,15 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 	prefixes := &orderPrefixes{}
 	nodes := &nodeBook{c: cfg.Client, vendorID: cfg.VendorID, networkSite: cfg.NetworkSite, prefixes: prefixes}
 	fl := floor.New(cfg.Client, nil, cfg.ActorLog, cfg.RunID, floorSettings(cfg))
-	tr := transport.New(cfg.Client, transport.SystemClock{}, cfg.ActorLog, transport.Settings{})
-	var point *pointJourney
-	releaseTap := func() {}
-	if cfg.DeliveryPoint {
-		point = newPointJourney(cfg.Log)
-		switch {
-		case cfg.FlagTap != nil:
-			tr.Tap = cfg.FlagTap
-		case cfg.Brokers != "":
-			tap, rel, err := newFlagTap(cfg.Brokers)
-			if err != nil {
-				return day.Phases{}, nil, fmt.Errorf("-delivery-point: -brokers: %w", err)
-			}
-			tr.Tap, releaseTap = tap, rel
-		default:
-			cfg.logf("delivery point: no -brokers, so the DeliveryPointFlagged event is not read; the flag is observed on the order's tracking view only")
-		}
+	tr, point, releaseTap, err := wireTransport(cfg)
+	if err != nil {
+		return day.Phases{}, nil, err
 	}
 	lk := link.New(cfg.Client, linkSettings(cfg))
-	dead, releaseDead := cfg.DeadLetters, func() {}
-	if dead == nil {
-		if dead, releaseDead, err = newDeadLetterCounter(cfg.Brokers); err != nil {
-			return day.Phases{}, nil, fmt.Errorf("-brokers: %w", err)
-		}
+	ev, dead, releaseDead, err := wireEvidence(cfg, dict, lk)
+	if err != nil {
+		return day.Phases{}, nil, err
 	}
-	// the REST collector answers Order and Shelf; the counter answers DeadLetters (no route lists them)
-	ev := evidence{rest: collect.New(cfg.Client, collectSettings(cfg, dict, lk.ForPurchaseOrders)), dead: dead}
 
 	watch := &sim.SuspendWatch{Log: cfg.ActorLog}
 	wctx, stopWatch := context.WithCancel(ctx)
@@ -170,6 +152,44 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 		Prepare: b.prepare,
 		Cleanup: b.cleanup,
 	}, stop, nil
+}
+
+// wireTransport builds the transport actor set, wiring the delivery-point flag
+// tap when the run asks for that chain. The returned func releases the tap.
+func wireTransport(cfg wireConfig) (*transport.Transport, *pointJourney, func(), error) {
+	tr := transport.New(cfg.Client, transport.SystemClock{}, cfg.ActorLog, transport.Settings{})
+	releaseTap := func() {}
+	if !cfg.DeliveryPoint {
+		return tr, nil, releaseTap, nil
+	}
+	point := newPointJourney(cfg.Log)
+	switch {
+	case cfg.FlagTap != nil:
+		tr.Tap = cfg.FlagTap
+	case cfg.Brokers != "":
+		tap, rel, err := newFlagTap(cfg.Brokers)
+		if err != nil {
+			return nil, point, releaseTap, fmt.Errorf("-delivery-point: -brokers: %w", err)
+		}
+		tr.Tap, releaseTap = tap, rel
+	default:
+		cfg.logf("delivery point: no -brokers, so the DeliveryPointFlagged event is not read; the flag is observed on the order's tracking view only")
+	}
+	return tr, point, releaseTap, nil
+}
+
+// wireEvidence builds the day's evidence: the REST collector answers Order and
+// Shelf, the dead-letter counter answers DeadLetters (no route lists them).
+// The returned func releases the counter.
+func wireEvidence(cfg wireConfig, dict dictionary, lk *link.Linker) (evidence, deadLetterCounter, func(), error) {
+	dead, releaseDead := cfg.DeadLetters, func() {}
+	if dead == nil {
+		var err error
+		if dead, releaseDead, err = newDeadLetterCounter(cfg.Brokers); err != nil {
+			return evidence{}, dead, releaseDead, fmt.Errorf("-brokers: %w", err)
+		}
+	}
+	return evidence{rest: collect.New(cfg.Client, collectSettings(cfg, dict, lk.ForPurchaseOrders)), dead: dead}, dead, releaseDead, nil
 }
 
 // floorSettings: the floor works for the storefront's building (an order that reaches it without that
