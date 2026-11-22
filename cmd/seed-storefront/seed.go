@@ -49,13 +49,7 @@ const errNetworkFirst = "run the retail-network seed first (warehouse-infra: pyt
 
 // Run executes CHECK -> PLAN -> APPLY -> VERIFY. Nothing is written before CHECK and PLAN passed.
 func Run(ctx context.Context, cfg Config) (*Result, error) {
-	out := cfg.Out
-	if out == nil {
-		out = os.Stdout
-	}
-	logf := func(format string, args ...any) { fmt.Fprintf(out, format+"\n", args...) }
-	readOnly := cfg.DryRun || cfg.VerifyOnly
-	c := newClient(cfg.BaseURL, cfg.StorefrontURL, cfg.HTTP, readOnly)
+	c, logf := newRun(cfg)
 	res := &Result{}
 
 	// ---- CHECK: inputs ----
@@ -108,6 +102,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return res, err
 	}
 	return res, nil
+}
+
+// newRun builds a run's client (read-only in a dry run or a verify-only run)
+// and its line logger.
+func newRun(cfg Config) (*client, func(string, ...any)) {
+	out := cfg.Out
+	if out == nil {
+		out = os.Stdout
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(out, format+"\n", args...) }
+	return newClient(cfg.BaseURL, cfg.StorefrontURL, cfg.HTTP, cfg.DryRun || cfg.VerifyOnly), logf
 }
 
 // checkInputs loads the three data inputs and cross-validates the fixture
