@@ -59,26 +59,7 @@ func main() {
 	inv := &invClient{base: strings.TrimRight(*invURL, "/"), http: hc}
 
 	// 1. CHECK
-	products, skipped, err := loadProducts(ctx, pm)
-	if err != nil {
-		log.Fatalf("check: %v", err)
-	}
-	var codes []string
-	for _, c := range strings.Split(*sitesCSV, ",") {
-		if c = strings.TrimSpace(c); c != "" {
-			codes = append(codes, c)
-		}
-	}
-	sites, err := loadSites(ctx, fl, codes)
-	if err != nil {
-		log.Fatalf("check: %v", err)
-	}
-	bins := 0
-	for _, s := range sites {
-		bins += len(s.Bins)
-	}
-	log.Printf("check: %d registered products stockable (%d skipped: no dimensions and not a grocery); %d pilot sites, %d storage bins",
-		len(products), len(skipped), len(sites), bins)
+	products, sites := checkStage(ctx, pm, fl, *sitesCSV)
 
 	// 2. PLAN
 	plan := BuildPlan(products, sites, Options{Fill: *fill})
@@ -95,9 +76,56 @@ func main() {
 	if err := health(ctx, inv); err != nil {
 		log.Fatalf("inventory-storage at %s is not ready: %v", inv.base, err)
 	}
+	stockPhase(ctx, inv, plan, *workers)
+	if *doVerify {
+		verifyPhase(ctx, inv, plan, *workers, *sample)
+	}
+}
+
+// checkStage is the CHECK step: every product registered in product-master
+// and every Active storage slot of the pilot sites in facility-layout. It
+// exits the process on a read that fails.
+func checkStage(ctx context.Context, pm, fl *reader, sitesCSV string) ([]Product, []Site) {
+	products, skipped, err := loadProducts(ctx, pm)
+	if err != nil {
+		log.Fatalf("check: %v", err)
+	}
+	var codes []string
+	for _, c := range strings.Split(sitesCSV, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			codes = append(codes, c)
+		}
+	}
+	sites, err := loadSites(ctx, fl, codes)
+	if err != nil {
+		log.Fatalf("check: %v", err)
+	}
+	bins := 0
+	for _, s := range sites {
+		bins += len(s.Bins)
+	}
+	log.Printf("check: %d registered products stockable (%d skipped: no dimensions and not a grocery); %d pilot sites, %d storage bins",
+		len(products), len(skipped), len(sites), bins)
+	return products, sites
+}
+
+// printCapped prints the first 20 lines under mark, then the count of the rest.
+func printCapped(lines []string, mark string) {
+	for i, l := range lines {
+		if i == 20 {
+			log.Printf("  ... and %d more", len(lines)-20)
+			break
+		}
+		log.Printf("  %s %s", mark, l)
+	}
+}
+
+// stockPhase stocks the planned bins with a bounded worker pool and fails on
+// any bin that could not be stocked.
+func stockPhase(ctx context.Context, inv *invClient, plan *Plan, workers int) {
 	start := time.Now()
 	step := len(plan.Bins) / 10
-	rep := inv.stock(ctx, plan.Bins, *workers, func(done int) {
+	rep := inv.stock(ctx, plan.Bins, workers, func(done int) {
 		if step > 0 && done%step == 0 {
 			log.Printf("  %5d / %d bins", done, len(plan.Bins))
 		}
@@ -106,27 +134,17 @@ func main() {
 		time.Since(start).Round(time.Millisecond), rep.binsCreated.Load(), rep.binsResized.Load(), rep.binsAlreadyStocked.Load(),
 		rep.binsPartial.Load(), rep.lines.Load(), rep.units.Load())
 	if n := len(rep.failures); n > 0 {
-		for i, f := range rep.failures {
-			if i == 20 {
-				log.Printf("  ... and %d more", n-20)
-				break
-			}
-			log.Printf("  FAIL %s", f)
-		}
+		printCapped(rep.failures, "FAIL")
 		log.Fatalf("%d of %d bins failed", n, len(plan.Bins))
 	}
-	if !*doVerify {
-		return
-	}
-	problems, occupied := inv.verify(ctx, plan, *workers, *sample)
+}
+
+// verifyPhase reads every planned bin (and a sample of SKUs' usable stock)
+// back and fails on any mismatch.
+func verifyPhase(ctx context.Context, inv *invClient, plan *Plan, workers, sample int) {
+	problems, occupied := inv.verify(ctx, plan, workers, sample)
 	if len(problems) > 0 {
-		for i, p := range problems {
-			if i == 20 {
-				log.Printf("  ... and %d more", len(problems)-20)
-				break
-			}
-			log.Printf("  MISMATCH %s", p)
-		}
+		printCapped(problems, "MISMATCH")
 		log.Fatalf("verify: %d problems", len(problems))
 	}
 	log.Printf("verified: all %d planned bins hold their stock (%d units on hand across them, %d planned); usable inventory read back for a sample of SKUs",

@@ -178,85 +178,25 @@ func (f *Floor) shipLoad(ctx context.Context, loadID string, idx []int, pkgs []P
 	fail := func(err error) { each(func(s *Shipment) { s.problem("%v", err) }) }
 
 	// 2. stage
-	var staged []int
-	for _, i := range idx {
-		if _, err := f.Stage(ctx, pkgs[i]); err != nil {
-			out[i].problem("%v", err)
-			continue
-		}
-		staged = append(staged, i)
-	}
+	staged := f.stageAll(ctx, idx, pkgs, out)
 
 	// 3. the door
-	l, err := f.ReadLoad(ctx, loadID)
+	ap, l, err := f.doorOf(ctx, loadID)
 	if err != nil {
 		fail(err)
 		return
-	}
-	var ap Appointment
-	if l.DoorCode == "" {
-		if ap, err = f.BookDoor(ctx, l.CptID, f.NextWindow(2*time.Minute, time.Hour)); err != nil {
-			fail(err)
-			return
-		}
-		l, err = f.awaitLoad(ctx, loadID, fmt.Sprintf("outbound-shipping takes door %s of appointment %s for load %s", ap.Door, ap.ID, loadID), func(l Load) string {
-			if l.DoorCode != ap.Door || l.AppointmentID != ap.ID {
-				return fmt.Sprintf("the load has door %q from appointment %q (DockAppointmentBooked not consumed, or it came before the load)", l.DoorCode, l.AppointmentID)
-			}
-			return ""
-		})
-		if err != nil {
-			fail(err)
-			return
-		}
-	} else {
-		ap = Appointment{ID: l.AppointmentID, SiteID: l.SiteID, Door: l.DoorCode, CptID: l.CptID}
 	}
 	each(func(s *Shipment) { s.Door = ap.Door })
 
 	// 4. the trailer
-	var v Visit
-	switch {
-	case l.State == LoadPlanned:
-		v, err = f.GateIn(ctx, ap)
-		each(func(s *Shipment) { s.VisitID, s.TrailerID = v.ID, v.TrailerID })
-		if err != nil {
-			fail(err)
-			return
-		}
-		_, err = f.awaitLoad(ctx, loadID, fmt.Sprintf("load %s LOADING on trailer %s", loadID, v.TrailerID), func(l Load) string {
-			if l.State != LoadLoading || l.TrailerID != v.TrailerID {
-				return fmt.Sprintf("the load is %s on trailer %q (TrailerDocked not consumed, or no open load uses door %s)", l.State, l.TrailerID, ap.Door)
-			}
-			return ""
-		})
-	case l.State == LoadLoading && l.TrailerID != "":
-		v, err = f.visitOf(ctx, ap.Door, l.TrailerID, ap.ID)
-		each(func(s *Shipment) { s.VisitID, s.TrailerID = v.ID, v.TrailerID })
-	default:
-		err = fmt.Errorf("load %s is %s on trailer %q: it cannot be loaded and shipped from here", loadID, l.State, l.TrailerID)
-	}
+	v, err := f.trailerOf(ctx, loadID, ap, l, each)
 	if err != nil {
 		fail(err)
 		return
 	}
 
-	// 5. load
-	loaded := 0
-	for _, i := range staged {
-		if err := f.Load(ctx, pkgs[i], loadID, ap.Door); err != nil {
-			out[i].problem("%v", err)
-			continue
-		}
-		loaded++
-	}
-	if loaded != len(idx) {
-		fail(fmt.Errorf("load %s not closed and not departed: %d of %d packages were loaded", loadID, loaded, len(idx)))
-		return
-	}
-
-	// 6. close
-	if err := f.CloseLoad(ctx, loadID); err != nil {
+	// 5-6. load every staged package and close the load
+	if err := f.loadPackages(ctx, loadID, ap.Door, staged, idx, pkgs, out); err != nil {
 		fail(err)
 		return
 	}
@@ -283,4 +223,90 @@ func (f *Floor) shipLoad(ctx context.Context, loadID string, idx []int, pkgs []P
 		return
 	}
 	f.logf("floor", "load %s shipped on trailer %s sealed %s with %d package(s)", loadID, v.TrailerID, seal, len(idx))
+}
+
+// stageAll stages the load's packages and returns the package indexes staged.
+func (f *Floor) stageAll(ctx context.Context, idx []int, pkgs []Package, out []Shipment) []int {
+	var staged []int
+	for _, i := range idx {
+		if _, err := f.Stage(ctx, pkgs[i]); err != nil {
+			out[i].problem("%v", err)
+			continue
+		}
+		staged = append(staged, i)
+	}
+	return staged
+}
+
+// doorOf is the load's dock door: the appointment already naming the load, or
+// one booked for the load's cutoff and then awaited until outbound-shipping
+// gave the load that door (TrailerDocked is ignored by a load without a door).
+// It returns the appointment and the load as it stands after the door is set.
+func (f *Floor) doorOf(ctx context.Context, loadID string) (Appointment, Load, error) {
+	l, err := f.ReadLoad(ctx, loadID)
+	if err != nil {
+		return Appointment{}, l, err
+	}
+	if l.DoorCode != "" {
+		return Appointment{ID: l.AppointmentID, SiteID: l.SiteID, Door: l.DoorCode, CptID: l.CptID}, l, nil
+	}
+	ap, err := f.BookDoor(ctx, l.CptID, f.NextWindow(2*time.Minute, time.Hour))
+	if err != nil {
+		return ap, l, err
+	}
+	l, err = f.awaitLoad(ctx, loadID, fmt.Sprintf("outbound-shipping takes door %s of appointment %s for load %s", ap.Door, ap.ID, loadID), func(l Load) string {
+		if l.DoorCode != ap.Door || l.AppointmentID != ap.ID {
+			return fmt.Sprintf("the load has door %q from appointment %q (DockAppointmentBooked not consumed, or it came before the load)", l.DoorCode, l.AppointmentID)
+		}
+		return ""
+	})
+	if err != nil {
+		return ap, l, err
+	}
+	return Appointment{ID: l.AppointmentID, SiteID: l.SiteID, Door: l.DoorCode, CptID: l.CptID}, l, nil
+}
+
+// trailerOf is the load's trailer: the carrier checks in and the trailer docks
+// when the load is still planned (GateIn), or the existing visit of the trailer
+// already docked at the door. It waits until the load is LOADING on the trailer.
+func (f *Floor) trailerOf(ctx context.Context, loadID string, ap Appointment, l Load, each func(func(*Shipment))) (Visit, error) {
+	var v Visit
+	var err error
+	switch {
+	case l.State == LoadPlanned:
+		v, err = f.GateIn(ctx, ap)
+		each(func(s *Shipment) { s.VisitID, s.TrailerID = v.ID, v.TrailerID })
+		if err != nil {
+			return v, err
+		}
+		_, err = f.awaitLoad(ctx, loadID, fmt.Sprintf("load %s LOADING on trailer %s", loadID, v.TrailerID), func(l Load) string {
+			if l.State != LoadLoading || l.TrailerID != v.TrailerID {
+				return fmt.Sprintf("the load is %s on trailer %q (TrailerDocked not consumed, or no open load uses door %s)", l.State, l.TrailerID, ap.Door)
+			}
+			return ""
+		})
+	case l.State == LoadLoading && l.TrailerID != "":
+		v, err = f.visitOf(ctx, ap.Door, l.TrailerID, ap.ID)
+		each(func(s *Shipment) { s.VisitID, s.TrailerID = v.ID, v.TrailerID })
+	default:
+		err = fmt.Errorf("load %s is %s on trailer %q: it cannot be loaded and shipped from here", loadID, l.State, l.TrailerID)
+	}
+	return v, err
+}
+
+// loadPackages scans every staged package onto the load through its door and
+// closes the load; the load must end up holding every package of the run.
+func (f *Floor) loadPackages(ctx context.Context, loadID, door string, staged, idx []int, pkgs []Package, out []Shipment) error {
+	loaded := 0
+	for _, i := range staged {
+		if err := f.Load(ctx, pkgs[i], loadID, door); err != nil {
+			out[i].problem("%v", err)
+			continue
+		}
+		loaded++
+	}
+	if loaded != len(idx) {
+		return fmt.Errorf("load %s not closed and not departed: %d of %d packages were loaded", loadID, loaded, len(idx))
+	}
+	return f.CloseLoad(ctx, loadID)
 }

@@ -194,6 +194,46 @@ type LoadResult struct {
 // and the rest go on; any other refusal ends the run with an error. Whatever
 // was done is in the result either way.
 func (d *Dispatcher) Run(ctx context.Context, p Parcel) (LoadResult, error) {
+	res, err := d.openLoad(ctx, p)
+	if err != nil {
+		return res, err
+	}
+	for _, tn := range p.TrackingNumbers {
+		ld, err := d.AddPackage(ctx, res.Load.LoadID, tn)
+		if err != nil {
+			res.Problems = append(res.Problems, fmt.Sprintf("%s (package %s)", err, tn))
+			continue
+		}
+		res.Load = ld
+		res.Packed = append(res.Packed, tn)
+	}
+	if len(res.Packed) == 0 {
+		return res, fmt.Errorf("load %s: no package could be added", res.Load.LoadID)
+	}
+
+	if ld, err := d.CloseLoad(ctx, res.Load.LoadID); err != nil {
+		return res, err
+	} else {
+		res.Load = ld
+	}
+	ld, err := d.Dispatch(ctx, res.Load.LoadID)
+	if err != nil {
+		return res, err
+	}
+	res.Load = ld
+	res.DepartedAt = d.stamped(ld.DepartedAt, res.Packed)
+	d.logf("load %s dispatched at %s with %d packages", ld.LoadID, res.DepartedAt.Format(time.RFC3339), len(res.Packed))
+
+	if err := d.receiveLoad(ctx, &res); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// openLoad finds the earliest pickup departure that still has a free load and
+// opens it. A departure whose load already exists (another run took it) is
+// skipped, not failed.
+func (d *Dispatcher) openLoad(ctx context.Context, p Parcel) (LoadResult, error) {
 	var res LoadResult
 	if len(p.TrackingNumbers) == 0 {
 		return res, errors.New("linehaul: no tracking numbers to load")
@@ -223,39 +263,22 @@ func (d *Dispatcher) Run(ctx context.Context, p Parcel) (LoadResult, error) {
 	}
 	res.Load = ld
 	d.logf("load %s opened on departure %s (cutoff %s)", ld.LoadID, res.Departure.DepartureID, res.Departure.CutoffAt.Format(time.RFC3339))
+	return res, nil
+}
 
-	for _, tn := range p.TrackingNumbers {
-		if ld, err = d.AddPackage(ctx, res.Load.LoadID, tn); err != nil {
-			res.Problems = append(res.Problems, fmt.Sprintf("%s (package %s)", err, tn))
-			continue
-		}
-		res.Load = ld
-		res.Packed = append(res.Packed, tn)
-	}
-	if len(res.Packed) == 0 {
-		return res, fmt.Errorf("load %s: no package could be added", res.Load.LoadID)
-	}
-
-	if ld, err = d.CloseLoad(ctx, res.Load.LoadID); err != nil {
-		return res, err
-	}
-	res.Load = ld
-	if ld, err = d.Dispatch(ctx, res.Load.LoadID); err != nil {
-		return res, err
-	}
-	res.Load = ld
-	res.DepartedAt = d.stamped(ld.DepartedAt, res.Packed)
-	d.logf("load %s dispatched at %s with %d packages", ld.LoadID, res.DepartedAt.Format(time.RFC3339), len(res.Packed))
-
+// receiveLoad receives the dispatched load at its destination, after the
+// transit pause, and stamps the arrival on the timeline.
+func (d *Dispatcher) receiveLoad(ctx context.Context, res *LoadResult) error {
 	// The service stamps the arrival with its own clock; leave it a gap so that
 	// the arrival scan can never share the departure scan's instant.
 	if d.Settings.TransitPause > 0 {
 		if err := d.Clock.Sleep(ctx, d.Settings.TransitPause); err != nil {
-			return res, err
+			return err
 		}
 	}
-	if ld, err = d.Receive(ctx, res.Load.LoadID); err != nil {
-		return res, err
+	ld, err := d.Receive(ctx, res.Load.LoadID)
+	if err != nil {
+		return err
 	}
 	res.Load = ld
 	res.ArrivedAt = d.stamped(ld.ArrivedAt, res.Packed)
@@ -264,7 +287,7 @@ func (d *Dispatcher) Run(ctx context.Context, p Parcel) (LoadResult, error) {
 			ld.LoadID, res.ArrivedAt.Format(time.RFC3339Nano), res.DepartedAt.Format(time.RFC3339Nano)))
 	}
 	d.logf("load %s received at %s", ld.LoadID, res.ArrivedAt.Format(time.RFC3339))
-	return res, nil
+	return nil
 }
 
 // stamped returns the service's time (our own clock when the answer omitted it)

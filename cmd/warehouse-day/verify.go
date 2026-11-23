@@ -56,22 +56,61 @@ func (s *sim) run(ctx context.Context) bool {
 		cfg.runID, cfg.orders, cfg.pickers, cfg.packers, cfg.rebinners, cfg.slammers, cfg.flex, cfg.day)
 
 	if err := s.healthCheck(ctx); err != nil {
-		logf("control-tower", "ABORT: %v", err)
-		return false
+		return s.abortRun("", err)
 	}
 	tapCtx, stopTap := context.WithCancel(context.Background())
 	defer stopTap()
-	if len(cfg.brokers) > 0 {
-		tap, err := startTap(tapCtx, cfg.brokers, cfg.runID)
-		if err != nil {
-			s.finding("Kafka event tap unavailable (%v) — event audit skipped", err)
-		} else {
-			s.tap = tap
-			defer tap.Close()
-		}
+	s.openTap(tapCtx)
+	if s.tap != nil {
+		defer s.tap.Close()
 	}
+	if !s.openTheBuilding(ctx) || !s.startTheShift(ctx) {
+		return false
+	}
+	floorCtx, stopFloor := context.WithCancel(ctx)
+	defer stopFloor()
+	floor, office := s.launchTheFloor(floorCtx)
+	s.trackOrdersInTap(floorCtx)
+	s.drainTheBuilding(ctx)
+	stopFloor()
+	floor.Wait()
+	office.Wait()
+	logf("supervisor", "all associates checked out and shifts ended")
 
-	// 05:30 — opening
+	// let the last events propagate before auditing
+	sleepCtx(ctx, 8*time.Second)
+	return s.audit(context.Background())
+}
+
+// abortRun logs why the day cannot go on, writes the report and reports a
+// failed day. stage names the phase ("during opening", ...; "": none).
+func (s *sim) abortRun(stage string, err error) bool {
+	if stage == "" {
+		logf("control-tower", "ABORT: %v", err)
+	} else {
+		logf("control-tower", "ABORT %s: %v", stage, err)
+	}
+	s.writeReport(false)
+	return false
+}
+
+// openTap starts the Kafka event tap when brokers are configured; a tap that
+// cannot open only skips the event audit.
+func (s *sim) openTap(ctx context.Context) {
+	if len(s.cfg.brokers) == 0 {
+		return
+	}
+	tap, err := startTap(ctx, s.cfg.brokers, s.cfg.runID)
+	if err != nil {
+		s.finding("Kafka event tap unavailable (%v) — event audit skipped", err)
+		return
+	}
+	s.tap = tap
+}
+
+// openTheBuilding runs the 05:30 opening (staffing, engineering setup, the
+// building map, the product catalogue, inbound) and the planner's morning.
+func (s *sim) openTheBuilding(ctx context.Context) bool {
 	s.staffTheFloor()
 	setup := []func(context.Context) error{
 		s.ensureProcessPaths,
@@ -83,74 +122,80 @@ func (s *sim) run(ctx context.Context) bool {
 	}
 	for _, step := range setup {
 		if err := step(ctx); err != nil {
-			logf("control-tower", "ABORT during opening: %v", err)
-			s.writeReport(false)
-			return false
+			return s.abortRun("during opening", err)
 		}
 	}
-	s.clock = newSimClock(cfg.day)
+	s.clock = newSimClock(s.cfg.day)
 	theClock.Store(s.clock)
 	s.planOrders()
 	if s.tap != nil {
-		s.tap.Track(cfg.runID)
+		s.tap.Track(s.cfg.runID)
 	}
 	for _, step := range []func(context.Context) error{s.publishCPTSchedule, s.planTheDay} {
 		if err := step(ctx); err != nil {
-			logf("control-tower", "ABORT during planning: %v", err)
-			s.writeReport(false)
-			return false
+			return s.abortRun("during planning", err)
 		}
 	}
+	return true
+}
 
-	// 06:00 — shift start
+// startTheShift clocks every associate in at 06:00.
+func (s *sim) startTheShift(ctx context.Context) bool {
 	for _, a := range s.associates {
 		if err := s.startShift(ctx, a); err != nil {
-			logf("control-tower", "ABORT at shift start: %v", err)
-			s.writeReport(false)
-			return false
+			return s.abortRun("at shift start", err)
 		}
 	}
 	logf("supervisor", "shift %s started: %d associates clocked in and assigned", s.shiftID(), len(s.associates))
+	return true
+}
 
-	floorCtx, stopFloor := context.WithCancel(ctx)
-	defer stopFloor()
+// launchTheFloor starts the associates' floor work and the office loops; it
+// returns the floor's and the office's wait groups.
+func (s *sim) launchTheFloor(floorCtx context.Context) (floor, office *sync.WaitGroup) {
 	go s.suspend.Run(floorCtx)
-	var floor, office sync.WaitGroup
+	floor, office = &sync.WaitGroup{}, &sync.WaitGroup{}
 	for _, a := range s.associates {
 		floor.Add(1)
-		go s.work(floorCtx, a, &floor)
+		go s.work(floorCtx, a, floor)
 	}
 	floor.Add(2)
-	go s.releaseScheduler(floorCtx, &floor)
-	go s.sweeps(floorCtx, &floor)
+	go s.releaseScheduler(floorCtx, floor)
+	go s.sweeps(floorCtx, floor)
 	office.Add(4)
-	go s.customerChannel(floorCtx, &office)
-	go s.customerService(floorCtx, &office)
-	go s.inventoryControl(floorCtx, &office)
-	go s.supervisor(floorCtx, &office)
+	go s.customerChannel(floorCtx, office)
+	go s.customerService(floorCtx, office)
+	go s.inventoryControl(floorCtx, office)
+	go s.supervisor(floorCtx, office)
+	return floor, office
+}
 
-	// track every order id in the event tap as soon as it exists
-	if s.tap != nil {
-		go func() {
-			seen := map[string]bool{}
-			for floorCtx.Err() == nil {
-				s.mu.Lock()
-				for id := range s.byID {
-					if !seen[id] {
-						seen[id] = true
-						s.tap.Track(id)
-					}
-				}
-				s.mu.Unlock()
-				sleepCtx(floorCtx, 200*time.Millisecond)
-			}
-		}()
+// trackOrdersInTap feeds every order id to the event tap as soon as it exists.
+func (s *sim) trackOrdersInTap(floorCtx context.Context) {
+	if s.tap == nil {
+		return
 	}
+	go func() {
+		seen := map[string]bool{}
+		for floorCtx.Err() == nil {
+			s.mu.Lock()
+			for id := range s.byID {
+				if !seen[id] {
+					seen[id] = true
+					s.tap.Track(id)
+				}
+			}
+			s.mu.Unlock()
+			sleepCtx(floorCtx, 200*time.Millisecond)
+		}
+	}()
+}
 
-	// 22:00 — the building closes once the floor is clear (overtime up to
-	// drainTimeout if it is not).
+// drainTheBuilding waits from 22:00 for the floor to clear, with overtime up to
+// drainTimeout.
+func (s *sim) drainTheBuilding(ctx context.Context) {
 	sleepCtx(ctx, time.Until(s.clock.wallAt(dayCloseHour, 0)))
-	deadline := time.Now().Add(cfg.drainTimeout)
+	deadline := time.Now().Add(s.cfg.drainTimeout)
 	for ctx.Err() == nil && time.Now().Before(deadline) {
 		if s.intakeDone.Load() && s.outstanding() == 0 {
 			break
@@ -158,19 +203,10 @@ func (s *sim) run(ctx context.Context) bool {
 		sleepCtx(ctx, time.Second)
 	}
 	if n := s.outstanding(); n > 0 {
-		logf("supervisor", "closing with %d orders still not through SLAM after %s overtime", n, cfg.drainTimeout)
+		logf("supervisor", "closing with %d orders still not through SLAM after %s overtime", n, s.cfg.drainTimeout)
 	} else {
 		logf("supervisor", "floor clear — every shippable order went through SLAM")
 	}
-	stopFloor()
-	floor.Wait()
-	office.Wait()
-	logf("supervisor", "all associates checked out and shifts ended")
-
-	// let the last events propagate before auditing
-	sleepCtx(ctx, 8*time.Second)
-	ok := s.audit(context.Background())
-	return ok
 }
 
 // outstanding counts orders that should ship but have not passed SLAM.
@@ -216,6 +252,13 @@ type orderAudit struct {
 	Problems     []string `json:"problems"`
 }
 
+// dayTally is the end-of-day count the aggregate checks are judged against.
+type dayTally struct {
+	placed, shipped, diverted, expectedShip, cancelled, broken int
+	cycle                                                      []float64
+	pickedUnits                                                map[string]int
+}
+
 func (s *sim) audit(ctx context.Context) bool {
 	logf("auditor", "end-of-day audit across every bounded context")
 	var checks []check
@@ -223,10 +266,53 @@ func (s *sim) audit(ctx context.Context) bool {
 		checks = append(checks, check{name, pass, fmt.Sprintf(format, args...)})
 	}
 
-	var audits []orderAudit
-	shipped, diverted, expectedShip, cancelled, broken := 0, 0, 0, 0, 0
-	var cycle []float64
-	pickedUnits := map[string]int{}
+	audits, t := s.auditOrders(ctx)
+	add("orders placed", t.placed == len(s.orders), "%d of %d planned orders accepted by order-management", t.placed, len(s.orders))
+	add("orders shipped", t.shipped+t.diverted == t.expectedShip, "%d labeled + %d diverted of %d shippable (%d cancelled by customers)", t.shipped, t.diverted, t.expectedShip, t.cancelled)
+	mispicks := 0
+	for _, o := range s.orders {
+		if o.kind == kindMispickInjct && o.id != "" {
+			mispicks++
+		}
+	}
+	add("SLAM caught every mispick", t.diverted == mispicks, "%d diverted, %d mispicks injected", t.diverted, mispicks)
+	add("per-order cross-context consistency", t.broken == 0, "%d of %d orders have at least one inconsistency (see orders[].problems)", t.broken, t.placed)
+	add("no server errors", s.stats.Count5xx() == 0, "%d transport errors / 5xx responses over %d routes", s.stats.Count5xx(), len(s.stats.Lines()))
+
+	// inventory conservation: usable == received - picked (- unlocated)
+	invOK, invDetail := s.auditInventory(ctx, t.pickedUnits)
+	add("inventory conservation", invOK, "%s", invDetail)
+
+	// labor: every associate that did floor work has a scorecard
+	laborOK, laborDetail := s.auditLabor(ctx)
+	add("labor performance recorded", laborOK, "%s", laborDetail)
+
+	s.auditEvents(add)
+
+	s.mu.Lock()
+	findings := append([]string(nil), s.findings...)
+	suspended := len(s.findingsDuringSuspend)
+	s.mu.Unlock()
+	detail := fmt.Sprintf("%d findings (see findings[])", len(findings))
+	if w := s.suspend.Snapshot(); len(w) > 0 {
+		detail += fmt.Sprintf("; %d more raised during %d host suspension(s), not counted (see findingsDuringSuspend[])", suspended, len(w))
+	}
+	add("no operational findings", len(findings) == 0, "%s", detail)
+
+	pass := true
+	for _, c := range checks {
+		if !c.Pass {
+			pass = false
+		}
+	}
+	s.printSummary(checks, audits, t.cycle, findings, pass)
+	s.writeReportFull(pass, checks, audits, findings)
+	return pass
+}
+
+// auditOrders audits every placed order and tallies the day's outcomes.
+func (s *sim) auditOrders(ctx context.Context) (audits []orderAudit, t dayTally) {
+	t.pickedUnits = map[string]int{}
 	for _, o := range s.orders {
 		if o.id == "" {
 			continue
@@ -234,43 +320,35 @@ func (s *sim) audit(ctx context.Context) bool {
 		a := s.auditOrder(ctx, o)
 		audits = append(audits, a)
 		if o.kind == kindHeldCancel {
-			cancelled++
+			t.cancelled++
 		} else {
-			expectedShip++
+			t.expectedShip++
 		}
 		if len(a.Problems) > 0 {
-			broken++
+			t.broken++
 		}
 		switch strings.TrimSuffix(o.packageStatus, "?") {
 		case "LABELED":
-			shipped++
-			cycle = append(cycle, a.CycleSeconds)
+			t.shipped++
+			t.cycle = append(t.cycle, a.CycleSeconds)
 		case "DIVERTED":
-			diverted++
+			t.diverted++
 		}
 		for n, l := range o.lines {
 			if o.pickedLines[n+1] {
-				pickedUnits[l.sku] += l.qty
+				t.pickedUnits[l.sku] += l.qty
 			}
 		}
 	}
+	t.placed = len(audits)
+	return audits, t
+}
 
-	placed := len(audits)
-	add("orders placed", placed == len(s.orders), "%d of %d planned orders accepted by order-management", placed, len(s.orders))
-	add("orders shipped", shipped+diverted == expectedShip, "%d labeled + %d diverted of %d shippable (%d cancelled by customers)", shipped, diverted, expectedShip, cancelled)
-	mispicks := 0
-	for _, o := range s.orders {
-		if o.kind == kindMispickInjct && o.id != "" {
-			mispicks++
-		}
-	}
-	add("SLAM caught every mispick", diverted == mispicks, "%d diverted, %d mispicks injected", diverted, mispicks)
-	add("per-order cross-context consistency", broken == 0, "%d of %d orders have at least one inconsistency (see orders[].problems)", broken, placed)
-	add("no server errors", s.stats.Count5xx() == 0, "%d transport errors / 5xx responses over %d routes", s.stats.Count5xx(), len(s.stats.Lines()))
-
-	// inventory conservation: usable == received - picked (- unlocated)
-	var invDetail []string
-	invOK := true
+// auditInventory checks usable == received - picked (- unlocated) for every SKU
+// of the catalogue.
+func (s *sim) auditInventory(ctx context.Context, pickedUnits map[string]int) (bool, string) {
+	var detail []string
+	ok := true
 	for _, sd := range skuCatalogue {
 		received := sd.stock
 		if sd.key == "CAMERA" {
@@ -291,60 +369,40 @@ func (s *sim) audit(ctx context.Context) bool {
 		r := s.api.Call(ctx, svcInventory, http.MethodGet, "/inventory/{sku}/usable", "/inventory/"+url.PathEscape(s.sku(sd.key))+"/usable", nil)
 		_ = r.Decode(&u)
 		if u.Usable != want {
-			invOK = false
-			invDetail = append(invDetail, fmt.Sprintf("%s usable %d want %d", sd.key, u.Usable, want))
+			ok = false
+			detail = append(detail, fmt.Sprintf("%s usable %d want %d", sd.key, u.Usable, want))
 		}
 	}
-	if invOK {
-		invDetail = append(invDetail, fmt.Sprintf("all %d SKUs reconcile (received - picked - unlocated == usable)", len(skuCatalogue)))
+	if ok {
+		detail = append(detail, fmt.Sprintf("all %d SKUs reconcile (received - picked - unlocated == usable)", len(skuCatalogue)))
 	}
-	add("inventory conservation", invOK, "%s", strings.Join(invDetail, "; "))
+	return ok, strings.Join(detail, "; ")
+}
 
-	// labor: every associate that did floor work has a scorecard
-	laborOK, laborDetail := s.auditLabor(ctx)
-	add("labor performance recorded", laborOK, "%s", laborDetail)
-
-	// events
-	if s.tap != nil {
-		missing, required := s.missingEvents()
-		add("integration events published", len(missing) == 0, "%d/%d required event types observed on Kafka; missing: %v", required-len(missing), required, missing)
-		s.tap.Mu.Lock()
-		dlq := 0
-		for _, n := range s.tap.Dlq {
-			dlq += n
-		}
-		legacy := 0
-		for _, n := range s.tap.DlqLegacy {
-			legacy += n
-		}
-		dlqDetail := fmt.Sprintf("%v (plus %d legacy/unrelated messages dead-lettered by consumer replay)", s.tap.Dlq, legacy)
-		tapErrs := append([]string(nil), s.tap.Errs...)
-		s.tap.Mu.Unlock()
-		add("no dead-lettered events", dlq == 0, "%d messages dead-lettered during the day %s", dlq, dlqDetail)
-		if len(tapErrs) > 0 {
-			add("event tap healthy", false, "%v", tapErrs)
-		}
+// auditEvents checks the Kafka tap's day: every required event type observed,
+// nothing dead-lettered, the tap itself healthy.
+func (s *sim) auditEvents(add func(string, bool, string, ...any)) {
+	if s.tap == nil {
+		return
 	}
-
-	s.mu.Lock()
-	findings := append([]string(nil), s.findings...)
-	suspended := len(s.findingsDuringSuspend)
-	s.mu.Unlock()
-	detail := fmt.Sprintf("%d findings (see findings[])", len(findings))
-	if w := s.suspend.Snapshot(); len(w) > 0 {
-		detail += fmt.Sprintf("; %d more raised during %d host suspension(s), not counted (see findingsDuringSuspend[])", suspended, len(w))
+	missing, required := s.missingEvents()
+	add("integration events published", len(missing) == 0, "%d/%d required event types observed on Kafka; missing: %v", required-len(missing), required, missing)
+	s.tap.Mu.Lock()
+	dlq := 0
+	for _, n := range s.tap.Dlq {
+		dlq += n
 	}
-	add("no operational findings", len(findings) == 0, "%s", detail)
-
-	pass := true
-	for _, c := range checks {
-		if !c.Pass {
-			pass = false
-		}
+	legacy := 0
+	for _, n := range s.tap.DlqLegacy {
+		legacy += n
 	}
-	s.printSummary(checks, audits, cycle, findings, pass)
-	s.writeReportFull(pass, checks, audits, findings)
-	return pass
+	dlqDetail := fmt.Sprintf("%v (plus %d legacy/unrelated messages dead-lettered by consumer replay)", s.tap.Dlq, legacy)
+	tapErrs := append([]string(nil), s.tap.Errs...)
+	s.tap.Mu.Unlock()
+	add("no dead-lettered events", dlq == 0, "%d messages dead-lettered during the day %s", dlq, dlqDetail)
+	if len(tapErrs) > 0 {
+		add("event tap healthy", false, "%v", tapErrs)
+	}
 }
 
 func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
@@ -379,7 +437,16 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 		return a
 	}
 
-	// wes-work-planning: one work unit per line, all Completed
+	s.auditWorkUnits(ctx, o, &a, prob)
+	s.auditReservations(ctx, o, &a, prob)
+	s.auditTasks(ctx, o, &a, prob)
+	s.auditPackages(ctx, o, &a, prob)
+	s.auditOrderEvents(o, &a, prob)
+	return a
+}
+
+// auditWorkUnits checks wes-work-planning's work units of the order.
+func (s *sim) auditWorkUnits(ctx context.Context, o *orderRec, a *orderAudit, prob func(string, ...any)) {
 	type workUnit struct {
 		ID    string `json:"id"`
 		State string `json:"state"`
@@ -396,8 +463,10 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	if states["Completed"] != len(o.lines) {
 		prob("wes work units not all Completed: %v", states)
 	}
+}
 
-	// inventory-storage: every reservation consumed by a confirmed pick
+// auditReservations checks inventory-storage's reservations of the order.
+func (s *sim) auditReservations(ctx context.Context, o *orderRec, a *orderAudit, prob func(string, ...any)) {
 	res := s.reservationsFor(ctx, o.id)
 	rs := map[string]int{}
 	for _, r := range res {
@@ -407,8 +476,11 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	if rs["CONFIRMED"] < len(o.lines) {
 		prob("reservations %v, want %d CONFIRMED", rs, len(o.lines))
 	}
+}
 
-	// fulfillment-execution: PICK task per line COMPLETED, one PACK task
+// auditTasks checks fulfillment-execution's PICK task per line and the single
+// PACK task of the order.
+func (s *sim) auditTasks(ctx context.Context, o *orderRec, a *orderAudit, prob func(string, ...any)) {
 	pickDone := 0
 	for i := range o.lines {
 		ref := fmt.Sprintf("%s-line-%d", o.id, i+1)
@@ -435,7 +507,10 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	if len(packStates) != 1 || packStates[0] != "COMPLETED" {
 		prob("PACK tasks for order: %v, want exactly one COMPLETED", packStates)
 	}
+}
 
+// auditPackages checks the order's SLAM package.
+func (s *sim) auditPackages(ctx context.Context, o *orderRec, a *orderAudit, prob func(string, ...any)) {
 	pk, r := listAll[pkg](ctx, s.api, svcFulfillment, "/packages?orderRef", "/packages?orderRef="+url.QueryEscape(o.id))
 	if r.OK() {
 		wantPkg := "LABELED"
@@ -454,28 +529,30 @@ func (s *sim) auditOrder(ctx context.Context, o *orderRec) orderAudit {
 	} else if o.packageStatus == "" {
 		prob("never reached SLAM")
 	}
+}
 
-	// events about this order
-	if s.tap != nil {
-		ev := []string{}
-		for _, ty := range []string{"OrderAllocated", "WorkUnitCreated", "WorkReleased", "PackageManifested", "PackageDiverted", "OrderRepromised", "TaskCPTMissed"} {
-			if n := s.tap.Seen(o.id, ty); n > 0 {
-				ev = append(ev, fmt.Sprintf("%s×%d", ty, n))
-			}
-		}
-		a.Events = strings.Join(ev, " ")
-		if s.tap.Seen(o.id, "WorkReleased") < len(o.lines) {
-			prob("WorkReleased seen %d times for %d lines", s.tap.Seen(o.id, "WorkReleased"), len(o.lines))
-		}
-		final := "PackageManifested"
-		if o.kind == kindMispickInjct {
-			final = "PackageDiverted"
-		}
-		if final == "PackageManifested" && s.tap.Seen(o.id, final) == 0 {
-			prob("no PackageManifested event for the order")
+// auditOrderEvents checks the Kafka events of the order.
+func (s *sim) auditOrderEvents(o *orderRec, a *orderAudit, prob func(string, ...any)) {
+	if s.tap == nil {
+		return
+	}
+	ev := []string{}
+	for _, ty := range []string{"OrderAllocated", "WorkUnitCreated", "WorkReleased", "PackageManifested", "PackageDiverted", "OrderRepromised", "TaskCPTMissed"} {
+		if n := s.tap.Seen(o.id, ty); n > 0 {
+			ev = append(ev, fmt.Sprintf("%s×%d", ty, n))
 		}
 	}
-	return a
+	a.Events = strings.Join(ev, " ")
+	if s.tap.Seen(o.id, "WorkReleased") < len(o.lines) {
+		prob("WorkReleased seen %d times for %d lines", s.tap.Seen(o.id, "WorkReleased"), len(o.lines))
+	}
+	final := "PackageManifested"
+	if o.kind == kindMispickInjct {
+		final = "PackageDiverted"
+	}
+	if final == "PackageManifested" && s.tap.Seen(o.id, final) == 0 {
+		prob("no PackageManifested event for the order")
+	}
 }
 
 // planningEventsTopic is warehouse-planning's integration topic: the
@@ -590,36 +667,8 @@ func (s *sim) printSummary(checks []check, audits []orderAudit, cycle []float64,
 	for _, a := range s.associates {
 		fmt.Printf("  %-22s %-7s tasks %4d units %4d speed %.2f\n", a.id, a.role, a.tasks, a.units, a.speed)
 	}
-	if s.tap != nil {
-		fmt.Println("\nKafka events produced today (topic: type×n):")
-		s.tap.Mu.Lock()
-		topics := make([]string, 0, len(s.tap.Counts))
-		for t := range s.tap.Counts {
-			topics = append(topics, t)
-		}
-		sort.Strings(topics)
-		for _, t := range topics {
-			var parts []string
-			for ty, n := range s.tap.Counts[t] {
-				parts = append(parts, ty+"×"+strconv.Itoa(n))
-			}
-			sort.Strings(parts)
-			fmt.Printf("  %-42s %s\n", t, strings.Join(parts, " "))
-		}
-		s.tap.Mu.Unlock()
-	}
-	broken := 0
-	for _, a := range audits {
-		if len(a.Problems) > 0 {
-			broken++
-			if broken <= 15 {
-				fmt.Printf("  order #%03d %s %-19s %v\n", a.Seq, short(a.ID), a.Kind, a.Problems)
-			}
-		}
-	}
-	if broken > 0 {
-		fmt.Printf("  (%d orders with problems; full list in the JSON report)\n", broken)
-	}
+	s.printTapEvents()
+	printBrokenOrders(audits)
 	if len(findings) > 0 {
 		fmt.Println("\nfindings:")
 		for _, f := range findings {
@@ -639,6 +688,45 @@ func (s *sim) printSummary(checks []check, audits []orderAudit, cycle []float64,
 		verdict = "THE WAREHOUSE DID NOT WORK END TO END"
 	}
 	fmt.Printf("\nVERDICT: %s\n", verdict)
+}
+
+// printTapEvents prints the Kafka events the day produced, per topic.
+func (s *sim) printTapEvents() {
+	if s.tap == nil {
+		return
+	}
+	fmt.Println("\nKafka events produced today (topic: type×n):")
+	s.tap.Mu.Lock()
+	defer s.tap.Mu.Unlock()
+	topics := make([]string, 0, len(s.tap.Counts))
+	for t := range s.tap.Counts {
+		topics = append(topics, t)
+	}
+	sort.Strings(topics)
+	for _, t := range topics {
+		var parts []string
+		for ty, n := range s.tap.Counts[t] {
+			parts = append(parts, ty+"×"+strconv.Itoa(n))
+		}
+		sort.Strings(parts)
+		fmt.Printf("  %-42s %s\n", t, strings.Join(parts, " "))
+	}
+}
+
+// printBrokenOrders prints the first broken orders and the total count.
+func printBrokenOrders(audits []orderAudit) {
+	broken := 0
+	for _, a := range audits {
+		if len(a.Problems) > 0 {
+			broken++
+			if broken <= 15 {
+				fmt.Printf("  order #%03d %s %-19s %v\n", a.Seq, short(a.ID), a.Kind, a.Problems)
+			}
+		}
+	}
+	if broken > 0 {
+		fmt.Printf("  (%d orders with problems; full list in the JSON report)\n", broken)
+	}
 }
 
 func (s *sim) writeReport(pass bool) { s.writeReportFull(pass, nil, nil, s.findings) }

@@ -163,6 +163,17 @@ func (r Report) JSON(w io.Writer) error {
 // Text writes the report for a person: the per-order table, the estate verdict, the NOT VERIFIED
 // section and the call statistics.
 func (r Report) Text(w io.Writer) {
+	r.textHead(w)
+	r.textPhases(w)
+	r.textOrders(w)
+	r.textEstate(w)
+	r.textNotVerified(w)
+	r.textCalls(w)
+	fmt.Fprintf(w, "\nVERDICT: %s\n", r.Verdict)
+}
+
+// textHead is the verdict line, the times, the failure reasons and the notes.
+func (r Report) textHead(w io.Writer) {
 	fmt.Fprintf(w, "retail day %s, seed %d: %s\n", r.RunID, r.Seed, r.Verdict)
 	if !r.StartedAt.IsZero() {
 		fmt.Fprintf(w, "%s -> %s (%s)\n", r.StartedAt.Format(time.RFC3339), r.FinishedAt.Format(time.RFC3339), r.FinishedAt.Sub(r.StartedAt).Round(time.Second))
@@ -173,19 +184,25 @@ func (r Report) Text(w io.Writer) {
 	for _, n := range r.Notes {
 		fmt.Fprintf(w, "  note: %s\n", n)
 	}
+}
 
+// textPhases is the phase table.
+func (r Report) textPhases(w io.Writer) {
 	fmt.Fprintf(w, "\nPHASES\n")
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 	for _, p := range r.Phases {
-		fmt.Fprintf(tw, "  %s\t%s\t%s\n", p.Name, p.State, p.Detail)
+		fmt.Fprintf(tw, "  %s	%s	%s\n", p.Name, p.State, p.Detail)
 	}
 	tw.Flush()
+}
 
+// textOrders is the per-order table followed by each order's findings and notes.
+func (r Report) textOrders(w io.Writer) {
 	fmt.Fprintf(w, "\nORDERS (%d planned, %d accounted for)\n", r.Planned, len(r.Orders))
-	tw = tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintf(tw, "  ORDER\tEXPECTED\tOUTCOME\tFAILED RULES\n")
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintf(tw, "  ORDER	EXPECTED	OUTCOME	FAILED RULES\n")
 	for _, o := range r.Orders {
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", o.Order, o.Expect, o.Outcome, strings.Join(o.Rules, ", "))
+		fmt.Fprintf(tw, "  %s	%s	%s	%s\n", o.Order, o.Expect, o.Outcome, strings.Join(o.Rules, ", "))
 	}
 	tw.Flush()
 	for _, o := range r.Orders {
@@ -200,7 +217,10 @@ func (r Report) Text(w io.Writer) {
 			fmt.Fprintf(w, "    note: %s\n", n)
 		}
 	}
+}
 
+// textEstate is the estate findings and the shelf's stock account.
+func (r Report) textEstate(w io.Writer) {
 	fmt.Fprintf(w, "\nESTATE\n")
 	if len(r.Estate) == 0 {
 		fmt.Fprintf(w, "  no finding\n")
@@ -209,14 +229,17 @@ func (r Report) Text(w io.Writer) {
 		fmt.Fprintf(w, "  %s %s: %s\n", mark(f), f.Rule, f.Detail)
 	}
 	if len(r.Stock) > 0 {
-		tw = tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-		fmt.Fprintf(tw, "  SKU\tBEFORE\tSHIPPED\tRESTOCKED\tAFTER\tSOLD\n")
+		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+		fmt.Fprintf(tw, "  SKU	BEFORE	SHIPPED	RESTOCKED	AFTER	SOLD\n")
 		for _, s := range r.Stock {
-			fmt.Fprintf(tw, "  %s\t%d\t%d\t%d\t%d\t%v\n", s.SKU, s.Before, s.Shipped, s.Restocked, s.After, s.Purchasable)
+			fmt.Fprintf(tw, "  %s	%d	%d	%d	%d	%v\n", s.SKU, s.Before, s.Shipped, s.Restocked, s.After, s.Purchasable)
 		}
 		tw.Flush()
 	}
+}
 
+// textNotVerified is everything the verdict could not establish.
+func (r Report) textNotVerified(w io.Writer) {
 	fmt.Fprintf(w, "\nNOT VERIFIED")
 	if r.AllowUnverified {
 		fmt.Fprintf(w, " (-allow-unverified: listed, not failed)")
@@ -230,7 +253,10 @@ func (r Report) Text(w io.Writer) {
 	for _, n := range r.NotVerified {
 		fmt.Fprintf(w, "  - %s\n", n)
 	}
+}
 
+// textCalls is the call statistics and their failures.
+func (r Report) textCalls(w io.Writer) {
 	fmt.Fprintf(w, "\nCALLS: %d route(s), %d transport error(s) or 5xx", len(r.Calls), r.ServerErrors)
 	if r.Suspensions > 0 {
 		fmt.Fprintf(w, ", host suspended %d time(s)", r.Suspensions)
@@ -239,12 +265,11 @@ func (r Report) Text(w io.Writer) {
 	for _, f := range r.Failures {
 		fmt.Fprintf(w, "  ! %s\n", f)
 	}
-	tw = tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 	for _, c := range r.Calls {
-		fmt.Fprintf(tw, "  %s\t%d\t%s\t%.0f ms\n", c.Route, c.Calls, statuses(c.Statuses), c.AvgMs)
+		fmt.Fprintf(tw, "  %s	%d	%s	%.0f ms\n", c.Route, c.Calls, statuses(c.Statuses), c.AvgMs)
 	}
 	tw.Flush()
-	fmt.Fprintf(w, "\nVERDICT: %s\n", r.Verdict)
 }
 
 func mark(f retailday.Finding) string {
