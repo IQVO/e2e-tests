@@ -95,22 +95,11 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 	add := func(format string, a ...any) { d.Problems = append(d.Problems, fmt.Sprintf(format, a...)) }
 
 	p.TrackingNumbers = dedupe(p.TrackingNumbers)
-	if len(p.TrackingNumbers) == 0 || p.OriginNodeID == "" {
-		add("parcel: needs tracking numbers and an origin node (got %d tracking numbers, origin %q)", len(p.TrackingNumbers), p.OriginNodeID)
+	if problems := checkParcel(p, o); len(problems) > 0 {
+		d.Problems = append(d.Problems, problems...)
 		return d
 	}
-
-	// options first: a refused option must cost no write
-	failures := o.failures()
-	if failures < 0 || failures > MaxFailedAttempts {
-		add("options: %d failed attempts asked, but the package can fail %d times at most (the third failure initiates its return instead of a redelivery)", failures, MaxFailedAttempts)
-		return d
-	}
-	detail := o.failureDetail()
-	if !DetailFits(OutcomeFailed, detail) || !DetailFits(OutcomeDelivered, o.DeliveredDetail) {
-		add("options: outcomeDetail %q on a failed and %q on a delivered attempt: not in the contract's closed list", detail, o.DeliveredDetail)
-		return d
-	}
+	failures, detail := o.failures(), o.failureDetail()
 
 	if !o.SkipVerify {
 		for _, tn := range p.TrackingNumbers {
@@ -128,17 +117,9 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 		return d
 	}
 
-	dest := p.DestStationNodeID
-	if dest == "" {
-		dest = lr.Load.DestinationNodeID
-	}
-	node, err := t.Station.Node(ctx, dest)
-	if err != nil {
-		add("%s", err)
-		return d
-	}
-	if node.NodeType != "DELIVERY_STATION" {
-		add("node %s is a %s, not a DELIVERY_STATION: LoadArrived is not inducted into a wave there", node.NodeID, node.NodeType)
+	node, problem := t.stationNode(ctx, p, lr)
+	if problem != "" {
+		add("%s", problem)
 		return d
 	}
 
@@ -149,9 +130,68 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 	}
 
 	// Each failed round re-inducts its packages onto a later wave; the last round delivers them.
-	tns, since, failedRounds := lr.Packed, lr.ArrivedAt, 0
-	for i := 0; i < failures; i++ {
-		tns = t.round(ctx, &d, node, tns, since, OutcomeFailed, detail, o)
+	tns, since := t.failedRounds(ctx, &d, p, node, lr.Packed, lr.ArrivedAt, o, detail, flagExpected)
+	var recorded []string
+	if failures == 0 || len(tns) > 0 {
+		recorded = t.round(ctx, &d, node, tns, since, OutcomeDelivered, o.DeliveredDetail, o)
+	}
+
+	delivered := recorded
+	if len(delivered) == wantDelivered {
+		d.DeliveredAt = latestDelivered(d.Attempts)
+	}
+	if !o.SkipVerify {
+		t.verifyDelivered(ctx, &d, p, delivered)
+	}
+	t.logf("parcel %v: %d problem(s), delivered=%v", p.TrackingNumbers, len(d.Problems), d.Delivered())
+	return d
+}
+
+// stationNode is the parcel's destination station: the parcel's own when it
+// names one, the linehaul load's otherwise. It must be a DELIVERY_STATION;
+// the returned string is the problem when it is not ("" when it is).
+func (t *Transport) stationNode(ctx context.Context, p Parcel, lr LoadResult) (Node, string) {
+	dest := p.DestStationNodeID
+	if dest == "" {
+		dest = lr.Load.DestinationNodeID
+	}
+	node, err := t.Station.Node(ctx, dest)
+	if err != nil {
+		return Node{}, err.Error()
+	}
+	if node.NodeType != "DELIVERY_STATION" {
+		return node, fmt.Sprintf("node %s is a %s, not a DELIVERY_STATION: LoadArrived is not inducted into a wave there", node.NodeID, node.NodeType)
+	}
+	return node, ""
+}
+
+// checkParcel rejects a parcel or an option combination a service would refuse
+// anyway; a refused option must cost no write.
+func checkParcel(p Parcel, o Options) []string {
+	var problems []string
+	if len(p.TrackingNumbers) == 0 || p.OriginNodeID == "" {
+		return append(problems, fmt.Sprintf("parcel: needs tracking numbers and an origin node (got %d tracking numbers, origin %q)", len(p.TrackingNumbers), p.OriginNodeID))
+	}
+	if failures := o.failures(); failures < 0 || failures > MaxFailedAttempts {
+		return append(problems, fmt.Sprintf("options: %d failed attempts asked, but the package can fail %d times at most (the third failure initiates its return instead of a redelivery)", failures, MaxFailedAttempts))
+	}
+	detail := o.failureDetail()
+	if !DetailFits(OutcomeFailed, detail) || !DetailFits(OutcomeDelivered, o.DeliveredDetail) {
+		problems = append(problems, fmt.Sprintf("options: outcomeDetail %q on a failed and %q on a delivered attempt: not in the contract's closed list", detail, o.DeliveredDetail))
+	}
+	return problems
+}
+
+// failedRounds plays the parcel's failed attempts, one round each: every failed
+// round re-inducts its packages onto a later wave, and the round that reaches
+// FlagAfterStrikes waits for the delivery point to be flagged (and observed)
+// before the next one. It returns the packages still to deliver and the instant
+// they came back to the station.
+func (t *Transport) failedRounds(ctx context.Context, d *Delivery, p Parcel, node Node, tns []string, since time.Time, o Options, detail string, flagExpected bool) ([]string, time.Time) {
+	add := func(format string, a ...any) { d.Problems = append(d.Problems, fmt.Sprintf(format, a...)) }
+	failedRounds := 0
+	for i := 0; i < o.failures(); i++ {
+		tns = t.round(ctx, d, node, tns, since, OutcomeFailed, detail, o)
 		if len(tns) == 0 {
 			break
 		}
@@ -166,33 +206,28 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 			}
 		}
 		if flagExpected && failedRounds == FlagAfterStrikes {
-			t.awaitFlag(ctx, &d, p.OrderID, tns, FlagReason(detail))
+			t.awaitFlag(ctx, d, p.OrderID, tns, FlagReason(detail))
 		}
 	}
-	var recorded []string
-	if failures == 0 || len(tns) > 0 {
-		recorded = t.round(ctx, &d, node, tns, since, OutcomeDelivered, o.DeliveredDetail, o)
-	}
+	return tns, since
+}
 
-	delivered := recorded
-	if len(delivered) == wantDelivered {
-		d.DeliveredAt = latestDelivered(d.Attempts)
-	}
-	if !o.SkipVerify {
-		for _, tn := range delivered {
-			j, err := t.Tracker.AwaitState(ctx, tn, "DELIVERED")
-			if err != nil {
-				add("%s", err)
-				continue
-			}
-			d.Problems = append(d.Problems, ScanFindings(j)...)
+// verifyDelivered reads every delivered package's journey back (DELIVERED, no
+// scan stored without being applied) and, when a delivery point was flagged,
+// waits until the advisory on the order's tracking view ends with the delivery.
+func (t *Transport) verifyDelivered(ctx context.Context, d *Delivery, p Parcel, delivered []string) {
+	add := func(format string, a ...any) { d.Problems = append(d.Problems, fmt.Sprintf(format, a...)) }
+	for _, tn := range delivered {
+		j, err := t.Tracker.AwaitState(ctx, tn, "DELIVERED")
+		if err != nil {
+			add("%s", err)
+			continue
 		}
-		if len(d.Flagged) > 0 && p.OrderID != "" {
-			t.awaitAdvisoryEnded(ctx, &d, p.OrderID, d.Flagged, delivered)
-		}
+		d.Problems = append(d.Problems, ScanFindings(j)...)
 	}
-	t.logf("parcel %v: %d problem(s), delivered=%v", p.TrackingNumbers, len(d.Problems), d.Delivered())
-	return d
+	if len(d.Flagged) > 0 && p.OrderID != "" {
+		t.awaitAdvisoryEnded(ctx, d, p.OrderID, d.Flagged, delivered)
+	}
 }
 
 // round is one pass over the station: wave, induction, dispatch, route, start,
@@ -201,25 +236,11 @@ func (t *Transport) Deliver(ctx context.Context, p Parcel, o Options) Delivery {
 // induct cutoff after it. It returns the packages whose attempt was recorded.
 func (t *Transport) round(ctx context.Context, d *Delivery, node Node, tns []string, since time.Time, outcome, detail string, o Options) []string {
 	add := func(format string, a ...any) { d.Problems = append(d.Problems, fmt.Sprintf(format, a...)) }
-	if _, _, err := t.Station.EnsureWave(ctx, node, since); err != nil {
-		add("%s", err)
+	waveID, inducted := t.inductAndWait(ctx, d, node, tns, since)
+	if inducted == nil {
 		return nil
 	}
-	ind, err := t.Station.AwaitInduction(ctx, node, since, tns)
-	if err != nil {
-		add("%s", err)
-		return nil
-	}
-	if len(ind.Missing) > 0 {
-		add("packages %v were not inducted into wave %s within %s (inducted elsewhere or not at all)", ind.Missing, ind.WaveID, t.Settings.InductionTimeout)
-	}
-	tns = ind.Inducted
-	d.Waves = append(d.Waves, ind.WaveID)
-	d.WaveID = ind.WaveID
-	if _, err := t.Station.CloseInduction(ctx, ind.WaveID); err != nil {
-		add("%s", err)
-		return nil
-	}
+	tns = inducted
 	// A route is planned while the wave is INDUCTION_CLOSED and can only start once the wave is
 	// DISPATCHED, so: close induction, plan, dispatch the wave, start the route.
 	dsp, err := t.Station.EnsurePartner(ctx, node.NodeID, 0)
@@ -227,14 +248,14 @@ func (t *Transport) round(ctx context.Context, d *Delivery, node Node, tns []str
 		add("%s", err)
 		return nil
 	}
-	route, err := t.Station.PlanRoute(ctx, ind.WaveID, dsp.DSPID, tns)
+	route, err := t.Station.PlanRoute(ctx, waveID, dsp.DSPID, tns)
 	if err != nil {
 		add("%s", err)
 		return nil
 	}
 	d.Routes = append(d.Routes, route.RouteID)
 	d.RouteID = route.RouteID
-	if _, err := t.Station.DispatchWave(ctx, ind.WaveID); err != nil {
+	if _, err := t.Station.DispatchWave(ctx, waveID); err != nil {
 		add("%s", err)
 		return nil
 	}
@@ -259,6 +280,33 @@ func (t *Transport) round(ctx context.Context, d *Delivery, node Node, tns []str
 		recorded = append(recorded, a.TrackingNumber)
 	}
 	return recorded
+}
+
+// inductAndWait ensures a wave whose cutoff is after since, waits for the
+// packages' induction into it, records the wave on the delivery and closes
+// induction. It returns the wave id and the packages inducted; nil packages
+// mean the step failed and the round cannot go on.
+func (t *Transport) inductAndWait(ctx context.Context, d *Delivery, node Node, tns []string, since time.Time) (string, []string) {
+	add := func(format string, a ...any) { d.Problems = append(d.Problems, fmt.Sprintf(format, a...)) }
+	if _, _, err := t.Station.EnsureWave(ctx, node, since); err != nil {
+		add("%s", err)
+		return "", nil
+	}
+	ind, err := t.Station.AwaitInduction(ctx, node, since, tns)
+	if err != nil {
+		add("%s", err)
+		return "", nil
+	}
+	if len(ind.Missing) > 0 {
+		add("packages %v were not inducted into wave %s within %s (inducted elsewhere or not at all)", ind.Missing, ind.WaveID, t.Settings.InductionTimeout)
+	}
+	d.Waves = append(d.Waves, ind.WaveID)
+	d.WaveID = ind.WaveID
+	if _, err := t.Station.CloseInduction(ctx, ind.WaveID); err != nil {
+		add("%s", err)
+		return "", nil
+	}
+	return ind.WaveID, ind.Inducted
 }
 
 func dedupe(in []string) []string {

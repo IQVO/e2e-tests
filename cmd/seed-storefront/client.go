@@ -97,6 +97,40 @@ func (c *client) put(ctx context.Context, kind, path string, body, out any, ok .
 	return nil
 }
 
+// accepted reports whether status is one of the caller's accepted codes.
+func accepted(status int, ok []int) bool {
+	for _, s := range ok {
+		if status == s {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeInto unmarshals b into out when there is a body and somewhere to put it.
+func decodeInto(method, url string, b []byte, out any) error {
+	if out == nil || len(b) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		return fmt.Errorf("%s %s: decode: %w", method, url, err)
+	}
+	return nil
+}
+
+// apiErr builds the *apiError for a non-accepted answer, decoding the RFC 9457
+// problem slug when the body carries one.
+func apiErr(method, url string, status int, body []byte) *apiError {
+	ae := &apiError{Method: method, URL: url, Status: status, Body: strings.TrimSpace(string(body))}
+	var prob struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(body, &prob) == nil {
+		ae.Type = strings.TrimPrefix(prob.Type, "/problems/")
+	}
+	return ae
+}
+
 // do sends one request, retrying transport errors, 429 and 5xx with the SAME key (a retry after a
 // dropped response replays the stored answer instead of writing twice).
 func (c *client) do(ctx context.Context, method, url string, body any, key string, out any, ok ...int) (int, error) {
@@ -122,24 +156,13 @@ func (c *client) do(ctx context.Context, method, url string, body any, key strin
 		if err == nil {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 			_ = resp.Body.Close()
-			for _, s := range ok {
-				if resp.StatusCode == s {
-					if out != nil && len(b) > 0 {
-						if err := json.Unmarshal(b, out); err != nil {
-							return s, fmt.Errorf("%s %s: decode: %w", method, url, err)
-						}
-					}
-					return s, nil
+			if accepted(resp.StatusCode, ok) {
+				if derr := decodeInto(method, url, b, out); derr != nil {
+					return resp.StatusCode, derr
 				}
+				return resp.StatusCode, nil
 			}
-			ae := &apiError{Method: method, URL: url, Status: resp.StatusCode, Body: strings.TrimSpace(string(b))}
-			var prob struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(b, &prob) == nil {
-				ae.Type = strings.TrimPrefix(prob.Type, "/problems/")
-			}
-			err = ae
+			err = apiErr(method, url, resp.StatusCode, b)
 			if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
 				return resp.StatusCode, err
 			}

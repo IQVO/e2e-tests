@@ -214,45 +214,11 @@ func (s *Shopper) buy(ctx context.Context, p Plan, o *Outcome) error {
 		return ctx.Err()
 	}
 
-	// who: register, or sign in when the e-mail is taken; then an address for the destination
-	if s.ShopperID == "" {
-		if _, err := s.Register(ctx); err != nil {
-			if ctx.Err() != nil || !Is(err, "shopper-exists") {
-				return refuse()
-			}
-			if _, err := s.SignIn(ctx); err != nil {
-				return refuse()
-			}
-		}
-		if got := s.State().ShopperID; got != s.ShopperID {
-			s.problem("the sf_state cookie carries shopper %q after registering %q", got, s.ShopperID)
-		}
+	if err := s.prepare(ctx, p, o); err != nil {
+		return err
 	}
-	if sa, have := s.addressFor(p.Prefix); have {
-		s.AddressID = sa.AddressID
-	} else if _, err := s.AddAddress(ctx, AddressFor(p.Prefix, "")); err != nil {
-		return refuse()
-	}
-
-	// browse: the product pages, and the delivery dates the first one promises for the destination
-	for _, l := range p.Lines {
-		pr, err := s.Product(ctx, l.CatalogItemID)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err == nil && !pr.Purchasable {
-			s.problem("product %s is not purchasable", l.CatalogItemID)
-		}
-	}
-	if dd, err := s.QuoteDelivery(ctx, p.Lines[0].CatalogItemID, p.Prefix); err == nil {
-		switch {
-		case dd.NotServed() && !p.ExpectOutOfArea:
-			s.problem("the product page says %s is not served", p.Prefix)
-		case !dd.NotServed() && p.ExpectOutOfArea:
-			s.problem("the product page quotes %d tier(s) for %s, which the plan expects to be out of area", len(dd.Tiers), p.Prefix)
-		}
-	} else if ctx.Err() != nil {
-		return ctx.Err()
+	if err := s.browse(ctx, p); err != nil {
+		return err
 	}
 
 	// the cart
@@ -286,6 +252,59 @@ func (s *Shopper) buy(ctx context.Context, p Plan, o *Outcome) error {
 		o.Requotes++
 		s.logf("requote %d of %d", o.Requotes, maxRequotes)
 	}
+}
+
+// prepare is who and where: register (signing in when the e-mail is taken),
+// then an address for the destination. A refused step refuses the purchase.
+func (s *Shopper) prepare(ctx context.Context, p Plan, o *Outcome) error {
+	refuse := func() error {
+		o.Status = StatusRefused
+		return ctx.Err()
+	}
+	if s.ShopperID == "" {
+		if _, err := s.Register(ctx); err != nil {
+			if ctx.Err() != nil || !Is(err, "shopper-exists") {
+				return refuse()
+			}
+			if _, err := s.SignIn(ctx); err != nil {
+				return refuse()
+			}
+		}
+		if got := s.State().ShopperID; got != s.ShopperID {
+			s.problem("the sf_state cookie carries shopper %q after registering %q", got, s.ShopperID)
+		}
+	}
+	if sa, have := s.addressFor(p.Prefix); have {
+		s.AddressID = sa.AddressID
+	} else if _, err := s.AddAddress(ctx, AddressFor(p.Prefix, "")); err != nil {
+		return refuse()
+	}
+	return nil
+}
+
+// browse reads the product pages and the delivery dates the first one promises
+// for the destination, recording disagreements with the plan as findings.
+func (s *Shopper) browse(ctx context.Context, p Plan) error {
+	for _, l := range p.Lines {
+		pr, err := s.Product(ctx, l.CatalogItemID)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil && !pr.Purchasable {
+			s.problem("product %s is not purchasable", l.CatalogItemID)
+		}
+	}
+	if dd, err := s.QuoteDelivery(ctx, p.Lines[0].CatalogItemID, p.Prefix); err == nil {
+		switch {
+		case dd.NotServed() && !p.ExpectOutOfArea:
+			s.problem("the product page says %s is not served", p.Prefix)
+		case !dd.NotServed() && p.ExpectOutOfArea:
+			s.problem("the product page quotes %d tier(s) for %s, which the plan expects to be out of area", len(dd.Tiers), p.Prefix)
+		}
+	} else if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
 }
 
 // pass is one run of quote, select, checkout and pay. Because a REQUOTE_REQUIRED session is closed
@@ -349,9 +368,19 @@ func (s *Shopper) pass(ctx context.Context, p Plan, o *Outcome, pay *payState) (
 		return done(StatusRefused)
 	}
 	o.Currency, o.TotalMinor = sess.Currency, sess.TotalMinor
+	return s.paySession(ctx, p, o, pay)
+}
 
+// paySession confirms the checkout session with the payment token — once more
+// with the fallback token after a decline — until the session completes, the
+// stack asks for a requote, or the wait ends in doubt.
+func (s *Shopper) paySession(ctx context.Context, p Plan, o *Outcome, pay *payState) (attempt, error) {
+	done := func(st Status) (attempt, error) {
+		o.Status = st
+		return attemptDone, ctx.Err()
+	}
 	for {
-		sess, err = s.Confirm(ctx, pay.token)
+		sess, err := s.Confirm(ctx, pay.token)
 		if sess.SessionID != "" {
 			o.Currency, o.TotalMinor = sess.Currency, sess.TotalMinor
 			o.AuthorizationID = sess.AuthorizationID

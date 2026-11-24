@@ -89,59 +89,52 @@ func errNotReadied(what string) error {
 	return fmt.Errorf("the %s was never readied: the prepare phase did not complete", what)
 }
 
-// newPhases reads, writes nothing. Everything it needs from the cluster it needs as a read: the
+// loadWireInputs loads and cross-checks the fulfilment-site fixture and the
+// SKU dictionary the day is wired from.
+func loadWireInputs(ctx context.Context, cfg wireConfig) (siteFixture, dictionary, error) {
+	site, err := loadSiteFixture(filepath.Join(cfg.FixtureDir, "fulfilment-site.json"))
+	if err != nil {
+		return siteFixture{}, dictionary{}, err
+	}
+	if site.WarehouseSiteID != cfg.Building || (site.SiteID != "" && site.SiteID != cfg.NetworkSite) {
+		return siteFixture{}, dictionary{}, fmt.Errorf("the fulfilment-site fixture serves %s from %s, the run was given -building %s and -network-site %s", site.SiteID, site.WarehouseSiteID, cfg.Building, cfg.NetworkSite)
+	}
+	dict, err := loadDictionary(ctx, cfg.Client, filepath.Join(cfg.FixtureDir, "catalogue.json"), cfg.NetworkData)
+	if err != nil {
+		return siteFixture{}, dictionary{}, err
+	}
+	cfg.logf("dictionary: %d SKU(s) paired with a catalogue item, %d without", len(dict.ItemBySKU), len(dict.Unresolved))
+	for _, u := range dict.Unresolved {
+		cfg.logf("dictionary: unresolved %s", u)
+	}
+	return site, dict, nil
+}
+
+// newPhases wires the day's real actors behind the day package's phase
+// interfaces. It reads, writes nothing. Everything it needs from the cluster it needs as a read: the
 // SKU dictionary (offer-availability GET /catalog). A fixture or dictionary that does not hold, or a
 // cluster that cannot be read, is an error here, before the day has touched anything.
 func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) {
 	if cfg.Client == nil {
 		return day.Phases{}, nil, errors.New("wire: no client")
 	}
-	site, err := loadSiteFixture(filepath.Join(cfg.FixtureDir, "fulfilment-site.json"))
+	site, dict, err := loadWireInputs(ctx, cfg)
 	if err != nil {
 		return day.Phases{}, nil, err
-	}
-	if site.WarehouseSiteID != cfg.Building || (site.SiteID != "" && site.SiteID != cfg.NetworkSite) {
-		return day.Phases{}, nil, fmt.Errorf("the fulfilment-site fixture serves %s from %s, the run was given -building %s and -network-site %s", site.SiteID, site.WarehouseSiteID, cfg.Building, cfg.NetworkSite)
-	}
-	dict, err := loadDictionary(ctx, cfg.Client, filepath.Join(cfg.FixtureDir, "catalogue.json"), cfg.NetworkData)
-	if err != nil {
-		return day.Phases{}, nil, err
-	}
-	cfg.logf("dictionary: %d SKU(s) paired with a catalogue item, %d without", len(dict.ItemBySKU), len(dict.Unresolved))
-	for _, u := range dict.Unresolved {
-		cfg.logf("dictionary: unresolved %s", u)
 	}
 
 	prefixes := &orderPrefixes{}
 	nodes := &nodeBook{c: cfg.Client, vendorID: cfg.VendorID, networkSite: cfg.NetworkSite, prefixes: prefixes}
 	fl := floor.New(cfg.Client, nil, cfg.ActorLog, cfg.RunID, floorSettings(cfg))
-	tr := transport.New(cfg.Client, transport.SystemClock{}, cfg.ActorLog, transport.Settings{})
-	var point *pointJourney
-	releaseTap := func() {}
-	if cfg.DeliveryPoint {
-		point = newPointJourney(cfg.Log)
-		switch {
-		case cfg.FlagTap != nil:
-			tr.Tap = cfg.FlagTap
-		case cfg.Brokers != "":
-			tap, rel, err := newFlagTap(cfg.Brokers)
-			if err != nil {
-				return day.Phases{}, nil, fmt.Errorf("-delivery-point: -brokers: %w", err)
-			}
-			tr.Tap, releaseTap = tap, rel
-		default:
-			cfg.logf("delivery point: no -brokers, so the DeliveryPointFlagged event is not read; the flag is observed on the order's tracking view only")
-		}
+	tr, point, releaseTap, err := wireTransport(cfg)
+	if err != nil {
+		return day.Phases{}, nil, err
 	}
 	lk := link.New(cfg.Client, linkSettings(cfg))
-	dead, releaseDead := cfg.DeadLetters, func() {}
-	if dead == nil {
-		if dead, releaseDead, err = newDeadLetterCounter(cfg.Brokers); err != nil {
-			return day.Phases{}, nil, fmt.Errorf("-brokers: %w", err)
-		}
+	ev, dead, releaseDead, err := wireEvidence(cfg, dict, lk)
+	if err != nil {
+		return day.Phases{}, nil, err
 	}
-	// the REST collector answers Order and Shelf; the counter answers DeadLetters (no route lists them)
-	ev := evidence{rest: collect.New(cfg.Client, collectSettings(cfg, dict, lk.ForPurchaseOrders)), dead: dead}
 
 	watch := &sim.SuspendWatch{Log: cfg.ActorLog}
 	wctx, stopWatch := context.WithCancel(ctx)
@@ -170,6 +163,44 @@ func newPhases(ctx context.Context, cfg wireConfig) (day.Phases, func(), error) 
 		Prepare: b.prepare,
 		Cleanup: b.cleanup,
 	}, stop, nil
+}
+
+// wireTransport builds the transport actor set, wiring the delivery-point flag
+// tap when the run asks for that chain. The returned func releases the tap.
+func wireTransport(cfg wireConfig) (*transport.Transport, *pointJourney, func(), error) {
+	tr := transport.New(cfg.Client, transport.SystemClock{}, cfg.ActorLog, transport.Settings{})
+	releaseTap := func() {}
+	if !cfg.DeliveryPoint {
+		return tr, nil, releaseTap, nil
+	}
+	point := newPointJourney(cfg.Log)
+	switch {
+	case cfg.FlagTap != nil:
+		tr.Tap = cfg.FlagTap
+	case cfg.Brokers != "":
+		tap, rel, err := newFlagTap(cfg.Brokers)
+		if err != nil {
+			return nil, point, releaseTap, fmt.Errorf("-delivery-point: -brokers: %w", err)
+		}
+		tr.Tap, releaseTap = tap, rel
+	default:
+		cfg.logf("delivery point: no -brokers, so the DeliveryPointFlagged event is not read; the flag is observed on the order's tracking view only")
+	}
+	return tr, point, releaseTap, nil
+}
+
+// wireEvidence builds the day's evidence: the REST collector answers Order and
+// Shelf, the dead-letter counter answers DeadLetters (no route lists them).
+// The returned func releases the counter.
+func wireEvidence(cfg wireConfig, dict dictionary, lk *link.Linker) (evidence, deadLetterCounter, func(), error) {
+	dead, releaseDead := cfg.DeadLetters, func() {}
+	if dead == nil {
+		var err error
+		if dead, releaseDead, err = newDeadLetterCounter(cfg.Brokers); err != nil {
+			return evidence{}, dead, releaseDead, fmt.Errorf("-brokers: %w", err)
+		}
+	}
+	return evidence{rest: collect.New(cfg.Client, collectSettings(cfg, dict, lk.ForPurchaseOrders)), dead: dead}, dead, releaseDead, nil
 }
 
 // floorSettings: the floor works for the storefront's building (an order that reaches it without that

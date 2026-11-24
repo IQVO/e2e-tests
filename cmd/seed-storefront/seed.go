@@ -49,87 +49,148 @@ const errNetworkFirst = "run the retail-network seed first (warehouse-infra: pyt
 
 // Run executes CHECK -> PLAN -> APPLY -> VERIFY. Nothing is written before CHECK and PLAN passed.
 func Run(ctx context.Context, cfg Config) (*Result, error) {
+	c, logf := newRun(cfg)
+	res := &Result{}
+
+	// ---- CHECK: inputs ----
+	fx, phys, titles, err := checkInputs(cfg)
+	if err != nil {
+		return res, err
+	}
+	logf("check: fixture %d products in %d departments, currency %s; network data %s", len(fx.Products), len(fx.Departments), fx.Currency, cfg.NetworkDataPath)
+
+	// ---- CHECK: the WMS side of the promise (the fulfilment site's CPT schedule) ----
+	site, cpt, building, err := checkWMSSide(ctx, c, cfg, logf)
+	if err != nil {
+		return res, err
+	}
+	if cfg.WMSOnly {
+		return runWMSOnly(ctx, c, cfg, fixtureSKUs(fx), site, cpt, building, res, logf)
+	}
+
+	// ---- CHECK: catalogue items by exact title ----
+	desired, err := checkCatalogue(ctx, c, cfg, fx, phys, titles, logf)
+	if err != nil {
+		return res, err
+	}
+
+	// ---- CHECK: observed storefront state ----
+	obs, err := observeStage(ctx, c, desired, site, cpt, building)
+	if err != nil {
+		return res, err
+	}
+
+	// ---- PLAN ----
+	plan := BuildPlan(*desired, *obs)
+	res.Plan = plan
+	logPlan(plan, logf)
+	if cfg.DryRun {
+		return dryRunExit(res, plan, logf)
+	}
+
+	// ---- APPLY ----
+	var cptWritten time.Time
+	if !cfg.VerifyOnly {
+		cptWritten, err = writeStage(ctx, c, plan, site, obs, fx, res, logf)
+		if err != nil {
+			return res, err
+		}
+	}
+
+	// ---- VERIFY ----
+	if err := verifyStage(ctx, c, cfg, site, desired, fx, plan, cptWritten, res, logf); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// newRun builds a run's client (read-only in a dry run or a verify-only run)
+// and its line logger.
+func newRun(cfg Config) (*client, func(string, ...any)) {
 	out := cfg.Out
 	if out == nil {
 		out = os.Stdout
 	}
 	logf := func(format string, args ...any) { fmt.Fprintf(out, format+"\n", args...) }
-	readOnly := cfg.DryRun || cfg.VerifyOnly
-	c := newClient(cfg.BaseURL, cfg.StorefrontURL, cfg.HTTP, readOnly)
-	res := &Result{}
+	return newClient(cfg.BaseURL, cfg.StorefrontURL, cfg.HTTP, cfg.DryRun || cfg.VerifyOnly), logf
+}
 
-	// ---- CHECK: inputs ----
-	fx, err := LoadFixture(cfg.FixturePath)
+// checkInputs loads the three data inputs and cross-validates the fixture
+// against the real product and network data.
+func checkInputs(cfg Config) (fx *Fixture, phys map[string]PhysicalProduct, titles map[string]string, err error) {
+	fx, err = LoadFixture(cfg.FixturePath)
 	if err != nil {
-		return res, err
+		return nil, nil, nil, err
 	}
-	phys, err := LoadPhysical(cfg.ProductsPath)
+	phys, err = LoadPhysical(cfg.ProductsPath)
 	if err != nil {
-		return res, err
+		return nil, nil, nil, err
 	}
-	titles, err := LoadNetworkTitles(cfg.NetworkDataPath)
+	titles, err = LoadNetworkTitles(cfg.NetworkDataPath)
 	if err != nil {
-		return res, fmt.Errorf("check: %w", err)
+		return nil, nil, nil, fmt.Errorf("check: %w", err)
 	}
 	if problems := fx.Validate(phys, titles); len(problems) > 0 {
-		return res, fmt.Errorf("check: the fixture is inconsistent with the real data (%d problems):\n  %s", len(problems), strings.Join(problems, "\n  "))
+		return nil, nil, nil, fmt.Errorf("check: the fixture is inconsistent with the real data (%d problems):\n  %s", len(problems), strings.Join(problems, "\n  "))
 	}
-	logf("check: fixture %d products in %d departments, currency %s; network data %s", len(fx.Products), len(fx.Departments), fx.Currency, cfg.NetworkDataPath)
+	return fx, phys, titles, nil
+}
 
-	// ---- CHECK: the WMS side of the promise (the fulfilment site's CPT schedule) ----
-	site, err := LoadSiteFixture(cfg.SitePath)
+// checkWMSSide validates the WMS half of the promise: the fulfilment site's
+// fixture, its agreement with the network's node profile, the Active process
+// paths its cutoffs name, and the CPT schedules already in force for the site
+// and the warehouse building that serves it.
+func checkWMSSide(ctx context.Context, c *client, cfg Config, logf func(string, ...any)) (site *SiteFixture, cpt, building *CPTSchedule, err error) {
+	site, err = LoadSiteFixture(cfg.SitePath)
 	if err != nil {
-		return res, fmt.Errorf("check: %w", err)
+		return nil, nil, nil, fmt.Errorf("check: %w", err)
 	}
 	if problems := site.Validate(); len(problems) > 0 {
-		return res, fmt.Errorf("check: the fulfilment-site fixture %s is invalid (%d problems):\n  %s", cfg.SitePath, len(problems), strings.Join(problems, "\n  "))
+		return nil, nil, nil, fmt.Errorf("check: the fulfilment-site fixture %s is invalid (%d problems):\n  %s", cfg.SitePath, len(problems), strings.Join(problems, "\n  "))
 	}
 	node, err := LoadNodeProfile(cfg.NetworkDataPath, site.SiteID)
 	if err != nil {
-		return res, fmt.Errorf("check: %w", err)
+		return nil, nil, nil, fmt.Errorf("check: %w", err)
 	}
 	if problems := site.AgreeWith(node); len(problems) > 0 {
-		return res, fmt.Errorf("check: the CPT schedule of %s disagrees with the network's node profile (%s); both declare the same node, fix the one that is wrong:\n  %s", cfg.SitePath, cfg.NetworkDataPath, strings.Join(problems, "\n  "))
+		return nil, nil, nil, fmt.Errorf("check: the CPT schedule of %s disagrees with the network's node profile (%s); both declare the same node, fix the one that is wrong:\n  %s", cfg.SitePath, cfg.NetworkDataPath, strings.Join(problems, "\n  "))
 	}
 	active, err := readActivePaths(ctx, c)
 	if err != nil {
-		return res, fmt.Errorf("check: process-path-management process paths: %w", err)
+		return nil, nil, nil, fmt.Errorf("check: process-path-management process paths: %w", err)
 	}
 	for _, ct := range site.Cutoffs {
 		for _, p := range ct.EligiblePathIDs {
 			if !active[p] {
-				return res, fmt.Errorf("check: cutoff %s names process path %q, which is not an Active path in process-path-management (seed the paths: scripts/seed-process-paths.sh); nothing written", ct.CptID, p)
+				return nil, nil, nil, fmt.Errorf("check: cutoff %s names process path %q, which is not an Active path in process-path-management (seed the paths: scripts/seed-process-paths.sh); nothing written", ct.CptID, p)
 			}
 		}
 	}
-	cpt, err := observeCPT(ctx, c, site.SiteID)
+	cpt, err = observeCPT(ctx, c, site.SiteID)
 	if err != nil {
-		return res, fmt.Errorf("check: process-path-management CPT schedule of %s: %w", site.SiteID, err)
+		return nil, nil, nil, fmt.Errorf("check: process-path-management CPT schedule of %s: %w", site.SiteID, err)
 	}
 	logf("check: fulfilment site %s: CPT schedule %s agrees with the network node profile; eligible paths Active", site.SiteID, describeSchedule(site.Timezone, site.Cutoffs))
 	// the warehouse building serving the node (ADR 0001 D1): the same schedule under its own id,
 	// and only for a site facility-layout knows (never created here)
 	fsite, err := checkWarehouseSite(ctx, c, site, cfg.SitePath)
 	if err != nil {
-		return res, fmt.Errorf("check: %w", err)
+		return nil, nil, nil, fmt.Errorf("check: %w", err)
 	}
-	building, err := observeCPT(ctx, c, site.WarehouseSiteID)
+	building, err = observeCPT(ctx, c, site.WarehouseSiteID)
 	if err != nil {
-		return res, fmt.Errorf("check: process-path-management CPT schedule of %s: %w", site.WarehouseSiteID, err)
+		return nil, nil, nil, fmt.Errorf("check: process-path-management CPT schedule of %s: %w", site.WarehouseSiteID, err)
 	}
 	logf("check: warehouse building %s (serves node %s): facility-layout knows the site (%s); it carries the same CPT schedule as the node, one list of cutoffs for both ids", site.WarehouseSiteID, site.SiteID, fsite.Status)
-	if cfg.WMSOnly {
-		skus := make([]string, 0, len(fx.Products))
-		for _, p := range fx.Products {
-			skus = append(skus, p.SKU)
-		}
-		return runWMSOnly(ctx, c, cfg, skus, site, cpt, building, res, logf)
-	}
+	return site, cpt, building, nil
+}
 
-	// ---- CHECK: catalogue items by exact title ----
+// checkCatalogue resolves the fixture products to ACTIVE offer-availability
+// catalogue items by exact title and derives their desired content.
+func checkCatalogue(ctx context.Context, c *client, cfg Config, fx *Fixture, phys map[string]PhysicalProduct, titles map[string]string, logf func(string, ...any)) (*Desired, error) {
 	catalog, err := readCatalog(ctx, c)
 	if err != nil {
-		return res, fmt.Errorf("check: offer-availability catalogue: %w", err)
+		return nil, fmt.Errorf("check: offer-availability catalogue: %w", err)
 	}
 	byTitle := map[string][]CatalogItem{}
 	for _, it := range catalog {
@@ -137,21 +198,46 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 	desired, missing := buildDesired(fx, phys, titles, byTitle, cfg.MediaBase)
 	if len(missing) > 0 {
-		return res, fmt.Errorf("check: %d of %d storefront products have no usable catalogue item, nothing written; %s:\n  %s",
+		return nil, fmt.Errorf("check: %d of %d storefront products have no usable catalogue item, nothing written; %s:\n  %s",
 			len(missing), len(fx.Products), errNetworkFirst, strings.Join(missing, "\n  "))
 	}
 	logf("check: %d products resolved to ACTIVE catalogue items by title (%d catalogue items read)", len(desired.Products), len(catalog))
+	return desired, nil
+}
 
-	// ---- CHECK: observed storefront state ----
+// observeStage reads the current storefront state of everything the desired
+// state names and pins the WMS side of the promise (the site and both CPT
+// schedules) onto it.
+func observeStage(ctx context.Context, c *client, desired *Desired, site *SiteFixture, cpt, building *CPTSchedule) (*Observed, error) {
 	obs, err := observe(ctx, c, desired)
 	if err != nil {
-		return res, fmt.Errorf("check: %w", err)
+		return nil, fmt.Errorf("check: %w", err)
 	}
 	desired.Site, obs.CPT, obs.Building = site, cpt, building
+	return obs, nil
+}
 
-	// ---- PLAN ----
-	plan := BuildPlan(*desired, *obs)
-	res.Plan = plan
+// dryRunExit is the dry run's outcome: nothing was written; blocked products
+// still fail it.
+func dryRunExit(res *Result, plan *Plan, logf func(string, ...any)) (*Result, error) {
+	logf("dry run: nothing written")
+	if len(plan.Blocked) > 0 {
+		return res, fmt.Errorf("plan: %d products are blocked (see BLOCKED above)", len(plan.Blocked))
+	}
+	return res, nil
+}
+
+// fixtureSKUs lists the fixture's SKUs in fixture order.
+func fixtureSKUs(fx *Fixture) []string {
+	skus := make([]string, 0, len(fx.Products))
+	for _, p := range fx.Products {
+		skus = append(skus, p.SKU)
+	}
+	return skus
+}
+
+// logPlan prints the plan summary (and its blocked products, if any).
+func logPlan(plan *Plan, logf func(string, ...any)) {
 	logf("plan:")
 	for _, l := range plan.Summary() {
 		logf("  %s", l)
@@ -159,32 +245,29 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	for _, b := range plan.Blocked {
 		logf("  BLOCKED %s", b)
 	}
-	if cfg.DryRun {
-		logf("dry run: nothing written")
-		if len(plan.Blocked) > 0 {
-			return res, fmt.Errorf("plan: %d products are blocked (see BLOCKED above)", len(plan.Blocked))
-		}
-		return res, nil
-	}
+}
 
-	// ---- APPLY ----
+// writeStage applies the plan — the WMS CPT schedules first, the storefront
+// tier second — and returns the moment the CPT write landed.
+func writeStage(ctx context.Context, c *client, plan *Plan, site *SiteFixture, obs *Observed, fx *Fixture, res *Result, logf func(string, ...any)) (time.Time, error) {
 	var cptWritten time.Time
-	if !cfg.VerifyOnly {
-		start := time.Now()
-		var err error
-		// the WMS step first: the promise of every storefront product depends on it
-		cptWritten, err = applyCPTSchedules(ctx, c, plan, site, logf)
-		if err == nil {
-			err = apply(ctx, c, plan, obs.Tree, fx.Currency)
-		}
-		res.Writes, res.WritesByKey = c.totalWrites(), c.writes
-		logf("apply: %d writes in %s (%s)", res.Writes, time.Since(start).Round(time.Millisecond), c.writeSummary())
-		if err != nil {
-			return res, fmt.Errorf("apply: %w (re-run: every write is keyed by its natural key and converges)", err)
-		}
+	start := time.Now()
+	var err error
+	// the WMS step first: the promise of every storefront product depends on it
+	cptWritten, err = applyCPTSchedules(ctx, c, plan, site, logf)
+	if err == nil {
+		err = apply(ctx, c, plan, obs.Tree, fx.Currency)
 	}
+	res.Writes, res.WritesByKey = c.totalWrites(), c.writes
+	logf("apply: %d writes in %s (%s)", res.Writes, time.Since(start).Round(time.Millisecond), c.writeSummary())
+	if err != nil {
+		return cptWritten, fmt.Errorf("apply: %w (re-run: every write is keyed by its natural key and converges)", err)
+	}
+	return cptWritten, nil
+}
 
-	// ---- VERIFY ----
+// verifyStage reads the storefront back and judges it; the report lands in res.
+func verifyStage(ctx context.Context, c *client, cfg Config, site *SiteFixture, desired *Desired, fx *Fixture, plan *Plan, cptWritten time.Time, res *Result, logf func(string, ...any)) error {
 	skus := make([]string, 0, len(desired.Products))
 	for _, p := range desired.Products {
 		skus = append(skus, p.SKU)
@@ -192,7 +275,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	offers := verifyOffers(ctx, c, site.SiteID, skus, cptWritten, cfg)
 	tree := CategoryTree{}
 	if err := c.get(ctx, c.base+"/product-content/categories", &tree); err != nil {
-		return res, fmt.Errorf("verify: %w", err)
+		return fmt.Errorf("verify: %w", err)
 	}
 	rep := verify(ctx, c, desired, fx, tree, cfg)
 	rep.Offers = offers
@@ -207,12 +290,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		logf("%s", l)
 	}
 	if !rep.OK() {
-		return res, fmt.Errorf("verify failed: %s", strings.Join(rep.Failures, "; "))
+		return fmt.Errorf("verify failed: %s", strings.Join(rep.Failures, "; "))
 	}
 	if len(plan.Blocked) > 0 {
-		return res, fmt.Errorf("%d products are blocked (see BLOCKED above)", len(plan.Blocked))
+		return fmt.Errorf("%d products are blocked (see BLOCKED above)", len(plan.Blocked))
 	}
-	return res, nil
+	return nil
 }
 
 // readCatalog pages through offer-availability GET /catalog, following nextCursor until it is absent.
@@ -318,6 +401,21 @@ func observe(ctx context.Context, c *client, d *Desired) (*Observed, error) {
 // (parents first), prices, contents (create or revise, then publish). It stops at the first
 // failure: a re-run reads the new state and converges.
 func apply(ctx context.Context, c *client, p *Plan, tree CategoryTree, currency string) error {
+	if err := applyPricing(ctx, c, p); err != nil {
+		return err
+	}
+	idx, err := applyCategories(ctx, c, p, tree)
+	if err != nil {
+		return err
+	}
+	if err := applyPrices(ctx, c, p, currency); err != nil {
+		return err
+	}
+	return applyContents(ctx, c, p, idx)
+}
+
+// applyPricing publishes the tax table and the delivery charge schedule.
+func applyPricing(ctx context.Context, c *client, p *Plan) error {
 	if p.TaxTable != nil {
 		body := struct {
 			Version int       `json:"version"`
@@ -336,7 +434,12 @@ func apply(ctx context.Context, c *client, p *Plan, tree CategoryTree, currency 
 			return fmt.Errorf("publish delivery charge schedule v%d: %w", p.ChargeSchedule.Version, err)
 		}
 	}
+	return nil
+}
 
+// applyCategories creates the plan's categories, parents first, and returns the
+// path index the contents step resolves category ids through.
+func applyCategories(ctx context.Context, c *client, p *Plan, tree CategoryTree) (map[string]Category, error) {
 	idx := treeIndex(tree)
 	for _, cs := range p.Categories {
 		body := struct {
@@ -346,20 +449,25 @@ func apply(ctx context.Context, c *client, p *Plan, tree CategoryTree, currency 
 		if cs.ParentPath != "" {
 			parent, ok := idx[strings.ToLower(cs.ParentPath)]
 			if !ok {
-				return fmt.Errorf("category %q: parent %q was not created", cs.Path, cs.ParentPath)
+				return nil, fmt.Errorf("category %q: parent %q was not created", cs.Path, cs.ParentPath)
 			}
 			body.ParentID = &parent.CategoryID
 		}
 		var created Category
 		if err := c.write(ctx, "category", "/product-content/categories", body, nil, &created, http.StatusCreated); err != nil {
-			return fmt.Errorf("create category %q: %w", cs.Path, err)
+			return nil, fmt.Errorf("create category %q: %w", cs.Path, err)
 		}
 		if created.Path == "" {
 			created.Path = cs.Path
 		}
 		idx[strings.ToLower(cs.Path)] = created
 	}
+	return idx, nil
+}
 
+// applyPrices creates the plan's new item prices and replaces the list price of
+// the existing ones.
+func applyPrices(ctx context.Context, c *client, p *Plan, currency string) error {
 	for _, pa := range p.Prices {
 		price := Money{AmountMinor: pa.AmountMinor, Currency: currency}
 		if pa.Create {
@@ -382,7 +490,12 @@ func apply(ctx context.Context, c *client, p *Plan, tree CategoryTree, currency 
 			return fmt.Errorf("set list price of %s: %w", pa.SKU, err)
 		}
 	}
+	return nil
+}
 
+// applyContents creates or revises the plan's product contents and publishes the
+// ones the plan marks for publication.
+func applyContents(ctx context.Context, c *client, p *Plan, idx map[string]Category) error {
 	for _, ca := range p.Contents {
 		cat, ok := idx[strings.ToLower(ca.CategoryPath)]
 		if !ok {
